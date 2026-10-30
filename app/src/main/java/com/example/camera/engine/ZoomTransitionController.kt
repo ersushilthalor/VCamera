@@ -40,7 +40,7 @@ data class PreviewOverlapState(
  *
  * Replaces the custom zoom transition and separate animation systems with the actual
  * zoom slider logic running programmatically in the background:
- * 1. Fixed duration of EXACTLY 300ms (0.30 seconds) for all continuous background slider movements.
+ * 1. Uses the requested transition duration; Video and Pro Video provide a fixed 300ms duration.
  * 2. Uses the actual zoom slider logarithmic mapping (from HorizontalRulerZoomSlider) to smoothly
  *    interpolate from startZoom to targetZoom.
  * 3. Reuses the existing camera slider functionality (via onApplyZoomToEngine) which directly applies
@@ -55,7 +55,8 @@ class ZoomTransitionController(
 ) {
     companion object {
         private const val TAG = "ZoomTransitionCtrl"
-        const val TOTAL_TRANSITION_DURATION_MS = 300L // Fixed duration of exactly 300ms (0.30s) for every zoom transition
+        const val TOTAL_TRANSITION_DURATION_MS = 400L // Existing default duration for non-video camera modes
+        const val VIDEO_TRANSITION_DURATION_MS = 300L // Fixed duration for Video and Pro Video
         const val DEFAULT_HOLD_AT_ONE_X_DURATION_MS = 200L // Default hold at exact 1x FOV before physical switch
         const val HOLD_AT_ONE_X_DURATION_MS = 20L // Preserved for backwards compatibility
         const val MIN_HOLD_AT_ONE_X_DURATION_MS = 0L
@@ -143,13 +144,13 @@ class ZoomTransitionController(
             (1000L / fps.coerceAtLeast(1).toLong()).coerceIn(16L, 42L)
 
         /**
-         * Retains the legacy call signature, but recording resolution/FPS must never stretch
-         * the user's zoom animation. FPS is used only for camera-request pacing.
+         * Preserve the duration selected by the caller. Recording FPS controls only camera
+         * request pacing and must never multiply the requested zoom-animation duration.
          */
         fun framePacedTransitionDurationMs(
-            @Suppress("UNUSED_PARAMETER") durationMs: Long,
+            durationMs: Long,
             @Suppress("UNUSED_PARAMETER") fps: Int
-        ): Long = TOTAL_TRANSITION_DURATION_MS
+        ): Long = durationMs.coerceAtLeast(1L)
 
         /**
          * Moderate start, fast middle, and a deliberately slow finish.
@@ -453,7 +454,7 @@ class ZoomTransitionController(
 
     /**
      * Executes the zoom transition by running the actual zoom slider logic in the background:
-     * - Runs over exactly 0.3 seconds (300ms), regardless of zoom distance or recording FPS.
+     * - Uses the caller's duration regardless of zoom distance or recording FPS.
      * - Uses the zoom slider's normalized logarithmic scale from [HorizontalRulerZoomSlider].
      * - Reuses the existing camera slider functionality without requiring user interaction or visibly
      *   moving the UI slider.
@@ -468,7 +469,7 @@ class ZoomTransitionController(
         currentLens: LensInfo?,
         switchPointMm: Float,
         scope: CoroutineScope,
-        @Suppress("UNUSED_PARAMETER") durationMs: Long = TOTAL_TRANSITION_DURATION_MS,
+        durationMs: Long = TOTAL_TRANSITION_DURATION_MS,
         skipHoldAtSwitchPoint: Boolean = false,
         frameIntervalMs: Long = 16L,
         onZoomUpdate: (Float) -> Unit,
@@ -476,9 +477,9 @@ class ZoomTransitionController(
     ): Job {
         cancelTransition()
 
-        // Zoom animation duration is fixed. Recording FPS may change request cadence only;
+        // Honor the duration selected by the caller. Recording FPS may change request cadence only;
         // it must never make a farther zoom move take longer than a nearer one.
-        val transitionDurationMs = TOTAL_TRANSITION_DURATION_MS
+        val transitionDurationMs = durationMs.coerceAtLeast(1L)
         val transitionFrameIntervalMs = frameIntervalMs.coerceIn(16L, 42L)
 
         val job = scope.launch(Dispatchers.Main.immediate) {
@@ -888,7 +889,7 @@ class ZoomTransitionController(
                 isFrameBasedHandoffEligible(startZ, endZ)
             var reverseFrameBasedHandoffStarted = false
 
-            // Move the slider in the background from startNorm to targetNorm over exactly 300ms (0.30s)
+            // Move the slider over the fixed duration selected by the calling camera mode.
             while (isActive) {
                 val now = SystemClock.uptimeMillis()
                 val elapsed = now - startTime
@@ -931,7 +932,7 @@ class ZoomTransitionController(
                 }
             }
 
-            // Guarantee the fixed 300ms (0.30s) duration
+            // Guarantee the requested transition duration
             val totalElapsed = SystemClock.uptimeMillis() - startTime
             if (totalElapsed < transitionDurationMs) {
                 delay(transitionDurationMs - totalElapsed)
