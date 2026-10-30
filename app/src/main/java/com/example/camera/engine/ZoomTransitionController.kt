@@ -40,7 +40,7 @@ data class PreviewOverlapState(
  *
  * Replaces the custom zoom transition and separate animation systems with the actual
  * zoom slider logic running programmatically in the background:
- * 1. Fixed duration of EXACTLY 400ms (0.40 seconds) for all continuous background slider movements.
+ * 1. Fixed duration of EXACTLY 300ms (0.30 seconds) for all continuous background slider movements.
  * 2. Uses the actual zoom slider logarithmic mapping (from HorizontalRulerZoomSlider) to smoothly
  *    interpolate from startZoom to targetZoom.
  * 3. Reuses the existing camera slider functionality (via onApplyZoomToEngine) which directly applies
@@ -55,7 +55,7 @@ class ZoomTransitionController(
 ) {
     companion object {
         private const val TAG = "ZoomTransitionCtrl"
-        const val TOTAL_TRANSITION_DURATION_MS = 400L // Fixed duration of exactly 400ms (0.40s), never less
+        const val TOTAL_TRANSITION_DURATION_MS = 300L // Fixed duration of exactly 300ms (0.30s) for every zoom transition
         const val DEFAULT_HOLD_AT_ONE_X_DURATION_MS = 200L // Default hold at exact 1x FOV before physical switch
         const val HOLD_AT_ONE_X_DURATION_MS = 20L // Preserved for backwards compatibility
         const val MIN_HOLD_AT_ONE_X_DURATION_MS = 0L
@@ -143,11 +143,13 @@ class ZoomTransitionController(
             (1000L / fps.coerceAtLeast(1).toLong()).coerceIn(16L, 42L)
 
         /**
-         * Preserve about 24 recorded frames for an animated zoom transition.
-         * This helper is used only when a 4K video/cinema mode is selected.
+         * Retains the legacy call signature, but recording resolution/FPS must never stretch
+         * the user's zoom animation. FPS is used only for camera-request pacing.
          */
-        fun framePacedTransitionDurationMs(durationMs: Long, fps: Int): Long =
-            maxOf(TOTAL_TRANSITION_DURATION_MS, durationMs, frameIntervalMsForFps(fps) * 24L)
+        fun framePacedTransitionDurationMs(
+            @Suppress("UNUSED_PARAMETER") durationMs: Long,
+            @Suppress("UNUSED_PARAMETER") fps: Int
+        ): Long = TOTAL_TRANSITION_DURATION_MS
 
         /**
          * Moderate start, fast middle, and a deliberately slow finish.
@@ -451,7 +453,7 @@ class ZoomTransitionController(
 
     /**
      * Executes the zoom transition by running the actual zoom slider logic in the background:
-     * - Runs over exactly 0.4 seconds (400ms), never less.
+     * - Runs over exactly 0.3 seconds (300ms), regardless of zoom distance or recording FPS.
      * - Uses the zoom slider's normalized logarithmic scale from [HorizontalRulerZoomSlider].
      * - Reuses the existing camera slider functionality without requiring user interaction or visibly
      *   moving the UI slider.
@@ -466,7 +468,7 @@ class ZoomTransitionController(
         currentLens: LensInfo?,
         switchPointMm: Float,
         scope: CoroutineScope,
-        durationMs: Long = TOTAL_TRANSITION_DURATION_MS,
+        @Suppress("UNUSED_PARAMETER") durationMs: Long = TOTAL_TRANSITION_DURATION_MS,
         skipHoldAtSwitchPoint: Boolean = false,
         frameIntervalMs: Long = 16L,
         onZoomUpdate: (Float) -> Unit,
@@ -474,9 +476,9 @@ class ZoomTransitionController(
     ): Job {
         cancelTransition()
 
-        // Default transitions keep their existing timing. High-resolution recording may supply
-        // a frame-paced duration and interval so Camera2 isn't flooded with redundant zoom requests.
-        val transitionDurationMs = maxOf(TOTAL_TRANSITION_DURATION_MS, durationMs)
+        // Zoom animation duration is fixed. Recording FPS may change request cadence only;
+        // it must never make a farther zoom move take longer than a nearer one.
+        val transitionDurationMs = TOTAL_TRANSITION_DURATION_MS
         val transitionFrameIntervalMs = frameIntervalMs.coerceIn(16L, 42L)
 
         val job = scope.launch(Dispatchers.Main.immediate) {
@@ -523,6 +525,17 @@ class ZoomTransitionController(
                 ultraWideLens != null && mainWideLens != null &&
                 (targetLens == null || targetLens.isPrimaryMain || targetLens.lensType == LensType.WIDE || targetLens.lensType == LensType.TELEPHOTO || targetLens.lensType == LensType.TELEPHOTO_3X)
             val isDirectHalfXToTelephotoPreset = isHalfXToTelephotoPresetTransition(startZ, endZ)
+            // The 1x handoff hold is part of the fixed 300ms budget, not extra time after it.
+            val holdDuration = if (skipHoldAtSwitchPoint || isDirectHalfXToTelephotoPreset) {
+                0L
+            } else {
+                holdAtOneXDurationMs.coerceIn(MIN_HOLD_AT_ONE_X_DURATION_MS, MAX_HOLD_AT_ONE_X_DURATION_MS)
+            }
+            val transitionMotionDurationMs = if (isUltraWideToMainSwitch) {
+                (transitionDurationMs - holdDuration).coerceAtLeast(1L)
+            } else {
+                transitionDurationMs
+            }
 
             if (isUltraWideToMainSwitch) {
                 // 1. Keep view on Ultra-Wide lens; digitally crop Ultra-Wide to the selected focal length (effectiveSwitchZoom)
@@ -557,7 +570,7 @@ class ZoomTransitionController(
                         // Absolute deadlines prevent callback/camera latency from accumulating.
                         // The physical handoff still occurs exactly at 1.00x with no extra hold.
                         val stepCount = ((endZ - startZ) / 0.05f).roundToInt().coerceAtLeast(1)
-                        val targetElapsedMs = calculateZoomTransitionElapsedTimestamps(stepCount, transitionDurationMs)
+                        val targetElapsedMs = calculateZoomTransitionElapsedTimestamps(stepCount, transitionMotionDurationMs)
                         for (stepIndex in 0..stepCount) {
                             if (!isActive) break
                             val deadline = startTime + targetElapsedMs[stepIndex]
@@ -597,9 +610,9 @@ class ZoomTransitionController(
                         while (isActive) {
                             val now = SystemClock.uptimeMillis()
                             val elapsed = now - startTime
-                            if (elapsed >= transitionDurationMs) break
+                            if (elapsed >= transitionMotionDurationMs) break
 
-                            val linearProgress = (elapsed.toDouble() / transitionDurationMs.toDouble()).coerceIn(0.0, 1.0)
+                            val linearProgress = (elapsed.toDouble() / transitionMotionDurationMs.toDouble()).coerceIn(0.0, 1.0)
                             val smoothProgress = easeZoomTransitionProgress(linearProgress)
                             val currentNorm = (startNorm + (endNorm - startNorm) * smoothProgress).toFloat().coerceIn(0f, 1f)
                             val rawZoom = normalizedToZoomLog(currentNorm, minZoom, maxZoom)
@@ -642,15 +655,15 @@ class ZoomTransitionController(
                                 }
                             }
 
-                            val nextTick = minOf(startTime + transitionDurationMs, now + transitionFrameIntervalMs)
+                            val nextTick = minOf(startTime + transitionMotionDurationMs, now + transitionFrameIntervalMs)
                             val waitMs = nextTick - SystemClock.uptimeMillis()
                             if (waitMs > 0) delay(waitMs)
                         }
                     }
 
                     val totalElapsed = SystemClock.uptimeMillis() - startTime
-                    if (totalElapsed < transitionDurationMs) {
-                        delay(transitionDurationMs - totalElapsed)
+                    if (totalElapsed < transitionMotionDurationMs) {
+                        delay(transitionMotionDurationMs - totalElapsed)
                     }
 
                     // Fail safe: a very unusual zoom mapping must not leave the physical lens unchanged.
@@ -679,11 +692,11 @@ class ZoomTransitionController(
 
                 // Allocate duration proportionally if transitioning further beyond switch point
                 val uwPhaseDurationMs = if (isTargetNearSwitch) {
-                    transitionDurationMs
+                    transitionMotionDurationMs
                 } else {
                     val totalSpan = abs(endNorm - startNorm).coerceAtLeast(0.001f)
                     val uwSpan = abs(switchNorm - startNorm)
-                    ((uwSpan / totalSpan) * transitionDurationMs.toFloat()).toLong().coerceIn(60L, transitionDurationMs)
+                    ((uwSpan / totalSpan) * transitionMotionDurationMs.toFloat()).toLong().coerceIn(60L, transitionMotionDurationMs)
                 }
 
                 val startTime = SystemClock.uptimeMillis()
@@ -743,11 +756,7 @@ class ZoomTransitionController(
                 // Direct 2x/3x telephoto preset taps must never pause at the lens handoff,
                 // even if the caller forgets the skip flag. A deliberate 1x tap keeps its hold.
                 val isDirectTelephotoTarget = isDirectHalfXToTelephotoPreset
-                val holdDuration = if (skipHoldAtSwitchPoint || isDirectHalfXToTelephotoPreset) {
-                    0L
-                } else {
-                    holdAtOneXDurationMs.coerceIn(MIN_HOLD_AT_ONE_X_DURATION_MS, MAX_HOLD_AT_ONE_X_DURATION_MS)
-                }
+                // Use the hold duration already deducted from the 300ms motion budget.
 
                 val useFrameBasedHandoff = !usesHoldTimeHandoff &&
                     isOverlapAnimationEnabled && isFrameBasedHandoffEligible(startZ, endZ)
@@ -825,7 +834,7 @@ class ZoomTransitionController(
                     return@launch
                 } else {
                     // Target is beyond switch point: smoothly continue on Main lens from effectiveSwitchZoom to endZ
-                    val mainPhaseDurationMs = (transitionDurationMs - uwPhaseDurationMs).coerceAtLeast(60L)
+                    val mainPhaseDurationMs = (transitionMotionDurationMs - uwPhaseDurationMs).coerceAtLeast(1L)
                     val mainStartTime = SystemClock.uptimeMillis()
                     lastDispatchedZoom = effectiveSwitchZoom
                     lastDispatchedTime = 0L
@@ -879,7 +888,7 @@ class ZoomTransitionController(
                 isFrameBasedHandoffEligible(startZ, endZ)
             var reverseFrameBasedHandoffStarted = false
 
-            // Move the slider in the background from startNorm to targetNorm over exactly 400ms (0.40s)
+            // Move the slider in the background from startNorm to targetNorm over exactly 300ms (0.30s)
             while (isActive) {
                 val now = SystemClock.uptimeMillis()
                 val elapsed = now - startTime
@@ -922,7 +931,7 @@ class ZoomTransitionController(
                 }
             }
 
-            // Guarantee exact duration of 400ms (0.40s), never less
+            // Guarantee the fixed 300ms (0.30s) duration
             val totalElapsed = SystemClock.uptimeMillis() - startTime
             if (totalElapsed < transitionDurationMs) {
                 delay(transitionDurationMs - totalElapsed)
