@@ -1686,16 +1686,16 @@ class Camera2Engine(private val context: Context) {
     private val _actualEisHardwareActive = MutableStateFlow(false)
     val actualEisHardwareActive: StateFlow<Boolean> = _actualEisHardwareActive.asStateFlow()
 
-    // OIS is a separate hardware feature; never gate it on old hybrid/EIS preferences.
+    // OIS is permanently requested ON. Legacy UI/preferences cannot disable the hardware request.
     val isOisAllowed: Boolean
-        get() = preferences.isOisEnabled
+        get() = true
 
     var isOisEnabled: Boolean
-        get() = preferences.isOisEnabled
-        set(value) {
-            preferences.isOisEnabled = value
+        get() = true
+        set(@Suppress("UNUSED_PARAMETER") value) {
+            preferences.isOisEnabled = true
             val current = _hybridStabilizationConfig.value
-            _hybridStabilizationConfig.value = current.copy(isOisPreferred = value, isOisEnabled = value)
+            _hybridStabilizationConfig.value = current.copy(isOisPreferred = true, isOisEnabled = true)
             updatePreviewSettings()
         }
 
@@ -4798,7 +4798,6 @@ class Camera2Engine(private val context: Context) {
             // user enables it. Repair the live repeating request once, without reopening camera.
             if (isOisAllowed &&
                 requestedOisMode != CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON &&
-                isOisSupportedForActiveLens() &&
                 nowMs - lastOisForceOnTimeMs >= 500L
             ) {
                 lastOisForceOnTimeMs = nowMs
@@ -4837,19 +4836,7 @@ class Camera2Engine(private val context: Context) {
                 _actualEisHardwareActive.value = isActualEisHwActive
             }
 
-            // When OIS is OFF: if the hardware HAL unexpectedly re-enabled OIS, force it OFF (throttled to avoid IPC flooding)
-            if (!isOisAllowed && isActualOisHwActive) {
-                val nowMs = android.os.SystemClock.uptimeMillis()
-                if (nowMs - lastOisForceOffTimeMs >= 500L) {
-                    lastOisForceOffTimeMs = nowMs
-                    try {
-                        previewRequestBuilder?.let { b ->
-                            applyHardwareOisRequest(b, oisAllowed = false)
-                            captureSession?.setRepeatingRequest(b.build(), this, backgroundHandler)
-                        }
-                    } catch (_: Throwable) {}
-                }
-            }
+            // OIS is forced ON; there is deliberately no HAL force-OFF path.
 
             if (_isAutoSwitchToUltraWide.value && !_isRecordingVideo.value && !isSwitchingLens.get()) {
                 checkAutoLensSwitch(result)
@@ -5110,16 +5097,13 @@ class Camera2Engine(private val context: Context) {
      */
     private fun applyHardwareOisRequest(
         builder: CaptureRequest.Builder,
-        oisAllowed: Boolean,
+        @Suppress("UNUSED_PARAMETER") oisAllowed: Boolean,
         // Only apply the physical-camera override if the active session explicitly routes to it.
         physicalCameraId: String? = activeSessionPhysicalCameraId,
         vendorCameraIdOverride: String? = null
     ) {
-        val mode = if (oisAllowed) {
-            CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
-        } else {
-            CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
-        }
+        // Always request native OIS ON, even when camera metadata or a legacy preference says OFF.
+        val mode = CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
         try {
             builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, mode)
             Log.d(
@@ -5147,9 +5131,8 @@ class Camera2Engine(private val context: Context) {
             }
         }
 
-        // The same CaptureRequest.Builder is reused for setting changes. Always write both states
-        // so vendor overrides left by a previous OFF toggle cannot keep OIS disabled after ON.
-        applyVendorOisControls(builder, oisAllowed, vendorCameraIdOverride)
+        // Keep vendor-specific OIS aliases ON too; no preference path may turn them OFF.
+        applyVendorOisControls(builder, oisAllowed = true, cameraIdOverride = vendorCameraIdOverride)
     }
 
     /**
@@ -5171,15 +5154,12 @@ class Camera2Engine(private val context: Context) {
     }
 
     /**
-     * Apply vendor-specific OIS controls symmetrically for ON and OFF.
-     *
-     * Restrict this to vendor keys. The old contains("ois") matched Android's standard
-     * noiseReduction key ("noise" contains "ois"), so turning OIS off could accidentally
-     * write NOISE_REDUCTION_MODE=OFF. Android's standard OIS key is handled separately above.
+     * Force vendor-specific OIS controls ON as well as the standard Android OIS key.
+     * Restrict this to vendor keys so Android noise-reduction keys are never modified.
      */
     private fun applyVendorOisControls(
         builder: CaptureRequest.Builder,
-        oisAllowed: Boolean,
+        @Suppress("UNUSED_PARAMETER") oisAllowed: Boolean,
         cameraIdOverride: String? = null
     ) {
         try {
@@ -5190,7 +5170,7 @@ class Camera2Engine(private val context: Context) {
                 ?: return
             val chars = getCharacteristics(camId) ?: return
             val requestKeys = chars.availableCaptureRequestKeys ?: return
-            val intValue = if (oisAllowed) 1 else 0
+            val intValue = 1
             for (key in requestKeys) {
                 val keyName = key.name.lowercase(Locale.ROOT)
                 val isVendorOisKey = !keyName.startsWith("android.") &&
@@ -5209,7 +5189,7 @@ class Camera2Engine(private val context: Context) {
                             builder.set(typedKey, intValue.toByte())
                         } catch (_: Throwable) {
                             try {
-                                builder.set(typedKey, oisAllowed)
+                                builder.set(typedKey, true)
                             } catch (_: Throwable) {}
                         }
                     }
@@ -7141,12 +7121,6 @@ class Camera2Engine(private val context: Context) {
                                             addTarget(previewSurf)
                                             addTarget(activeLensRecorderSurface)
                                             applyCommonSettings(this)
-                                            if (!isOisAllowed) {
-                                                try {
-                                                    set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
-                                                } catch (_: Throwable) {}
-                                                applyVendorOisControls(this, oisAllowed = false)
-                                            }
                                             set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
                                             // Set safe 30fps range
                                             val fpsRanges = chars?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: emptyArray()
@@ -7197,12 +7171,6 @@ class Camera2Engine(private val context: Context) {
                                                         addTarget(previewSurf)
                                                         addTarget(activeLensRecorderSurface)
                                                         applyCommonSettings(this)
-                                                        if (!isOisAllowed) {
-                                                            try {
-                                                                set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
-                                                            } catch (_: Throwable) {}
-                                                            applyVendorOisControls(this, oisAllowed = false)
-                                                        }
                                                     }
                                                     synchronized(previewRequestLock) {
                                                         previewRequestBuilder = previewTemplateBuilder
