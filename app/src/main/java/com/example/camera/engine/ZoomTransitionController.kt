@@ -14,8 +14,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.acos
@@ -61,6 +63,8 @@ class ZoomTransitionController(
         const val HOLD_AT_ONE_X_DURATION_MS = 20L // Preserved for backwards compatibility
         const val MIN_HOLD_AT_ONE_X_DURATION_MS = 0L
         const val MAX_HOLD_AT_ONE_X_DURATION_MS = 300L
+        private const val HOLD_FOV_CONFIRMATION_FRAMES = 2L
+        private const val HOLD_FOV_FRAME_TIMEOUT_MS = 150L
         const val DEFAULT_OVERLAP_DURATION_MS = 400L
         const val PREVIEW_OVERLAP_DURATION_MS = 100L
         const val MIN_OVERLAP_DURATION_MS = 100L
@@ -86,6 +90,9 @@ class ZoomTransitionController(
          */
         fun isHoldTimeHandoffEligible(fromZoom: Float, targetZoom: Float): Boolean =
             isHalfXZoom(fromZoom) && abs(targetZoom - 1.0f) < 0.05f
+
+        fun clampHoldAtOneXDurationMs(durationMs: Long): Long =
+            durationMs.coerceIn(MIN_HOLD_AT_ONE_X_DURATION_MS, MAX_HOLD_AT_ONE_X_DURATION_MS)
 
         /** True only for direct 0.5x -> 2x/3x preset-endpoint transitions. */
         fun isHalfXToTelephotoPresetTransition(fromZoom: Float, targetZoom: Float): Boolean =
@@ -204,6 +211,10 @@ class ZoomTransitionController(
 
     private val _previewOverlapState = MutableStateFlow(PreviewOverlapState())
     val previewOverlapState: StateFlow<PreviewOverlapState> = _previewOverlapState.asStateFlow()
+
+    // Counts rendered Ultra-Wide buffers so the 0.5x -> 1x hold starts only after
+    // the 1x-equivalent crop has actually reached the preview.
+    private val _ultraWideHoldFrameSequence = MutableStateFlow(0L)
 
     // Keep the outgoing live preview visible until the incoming TextureView produces real frames.
     // This handoff is independent of zoom interpolation, so crossing 1x never pauses zoom.
@@ -358,6 +369,9 @@ class ZoomTransitionController(
 
     /** Called when a preview TextureView receives a new buffer. */
     fun onPreviewFrameAvailable(source: PreviewStreamSource) {
+        if (source == PreviewStreamSource.ULTRAWIDE) {
+            _ultraWideHoldFrameSequence.value = _ultraWideHoldFrameSequence.value + 1L
+        }
         val targetSource = pendingFrameHandoffTarget
         if (targetSource == null) {
             // While pre-warming, observe only the target stream. This never changes visible
@@ -530,7 +544,7 @@ class ZoomTransitionController(
             val holdDuration = if (skipHoldAtSwitchPoint || isDirectHalfXToTelephotoPreset) {
                 0L
             } else {
-                holdAtOneXDurationMs.coerceIn(MIN_HOLD_AT_ONE_X_DURATION_MS, MAX_HOLD_AT_ONE_X_DURATION_MS)
+                clampHoldAtOneXDurationMs(holdAtOneXDurationMs)
             }
             val transitionMotionDurationMs = if (isUltraWideToMainSwitch) {
                 (transitionDurationMs - holdDuration).coerceAtLeast(1L)
@@ -749,6 +763,7 @@ class ZoomTransitionController(
                 } else {
                     effectiveSwitchZoom
                 }
+                val holdFrameSequenceBeforeApply = _ultraWideHoldFrameSequence.value
                 onApplyZoomToEngine(engineZoomAtSwitch, true)
 
                 // 2. Hold that exact FOV for the same duration as the existing 1x switch hold time
@@ -765,9 +780,18 @@ class ZoomTransitionController(
                     isOverlapAnimationEnabled && (holdDuration > 0L || isDirectTelephotoTarget || useFrameBasedHandoff)
                 var frameBasedHandoffStarted = false
                 if (usesHoldTimeHandoff) {
-                    // The configured time is a real pre-switch hold: Ultra-Wide remains active
-                    // until it expires. Do not start a frame-count crossfade on the 0.5x -> 1x path.
-                    if (holdDuration > 0L) delay(holdDuration)
+                    // Wait for two fresh Ultra-Wide buffers at the requested 1x-equivalent crop.
+                    // Starting the timer when the request is merely queued shortens the visible hold
+                    // by Camera2/preview latency. The timeout keeps a stalled callback from blocking
+                    // a lens switch indefinitely.
+                    if (holdDuration > 0L) {
+                        withTimeoutOrNull(HOLD_FOV_FRAME_TIMEOUT_MS) {
+                            _ultraWideHoldFrameSequence.first {
+                                it >= holdFrameSequenceBeforeApply + HOLD_FOV_CONFIRMATION_FRAMES
+                            }
+                        }
+                        delay(holdDuration)
+                    }
                     onSelectLensOnEngine(mainWideLens, effectiveSwitchZoom, true)
                 } else if (mainLensPreparedInOverlap) {
                     if (isDirectTelephotoTarget || useFrameBasedHandoff) {
