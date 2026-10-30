@@ -479,6 +479,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _lensSwitchOverlapDurationSec = MutableStateFlow(preferences.lensSwitchOverlapDurationSec)
     val lensSwitchOverlapDurationSec: StateFlow<Float> = _lensSwitchOverlapDurationSec.asStateFlow()
 
+    val isUsingUltraWideSurface: StateFlow<Boolean> = engine.isUsingUltraWideSurface
+    val displayedPreviewSource: StateFlow<com.example.camera.engine.PreviewStreamSource> = engine.displayedPreviewSource
+    val previewOverlapState: StateFlow<com.example.camera.engine.PreviewOverlapState> = engine.previewOverlapState
+
     fun setLensSwitchOverlapDuration(seconds: Float) {
         val clamped = (Math.round(seconds.coerceIn(0.1f, 1.0f) * 10f) / 10f)
         preferences.lensSwitchOverlapDurationSec = clamped
