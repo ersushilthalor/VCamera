@@ -1675,17 +1675,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun openGallery(context: Context) {
         val media = lastCapturedMedia.value
         if (media != null) {
-            if (!preferences.hasPromptedGallerySelection && preferences.preferredGalleryPackage == null) {
-                preferences.hasPromptedGallerySelection = true
-                _isGallerySelectionDialogOpen.value = true
-            } else {
-                com.example.camera.gallery.GalleryLauncher.openMedia(
-                    context = context,
-                    uri = media.uri,
-                    isVideo = media.isVideo,
-                    preferredPackage = _preferredGalleryPackage.value
-                )
-            }
+            com.example.camera.gallery.GalleryLauncher.openMedia(
+                context = context,
+                uri = media.uri,
+                isVideo = media.isVideo,
+                preferredPackage = _preferredGalleryPackage.value
+            )
         } else {
             showToast("No recent photos yet")
         }
