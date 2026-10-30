@@ -3,6 +3,7 @@ package com.example.camera.data
 import android.content.Context
 import android.content.SharedPreferences
 import com.example.camera.model.*
+import com.example.camera.gallery.GalleryLauncher
 
 /**
  * Persists user camera and video settings across sessions.
@@ -45,6 +46,7 @@ class CameraPreferences(context: Context) {
         private const val KEY_FLOATING_WINDOW_BLUR_STRENGTH = "pref_floating_window_blur_strength"
         private const val KEY_FLOATING_WINDOW_GLASS_STYLE = "pref_floating_window_glass_style"
         private const val KEY_PREFERRED_GALLERY_PACKAGE = "pref_preferred_gallery_package"
+        private const val SYSTEM_GALLERY_PACKAGE = "__android_system_default__"
         private const val KEY_HAS_PROMPTED_GALLERY = "pref_has_prompted_gallery"
         private const val KEY_ZOOM_PRESETS_MODE = "pref_zoom_presets_mode"
         private const val KEY_CUSTOM_ZOOM_PRESETS = "pref_custom_zoom_presets"
@@ -130,8 +132,13 @@ class CameraPreferences(context: Context) {
     }
 
     var preferredGalleryPackage: String?
-        get() = prefs.getString(KEY_PREFERRED_GALLERY_PACKAGE, null)
-        set(value) = prefs.edit().putString(KEY_PREFERRED_GALLERY_PACKAGE, value).apply()
+        get() = prefs.getString(
+            KEY_PREFERRED_GALLERY_PACKAGE,
+            GalleryLauncher.GOOGLE_PHOTOS_PACKAGE
+        )?.takeUnless { it == SYSTEM_GALLERY_PACKAGE }
+        set(value) = prefs.edit()
+            .putString(KEY_PREFERRED_GALLERY_PACKAGE, value ?: SYSTEM_GALLERY_PACKAGE)
+            .apply()
 
     var hasPromptedGallerySelection: Boolean
         get() = prefs.getBoolean(KEY_HAS_PROMPTED_GALLERY, false)
