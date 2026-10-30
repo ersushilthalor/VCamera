@@ -59,6 +59,7 @@ class ZoomTransitionController(
         private const val TAG = "ZoomTransitionCtrl"
         const val TOTAL_TRANSITION_DURATION_MS = 400L // Existing default duration for non-video camera modes
         const val VIDEO_TRANSITION_DURATION_MS = 300L // Fixed duration for Video and Pro Video
+        const val ZOOM_UPDATE_INTERVAL_MS = 16L // Fixed 60Hz zoom updates for every resolution and recording FPS
         const val DEFAULT_HOLD_AT_ONE_X_DURATION_MS = 200L // Default hold at exact 1x FOV before physical switch
         private const val HOLD_FOV_CONFIRMATION_FRAMES = 2L
         private const val HOLD_FOV_FRAME_TIMEOUT_MS = 150L
@@ -151,22 +152,6 @@ class ZoomTransitionController(
         fun isFrameBasedHandoffEligible(fromZoom: Float, targetZoom: Float): Boolean =
             isHalfXToTelephotoPresetTransition(fromZoom, targetZoom) ||
                 isTelephotoPresetToHalfXTransition(fromZoom, targetZoom)
-
-        /**
-         * Space zoom updates to the active recording frame cadence.
-         * Keep the normal 60 Hz path unchanged; slower recordings receive fewer camera requests.
-         */
-        fun frameIntervalMsForFps(fps: Int): Long =
-            (1000L / fps.coerceAtLeast(1).toLong()).coerceIn(16L, 42L)
-
-        /**
-         * Preserve the duration selected by the caller. Recording FPS controls only camera
-         * request pacing and must never multiply the requested zoom-animation duration.
-         */
-        fun framePacedTransitionDurationMs(
-            durationMs: Long,
-            @Suppress("UNUSED_PARAMETER") fps: Int
-        ): Long = durationMs.coerceAtLeast(1L)
 
         /**
          * Moderate start, fast middle, and a deliberately slow finish.
@@ -493,7 +478,6 @@ class ZoomTransitionController(
         scope: CoroutineScope,
         durationMs: Long = TOTAL_TRANSITION_DURATION_MS,
         skipHoldAtSwitchPoint: Boolean = false,
-        frameIntervalMs: Long = 16L,
         onZoomUpdate: (Float) -> Unit,
         onComplete: (Float, LensInfo?) -> Unit
     ): Job {
@@ -502,7 +486,7 @@ class ZoomTransitionController(
         // Honor the duration selected by the caller. Recording FPS may change request cadence only;
         // it must never make a farther zoom move take longer than a nearer one.
         val transitionDurationMs = durationMs.coerceAtLeast(1L)
-        val transitionFrameIntervalMs = frameIntervalMs.coerceIn(16L, 42L)
+        val transitionFrameIntervalMs = ZOOM_UPDATE_INTERVAL_MS
 
         val job = scope.launch(Dispatchers.Main.immediate) {
             val currentFacing = currentLens?.facing
@@ -841,7 +825,7 @@ class ZoomTransitionController(
                                     topSource = PreviewStreamSource.ULTRAWIDE
                                 )
 
-                                val nextTick = minOf(blendStartTime + blendDurationMs, now + 16L)
+                                val nextTick = minOf(blendStartTime + blendDurationMs, now + ZOOM_UPDATE_INTERVAL_MS)
                                 val waitMs = nextTick - SystemClock.uptimeMillis()
                                 if (waitMs > 0) delay(waitMs)
                             }
@@ -949,7 +933,7 @@ class ZoomTransitionController(
                     reverseFrameBasedHandoffStarted = true
                 }
 
-                // Apply zoom through the camera controller slider handler (at ~60fps pacing)
+                // Apply zoom through the camera controller slider handler at the fixed 16ms cadence
                 if (abs(currentZ - lastDispatchedZoom) >= 0.01f || (now - lastDispatchedTime) >= transitionFrameIntervalMs) {
                     lastDispatchedZoom = currentZ
                     lastDispatchedTime = now

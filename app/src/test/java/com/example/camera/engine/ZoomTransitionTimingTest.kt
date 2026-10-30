@@ -46,29 +46,7 @@ class ZoomTransitionTimingTest {
     }
 
     @Test
-    fun recordingFrameRateDoesNotStretchZoomTransition() {
-        val recordingFrameRates = listOf(24, 30, 60, 120)
-
-        recordingFrameRates.forEach { fps ->
-            assertEquals(
-                "Zoom duration must remain 300ms at ${fps}fps",
-                300L,
-                ZoomTransitionController.framePacedTransitionDurationMs(
-                    durationMs = 300L,
-                    fps = fps
-                )
-            )
-        }
-    }
-
-    @Test
-    fun framePacingPreservesTheRequestedDuration() {
-        assertEquals(
-            1200L,
-            ZoomTransitionController.framePacedTransitionDurationMs(
-                durationMs = 1200L,
-                fps = 24
-            )
-        )
+    fun zoomUpdatesUseFixed16MillisecondCadence() {
+        assertEquals(16L, ZoomTransitionController.ZOOM_UPDATE_INTERVAL_MS)
     }
 }

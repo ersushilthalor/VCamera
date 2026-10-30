@@ -1391,35 +1391,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
         val activeMode = _cameraMode.value
         val isVideoMode = activeMode == CameraMode.VIDEO || activeMode == CameraMode.CINEMA
-        val recordingResolution = if (activeMode == CameraMode.CINEMA) {
-            engine.cinemaConfig.value.selectedResolution ?: engine.selectedVideoResolution.value
-        } else {
-            engine.selectedVideoResolution.value
-        }
-        val is4KVideoMode = isVideoMode &&
-            recordingResolution?.let { maxOf(it.width, it.height) >= 3840 } == true
-        val recordingFps = if (activeMode == CameraMode.CINEMA) {
-            engine.cinemaConfig.value.videoFps
-        } else {
-            engine.videoFps
-        }
-        val zoomFrameIntervalMs = if (is4KVideoMode) {
-            com.example.camera.engine.ZoomTransitionController.frameIntervalMsForFps(recordingFps)
-        } else {
-            16L
-        }
-        val requestedTransitionDurationMs = if (isVideoMode) {
+        // Zoom animation timing is independent of recording resolution and FPS.
+        // Video and Pro Video always use the same 300ms transition duration.
+        val zoomTransitionDurationMs = if (isVideoMode) {
             com.example.camera.engine.ZoomTransitionController.VIDEO_TRANSITION_DURATION_MS
         } else {
             durationMs
-        }
-        val zoomTransitionDurationMs = if (is4KVideoMode) {
-            com.example.camera.engine.ZoomTransitionController.framePacedTransitionDurationMs(
-                requestedTransitionDurationMs,
-                recordingFps
-            )
-        } else {
-            requestedTransitionDurationMs
         }
 
         engine.isContinuousZoomTransitionActive = true
@@ -1434,7 +1411,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             scope = viewModelScope,
             durationMs = zoomTransitionDurationMs,
             skipHoldAtSwitchPoint = skipHoldAtSwitchPoint,
-            frameIntervalMs = zoomFrameIntervalMs,
             onZoomUpdate = { interpolatedZoom ->
                 _currentZoom.value = interpolatedZoom
             },
