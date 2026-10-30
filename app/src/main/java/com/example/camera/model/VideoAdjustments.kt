@@ -1,5 +1,6 @@
 package com.example.camera.model
 
+import kotlin.math.roundToInt
 import java.util.Locale
 
 /**
