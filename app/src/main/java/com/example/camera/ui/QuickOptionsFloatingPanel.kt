@@ -90,6 +90,8 @@ fun QuickOptionsFloatingPanel(
         else -> "4K"
     }
 
+    val isCompactVideoPanel = cameraMode == CameraMode.VIDEO || cameraMode == CameraMode.CINEMA
+
     AnimatedVisibility(
         visible = isOpen,
         enter = fadeIn(animationSpec = tween(170)) +
@@ -115,13 +117,21 @@ fun QuickOptionsFloatingPanel(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp),
+                .then(if (isCompactVideoPanel) Modifier else Modifier.padding(horizontal = 14.dp)),
             contentAlignment = Alignment.TopCenter
         ) {
             FloatingWindowCard(
                 modifier = Modifier
-                    .widthIn(max = 420.dp)
-                    .fillMaxWidth()
+                    .then(
+                        if (isCompactVideoPanel) {
+                            Modifier
+                                .wrapContentWidth()
+                                .widthIn(min = 280.dp, max = 340.dp)
+                                .padding(horizontal = 12.dp, vertical = 4.dp)
+                        } else {
+                            Modifier.widthIn(max = 420.dp).fillMaxWidth()
+                        }
+                    )
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null
@@ -132,7 +142,10 @@ fun QuickOptionsFloatingPanel(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                        .padding(
+                            horizontal = if (isCompactVideoPanel) 12.dp else 16.dp,
+                            vertical = if (isCompactVideoPanel) 10.dp else 14.dp
+                        ),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     when (cameraMode) {
@@ -150,6 +163,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onVideoSettingsClick,
                                     testTag = "panel_resolution_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -161,6 +175,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onFlashClick,
                                     testTag = "panel_torch_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -172,6 +187,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = Color(0xFFFF6B6B),
                                     onClick = onAudioToggle,
                                     testTag = "panel_audio_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -190,6 +206,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onVideoAdjustmentsClick,
                                     testTag = "panel_video_tuning_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -201,6 +218,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onGridClick,
                                     testTag = "panel_grid_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -212,6 +230,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onSettingsClick,
                                     testTag = "panel_settings_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -241,6 +260,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onLogClick,
                                     testTag = "panel_cinema_log_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -252,6 +272,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onLutClick,
                                     testTag = "panel_cinema_lut_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -263,6 +284,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onCinemaAspectRatioClick,
                                     testTag = "panel_cinema_aspect_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -274,6 +296,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onCinemaResolutionClick,
                                     testTag = "panel_cinema_res_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -294,6 +317,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onCinemaSettingsClick,
                                     testTag = "panel_cinema_tuning_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -305,6 +329,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = Color(0xFFFF6B6B),
                                     onClick = onAudioToggle,
                                     testTag = "panel_cinema_audio_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -316,6 +341,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onSettingsClick,
                                     testTag = "panel_cinema_settings_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -335,6 +361,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onTimerClick,
                                     testTag = "panel_timer_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -346,6 +373,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onGridClick,
                                     testTag = "panel_grid_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -363,6 +391,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onFlashClick,
                                     testTag = "panel_flash_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -374,6 +403,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onSettingsClick,
                                     testTag = "panel_settings_button",
+                                    compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -410,6 +440,7 @@ fun QuickOptionCircleButton(
     activeColor: Color = Color(0xFFFF7A00),
     onClick: () -> Unit,
     testTag: String,
+    compact: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -420,13 +451,13 @@ fun QuickOptionCircleButton(
                 indication = ripple(bounded = true, radius = 28.dp),
                 onClick = onClick
             )
-            .padding(vertical = 4.dp, horizontal = 2.dp)
+            .padding(vertical = if (compact) 3.dp else 4.dp, horizontal = if (compact) 1.dp else 2.dp)
             .testTag(testTag),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(
             modifier = Modifier
-                .size(48.dp)
+                .size(if (compact) 38.dp else 48.dp)
                 .clip(CircleShape)
                 .background(
                     if (isActive) activeColor else Color(0x2EFFFFFF)
@@ -443,25 +474,25 @@ fun QuickOptionCircleButton(
                     imageVector = icon,
                     contentDescription = label,
                     tint = if (isActive) Color(0xFF14171E) else Color.White.copy(alpha = 0.95f),
-                    modifier = Modifier.size(23.dp)
+                    modifier = Modifier.size(if (compact) 18.dp else 23.dp)
                 )
             } else if (textBadge != null) {
                 Text(
                     text = textBadge,
                     color = if (isActive) Color(0xFF14171E) else Color.White,
-                    fontSize = 12.5.sp,
+                    fontSize = if (compact) 10.sp else 12.5.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(5.dp))
+        Spacer(modifier = Modifier.height(if (compact) 3.dp else 5.dp))
 
         Text(
             text = label,
             color = Color.White.copy(alpha = 0.92f),
-            fontSize = 11.5.sp,
+            fontSize = if (compact) 10.sp else 11.5.sp,
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -471,7 +502,7 @@ fun QuickOptionCircleButton(
         Text(
             text = statusText,
             color = if (isActive) activeColor else Color.White.copy(alpha = 0.5f),
-            fontSize = 10.sp,
+            fontSize = if (compact) 9.sp else 10.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
