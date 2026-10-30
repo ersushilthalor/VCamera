@@ -171,8 +171,11 @@ class CameraPreferences(context: Context) {
         set(value) = prefs.edit().putFloat(KEY_FLOATING_WINDOW_BLUR_STRENGTH, value).apply()
 
     var floatingWindowScale: Float
-        get() = prefs.getFloat("floating_window_scale", 0.88f).coerceIn(0.75f, 1.25f)
-        set(value) = prefs.edit().putFloat("floating_window_scale", value.coerceIn(0.75f, 1.25f)).apply()
+        get() = 1.0f
+        set(value) {
+            // Floating-window scale is fixed at 100%; discard legacy/custom scale values.
+            prefs.edit().putFloat("floating_window_scale", 1.0f).apply()
+        }
 
     fun getFloatingWindowAppearance(): com.example.camera.model.FloatingWindowAppearanceConfig {
         return com.example.camera.model.FloatingWindowAppearanceConfig(
@@ -202,7 +205,7 @@ class CameraPreferences(context: Context) {
             .putString(KEY_FLOATING_WINDOW_GLASS_STYLE, config.glassStyle.id)
             .putFloat(KEY_FLOATING_WINDOW_TRANSPARENCY, config.transparency)
             .putFloat(KEY_FLOATING_WINDOW_BLUR_STRENGTH, config.blurStrength)
-            .putFloat("floating_window_scale", config.windowScale.coerceIn(0.75f, 1.25f))
+            .putFloat("floating_window_scale", 1.0f)
             .putBoolean("fw_show_video_res", config.showVideoResolution)
             .putBoolean("fw_show_video_fps", config.showVideoFps)
             .putBoolean("fw_show_video_stab", config.showVideoStabilization)
