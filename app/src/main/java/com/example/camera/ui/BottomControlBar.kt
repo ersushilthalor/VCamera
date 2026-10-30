@@ -408,36 +408,6 @@ fun BottomControlBar(
                             )
 
                             when (cameraMode) {
-                                CameraMode.MORE, CameraMode.AI_SUBJECT_TRACKING -> {
-                                    val shutterColor = when (layoutConfig.shutterStyle) {
-                                        ShutterStyle.MINIMAL_ACCENT -> accentColor
-                                        ShutterStyle.OPPO_ORANGE -> Color(0xFFFF8A00)
-                                        ShutterStyle.LEICA_RED_DOT -> Color(0xFFE53935)
-                                        ShutterStyle.CYBER_HOLO -> Color(0xFF00E5FF)
-                                        ShutterStyle.DSLR_KNURLED -> Color(0xFFDDDDDD)
-                                        else -> Color.White
-                                    }
-                                    if (layoutConfig.shutterStyle == ShutterStyle.VIVO_GIMBAL) {
-                                        // Vivo reference: white outer ring, pale-gold inner ring, dark open center.
-                                        Box(
-                                            modifier = Modifier
-                                                .size(shutterSize * 0.72f)
-                                                .scale(buttonScale)
-                                                .clip(CircleShape)
-                                                .background(Color(0xFF080808))
-                                                .border(2.dp, Color(0xFFFFE9A8), CircleShape)
-                                        )
-                                    } else {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(shutterSize * 0.8f)
-                                                .scale(buttonScale)
-                                                .clip(CircleShape)
-                                                .background(shutterColor)
-                                        )
-                                    }
-                                }
-
                                 CameraMode.VIDEO, CameraMode.CINEMA -> {
                                     if (isRecordingVideo) {
                                         Box(
@@ -501,20 +471,15 @@ fun BottomControlBar(
                     }
                 }
 
-                val isPixelVideoGroup = cameraMode == CameraMode.VIDEO ||
-                        cameraMode == CameraMode.CINEMA ||
-                        cameraMode == CameraMode.AI_SUBJECT_TRACKING
-                val isPixelPhotoGroup = !isPixelVideoGroup
+                val isPixelVideoGroup = true
+                val isPixelPhotoGroup = false
 
                 // Mode Carousel Composable
                 val modeCarouselContent = @Composable {
                     if (!isRecordingVideo) {
                         val modeScrollState = rememberScrollState()
                         if (layoutConfig.modeSelectorStyle == ModeSelectorStyle.PIXEL_PILL) {
-                            // Pixel UI Template:
-                            // First Icon (Photo Modes): Photo, Pro Manual
-                            // Second Icon (Video and Special Modes): Video, Cinema, AI Subject Tracing
-                            // "More" option is completely removed from the Pixel UI template.
+                            // Pixel UI Template: Only Video and Pro Video
                             data class PixelModeEntry(
                                 val tag: String,
                                 val label: String,
@@ -539,15 +504,6 @@ fun BottomControlBar(
                                     onSelect = {
                                         onSetManualProOpen(false)
                                         onModeSelected(CameraMode.CINEMA)
-                                    }
-                                ),
-                                PixelModeEntry(
-                                    tag = "mode_ai_subject_tracking",
-                                    label = "AI Tracking",
-                                    isSelected = cameraMode == CameraMode.AI_SUBJECT_TRACKING,
-                                    onSelect = {
-                                        onSetManualProOpen(false)
-                                        onModeSelected(CameraMode.AI_SUBJECT_TRACKING)
                                     }
                                 )
                             )
@@ -602,31 +558,17 @@ fun BottomControlBar(
                                 }
                             }
                         } else {
-                            // Non-Pixel UI Templates: preserve original mode carousel behavior
+                            // Non-Pixel UI Templates: show Video and Pro Video ONLY
                             val isOppoModeRail = layoutConfig.modeSelectorStyle == ModeSelectorStyle.OPPO_PILL
-                            // Keep every user-facing camera mode directly in the selector.
-                            // Pro Manual and the More entry are intentionally removed.
                             val modesToDisplay = remember {
                                 listOf(
                                     CameraMode.VIDEO,
-                                    CameraMode.CINEMA,
-                                    CameraMode.AI_SUBJECT_TRACKING
+                                    CameraMode.CINEMA
                                 )
                             }
 
-                            val isMoreModeActive = if (isOppoModeRail) {
-                                cameraMode == CameraMode.MORE
-                            } else {
-                                cameraMode != CameraMode.VIDEO && cameraMode != CameraMode.CINEMA
-                            }
-
                             LaunchedEffect(cameraMode, isOppoModeRail) {
-                                val targetMode = when {
-                                    isOppoModeRail && cameraMode == CameraMode.CINEMA -> CameraMode.CINEMA
-                                    isMoreModeActive -> CameraMode.MORE
-                                    else -> cameraMode
-                                }
-                                val index = modesToDisplay.indexOf(targetMode)
+                                val index = modesToDisplay.indexOf(cameraMode)
                                 if (index >= 0) {
                                     val itemEstimatedWidthPx = if (isOppoModeRail) 330 else if (layoutConfig.modeSelectorStyle == ModeSelectorStyle.IPHONE_LIQUID_GLASS) 140 else 180
                                     val targetScroll = (index * itemEstimatedWidthPx - 140).coerceAtLeast(0)
@@ -636,7 +578,6 @@ fun BottomControlBar(
 
                             Row(
                                 modifier = if (layoutConfig.modeSelectorStyle == ModeSelectorStyle.IPHONE_LIQUID_GLASS) {
-                                    // The iPhone mode rail is a compact horizontally-scrollable glass capsule.
                                     Modifier
                                         .widthIn(max = 280.dp)
                                         .clip(RoundedCornerShape(28.dp))
@@ -675,7 +616,7 @@ fun BottomControlBar(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 modesToDisplay.forEach { mode ->
-                                    val isSelected = if (mode == CameraMode.MORE) isMoreModeActive else (cameraMode == mode)
+                                    val isSelected = (cameraMode == mode)
                                     val targetTextColor = if (isSelected) {
                                         if (layoutConfig.modeSelectorStyle == ModeSelectorStyle.MONO_TICKER) Color(0xFFE53935)
                                         else if (layoutConfig.modeSelectorStyle == ModeSelectorStyle.CYBER_GLOW) Color(0xFF00E5FF)
@@ -690,13 +631,7 @@ fun BottomControlBar(
                                         label = "modeTextColor"
                                     )
 
-                                    val rawName = when {
-                                        isOppoModeRail && mode == CameraMode.CINEMA -> "Pro Video"
-                                        mode == CameraMode.MORE && isMoreModeActive &&
-                                            cameraMode != CameraMode.MORE &&
-                                            layoutConfig.modeSelectorStyle != ModeSelectorStyle.OPPO_PILL -> cameraMode.name
-                                        else -> mode.name
-                                    }
+                                    val rawName = if (mode == CameraMode.CINEMA) "Pro Video" else "Video"
                                     val displayText = layoutConfig.formatModeText(rawName)
                                     val modeFontWeight = if (isSelected) layoutConfig.fontWeightOption.weight else FontWeight.Normal
                                     val modeLetterSpacing = layoutConfig.letterSpacingSp.sp
@@ -704,11 +639,7 @@ fun BottomControlBar(
                                     Column(
                                         modifier = Modifier
                                             .clickable {
-                                                if (mode == CameraMode.MORE) {
-                                                    onModeSelected(CameraMode.MORE)
-                                                } else {
-                                                    onModeSelected(mode)
-                                                }
+                                                onModeSelected(mode)
                                             }
                                             .then(if (isOppoModeRail) Modifier.width(90.dp) else Modifier)
                                             .padding(vertical = 4.dp, horizontal = 6.dp)

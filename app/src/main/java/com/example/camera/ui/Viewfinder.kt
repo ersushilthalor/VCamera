@@ -123,7 +123,7 @@ fun Viewfinder(
     onToggleLock: () -> Unit = {},
     currentExposureCompensation: Int = 0,
     onFrameLuminanceStats: ((com.example.camera.engine.FrameLuminanceStats) -> Unit)? = null,
-    stabilizationMode: com.example.camera.model.VideoStabilizationMode = com.example.camera.model.VideoStabilizationMode.EIS,
+    stabilizationMode: com.example.camera.model.VideoStabilizationMode = com.example.camera.model.VideoStabilizationMode.OFF,
     doubleTapAction: String = "FLIP",
     onDoubleTapFlip: () -> Unit = {},
     onDoubleTapLock: () -> Unit = {},
@@ -267,7 +267,7 @@ fun Viewfinder(
         val isFourThree = false
         val targetRatio = when (cameraMode) {
             CameraMode.CINEMA -> cinemaConfig?.aspectRatio?.ratioValue ?: (if (aspectRatio > 0f) aspectRatio else 16f / 9f)
-            CameraMode.VIDEO, CameraMode.AI_SUBJECT_TRACKING -> 16f / 9f
+            CameraMode.VIDEO -> 16f / 9f
             else -> if (aspectRatio > 0f) aspectRatio else 16f / 9f
         }
         val currentTargetRatio by rememberUpdatedState(targetRatio)
@@ -925,26 +925,8 @@ fun configureTransform(
         }
     }
 
-    // Viewfinder-level camera feature integration: Stable Action Horizon Lock & Dolly Zoom
-    if (isHorizonLockEnabled) {
-        val angleDeg = -horizonRollDegrees
-        matrix.postRotate(angleDeg, centerX, centerY)
-
-        val aspect = maxOf(viewW, viewH) / minOf(viewW, viewH)
-        val safeScale = maxOf(kotlin.math.sqrt(1f + aspect * aspect) / 0.90f, 1.8518f)
-        matrix.postScale(safeScale, safeScale, centerX, centerY)
-
-        val rad = Math.toRadians(angleDeg.toDouble())
-        val cosA = kotlin.math.cos(rad)
-        val sinA = kotlin.math.sin(rad)
-        val rotNormX = horizonNormX * cosA - horizonNormY * sinA
-        val rotNormY = horizonNormX * sinA + horizonNormY * cosA
-        val marginX = (viewW * (safeScale - 1f) / 2f).coerceAtLeast(0f)
-        val marginY = (viewH * (safeScale - 1f) / 2f).coerceAtLeast(0f)
-        val shiftX = (rotNormX * marginX * 0.9).toFloat()
-        val shiftY = (rotNormY * marginY * 0.9).toFloat()
-        matrix.postTranslate(shiftX, shiftY)
-    } else if (isDollyZoomActive && dollyScale > 1.005f) {
+    // Viewfinder-level camera feature integration: Dolly Zoom
+    if (isDollyZoomActive && dollyScale > 1.005f) {
         val focalX = (dollyFocusX * viewW).coerceIn(viewW * 0.05f, viewW * 0.95f)
         val focalY = (dollyFocusY * viewH).coerceIn(viewH * 0.05f, viewH * 0.95f)
         matrix.postScale(dollyScale, dollyScale, focalX, focalY)

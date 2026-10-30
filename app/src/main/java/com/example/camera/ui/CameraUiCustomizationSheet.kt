@@ -636,7 +636,6 @@ fun LivePreviewCanvas(
                     TopControlItem.LUT -> Icons.Outlined.Palette
                     TopControlItem.PRO_VIDEO_SETTINGS -> Icons.Outlined.Movie
                     TopControlItem.VIDEO_ADJUSTMENTS -> Icons.Outlined.Tune
-                    TopControlItem.STABILIZATION -> Icons.Outlined.VideoStable
                     TopControlItem.PIPELINE -> Icons.Outlined.Tune
                     TopControlItem.SIX_DOT_MENU -> Icons.Outlined.GridView
                     TopControlItem.SETTINGS -> Icons.Outlined.Settings
@@ -1210,10 +1209,10 @@ fun ModeSelectorEditor(
         }
 
         item {
-            Text("Main Carousel Modes (Photo, Video, More). All other modes are organized inside More Modes.", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
+            Text("Main Carousel Modes (Video, Pro Video).", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
         }
 
-        val primaryCarouselModes = listOf(CameraMode.VIDEO, CameraMode.MORE)
+        val primaryCarouselModes = listOf(CameraMode.VIDEO, CameraMode.CINEMA)
         items(primaryCarouselModes) { mode ->
             val isVisible = config.visibleModes.contains(mode)
             Surface(
@@ -1575,7 +1574,7 @@ fun TopBarControlsEditor(
                         onDismissRequest = { showAddSlotMenu = false },
                         modifier = Modifier.background(Color(0xFF1E2435))
                     ) {
-                        TopControlItem.entries.filterNot { it == TopControlItem.STABILIZATION }.forEach { itemOption ->
+                        TopControlItem.entries.forEach { itemOption ->
                             val alreadyInOrder = config.topControlsOrder.contains(itemOption)
                             DropdownMenuItem(
                                 text = {
@@ -1750,7 +1749,6 @@ fun TopBarControlsEditor(
                                             TopControlItem.LUT -> Icons.Outlined.Palette
                                             TopControlItem.PRO_VIDEO_SETTINGS -> Icons.Outlined.Movie
                                             TopControlItem.SETTINGS -> Icons.Outlined.Settings
-                                            TopControlItem.STABILIZATION -> Icons.Outlined.VideoStable
                                             else -> Icons.Outlined.Tune
                                         },
                                         contentDescription = null,
@@ -1781,7 +1779,7 @@ fun TopBarControlsEditor(
                                 .background(Color(0xFF1C2233))
                                 .heightIn(max = 280.dp)
                         ) {
-                            TopControlItem.entries.filterNot { it == TopControlItem.STABILIZATION }.forEach { opt ->
+                            TopControlItem.entries.forEach { opt ->
                                 val isCur = opt == item
                                 DropdownMenuItem(
                                     text = {
@@ -1795,7 +1793,6 @@ fun TopBarControlsEditor(
                                                     TopControlItem.LUT -> Icons.Outlined.Palette
                                                     TopControlItem.PRO_VIDEO_SETTINGS -> Icons.Outlined.Movie
                                                     TopControlItem.SETTINGS -> Icons.Outlined.Settings
-                                                    TopControlItem.STABILIZATION -> Icons.Outlined.VideoStable
                                                     else -> Icons.Outlined.Tune
                                                 },
                                                 contentDescription = null,

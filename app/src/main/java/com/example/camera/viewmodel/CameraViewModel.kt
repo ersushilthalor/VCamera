@@ -163,22 +163,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         setLutWindowOpen(!_isLutWindowOpen.value)
     }
 
-    // Video Stabilization Floating Window (OFF / EIS / EIS+)
-    private val _isStabilizationWindowOpen = MutableStateFlow(false)
-    val isStabilizationWindowOpen: StateFlow<Boolean> = _isStabilizationWindowOpen.asStateFlow()
 
-    fun setStabilizationWindowOpen(open: Boolean) {
-        _isStabilizationWindowOpen.value = open
-        if (open) {
-            _isLogProfileWindowOpen.value = false
-            _isLutWindowOpen.value = false
-            _isCinemaSettingsOpen.value = false
-        }
-    }
-
-    fun toggleStabilizationWindow() {
-        setStabilizationWindowOpen(!_isStabilizationWindowOpen.value)
-    }
 
     fun selectLogProfile(profile: CinemaColorProfile) {
         val current = cinemaConfig.value
@@ -336,17 +321,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     
 
-    // More Modes Drawer visibility
-    private val _isMoreModesOpen = MutableStateFlow(false)
-    val isMoreModesOpen: StateFlow<Boolean> = _isMoreModesOpen.asStateFlow()
 
-    fun setMoreModesOpen(isOpen: Boolean) {
-        _isMoreModesOpen.value = isOpen
-    }
-
-    fun toggleMoreModes() {
-        _isMoreModesOpen.value = !_isMoreModesOpen.value
-    }
 
     fun setCinemaSettingsOpen(isOpen: Boolean) {
         _isCinemaSettingsOpen.value = isOpen
@@ -956,7 +931,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         preferences.isUltraStabilizationEnabled = false
         engine.videoStabilizationMode = VideoStabilizationMode.OFF
         engine.isVideoStabilizationEnabled = false
-        _isStabilizationWindowOpen.value = false
 
         val mVideoFps = preferences.getModeVideoFps(mode)
         _videoFps.value = mVideoFps
@@ -1018,12 +992,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         // 5. Switch engine mode to synchronize preview buffer and session with restored settings
         engine.setMode(mode)
 
-        if (mode == CameraMode.AI_SUBJECT_TRACKING) {
-            engine.closeCamera()
-        } else if (previousMode == CameraMode.AI_SUBJECT_TRACKING) {
-            safeInitializeCamera()
-        }
-
         // 6. Restore mode-specific lens and zoom if available
         val modeZoom = preferences.getModeZoom(mode)
         val currentLens = engine.selectedLens.value
@@ -1062,9 +1030,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         _isCinemaSettingsOpen.value = false
-        if (mode == CameraMode.MORE) {
-            _isMoreModesOpen.value = true
-        }
 
     }
 
@@ -1813,10 +1778,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setMainCameraStabilizationMode(mode: MainCameraStabilizationMode) {
-        // Legacy mode selector now maps only to OIS ON/OFF. EIS modes never start stabilization.
-        val enableOis = mode == MainCameraStabilizationMode.OIS_ONLY ||
-            mode == MainCameraStabilizationMode.HYBRID_OIS_EIS ||
-            mode == MainCameraStabilizationMode.ULTRA
+        val enableOis = mode == MainCameraStabilizationMode.OIS_ONLY
         _isOisEnabled.value = enableOis
         preferences.isOisEnabled = enableOis
         preferences.isOisPreferred = enableOis
@@ -2175,12 +2137,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }}")
     }
 
-    private val _showHorizonLevel = MutableStateFlow(preferences.showHorizonLevel)
+    private val _showHorizonLevel = MutableStateFlow(false)
     val showHorizonLevel: StateFlow<Boolean> = _showHorizonLevel.asStateFlow()
 
-    fun setShowHorizonLevel(show: Boolean) {
-        _showHorizonLevel.value = show
-        preferences.showHorizonLevel = show
+    fun setShowHorizonLevel(@Suppress("UNUSED_PARAMETER") show: Boolean) {
+        _showHorizonLevel.value = false
     }
 
     private val _antiBanding = MutableStateFlow(preferences.antiBanding)
@@ -2328,7 +2289,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         setTimerMode(TimerMode.OFF)
         _videoCodec.value = "HEVC"
         _jpegQuality.value = 100
-        _showHorizonLevel.value = true
         _autoHdrEnabled.value = true
         _autoFramingEnabled.value = true
         _windNoiseReduction.value = true

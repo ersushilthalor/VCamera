@@ -135,17 +135,7 @@ fun CameraScreen(
     // Engine & VM States
     val cameraMode by viewModel.cameraMode.collectAsStateWithLifecycle()
 
-    if (cameraMode == CameraMode.AI_SUBJECT_TRACKING) {
-        BackHandler {
-            viewModel.setCameraMode(CameraMode.VIDEO)
-        }
-        com.example.camera.tracking.ui.AiSubjectTrackingScreen(
-            onBack = {
-                viewModel.setCameraMode(CameraMode.VIDEO)
-            }
-        )
-        return
-    }
+
 
     val capabilities by viewModel.engine.capabilities.collectAsStateWithLifecycle()
     val selectedPhotoResolution by viewModel.engine.selectedPhotoResolution.collectAsStateWithLifecycle()
@@ -174,7 +164,6 @@ fun CameraScreen(
     val isCinemaSettingsOpen by viewModel.isCinemaSettingsOpen.collectAsStateWithLifecycle()
     val isLogProfileWindowOpen by viewModel.isLogProfileWindowOpen.collectAsStateWithLifecycle()
     val isLutWindowOpen by viewModel.isLutWindowOpen.collectAsStateWithLifecycle()
-    val isMoreModesOpen by viewModel.isMoreModesOpen.collectAsStateWithLifecycle()
     val videoAdjustments by viewModel.videoAdjustments.collectAsStateWithLifecycle()
     val isVideoAdjustmentsOpen by viewModel.isVideoAdjustmentsOpen.collectAsStateWithLifecycle()
 
@@ -253,7 +242,6 @@ fun CameraScreen(
     val proSharpness by viewModel.proSharpness.collectAsStateWithLifecycle()
     val proNoiseReduction by viewModel.proNoiseReduction.collectAsStateWithLifecycle()
 
-    val videoStabilizationMode by viewModel.videoStabilizationMode.collectAsStateWithLifecycle()
     val isOisEnabled by viewModel.isOisEnabled.collectAsStateWithLifecycle()
     val uiCustomizationState by viewModel.uiCustomizationState.collectAsStateWithLifecycle()
     val activeLayoutConfig = remember(uiCustomizationState, cameraMode) {
@@ -306,7 +294,7 @@ fun CameraScreen(
     val viewfinderCornerRadiusDp by viewModel.viewfinderCornerRadiusDp.collectAsStateWithLifecycle()
 
     val isAnyWindowOpen = isCinemaSettingsOpen || isLogProfileWindowOpen || isLutWindowOpen ||
-            isManualProOpen || isMoreModesOpen ||
+            isManualProOpen ||
             isVideoSettingsPanelOpen ||
             isVideoAdjustmentsOpen || isSettingsOpen || isGallerySelectionDialogOpen ||
             isCustomUiStudioOpen ||
@@ -964,9 +952,6 @@ fun CameraScreen(
                     },
                     onDismiss = {
                         viewModel.setSettingsOpen(false)
-                        if (cameraMode == CameraMode.MORE) {
-                            viewModel.setCameraMode(CameraMode.VIDEO)
-                        }
                     }
                 )
             }

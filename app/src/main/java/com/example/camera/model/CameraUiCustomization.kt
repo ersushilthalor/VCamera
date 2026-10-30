@@ -141,7 +141,6 @@ enum class TopControlItem(val id: String, val label: String) {
     LUT("lut", "Cinematic LUTs (Pro Video)"),
     PRO_VIDEO_SETTINGS("pro_video_settings", "Fine Tuning Controls"),
     VIDEO_ADJUSTMENTS("video_adjustments", "Video Adjustments"),
-    STABILIZATION("stabilization", "Video Stabilization (OFF/EIS/EIS+)"),
     PIPELINE("pipeline", "Custom Pipeline"),
     SIX_DOT_MENU("six_dot_menu", "Quick Options Menu (6-Dot)"),
     SETTINGS("settings", "Settings Gear")
@@ -150,8 +149,7 @@ enum class TopControlItem(val id: String, val label: String) {
 data class ModeLayoutConfig(
     val visibleModes: List<CameraMode> = listOf(
         CameraMode.VIDEO,
-        CameraMode.VIDEO,
-        CameraMode.MORE
+        CameraMode.CINEMA
     ),
     val modeSelectorPosition: ModeSelectorPosition = ModeSelectorPosition.BELOW_SHUTTER,
     val modeSelectorStyle: ModeSelectorStyle = ModeSelectorStyle.CLASSIC_DOT,
@@ -201,7 +199,7 @@ data class ModeLayoutConfig(
 ) {
     fun getIconPosition(item: TopControlItem): TopIconPosition {
         return topIconPositions[item] ?: when (item) {
-            TopControlItem.FLASH, TopControlItem.TIMER, TopControlItem.STABILIZATION -> TopIconPosition.LEFT
+            TopControlItem.FLASH, TopControlItem.TIMER -> TopIconPosition.LEFT
             TopControlItem.LOG, TopControlItem.LUT, TopControlItem.RESOLUTION, TopControlItem.RAW, TopControlItem.PRO_EXP -> TopIconPosition.CENTER
             TopControlItem.GRID, TopControlItem.SETTINGS, TopControlItem.SIX_DOT_MENU, TopControlItem.PRO_VIDEO_SETTINGS, TopControlItem.VIDEO_ADJUSTMENTS, TopControlItem.PIPELINE -> TopIconPosition.RIGHT
         }
@@ -324,7 +322,7 @@ data class ModeLayoutConfig(
             }
             if (visibleModesList.isEmpty()) {
                 visibleModesList.addAll(listOf(
-                    CameraMode.VIDEO, CameraMode.VIDEO, CameraMode.MORE
+                    CameraMode.VIDEO, CameraMode.CINEMA
                 ))
             }
 
@@ -606,7 +604,7 @@ object CameraUiTemplates {
     fun getTemplateConfig(type: UiTemplateType): ModeLayoutConfig {
         return when (type) {
             UiTemplateType.OPPO -> ModeLayoutConfig(
-                visibleModes = listOf(CameraMode.VIDEO, CameraMode.VIDEO, CameraMode.MORE),
+                visibleModes = listOf(CameraMode.VIDEO, CameraMode.CINEMA),
                 modeSelectorPosition = ModeSelectorPosition.BELOW_SHUTTER,
                 modeSelectorStyle = ModeSelectorStyle.OPPO_PILL,
                 shutterStyle = ShutterStyle.OPPO_ORANGE,
@@ -638,7 +636,7 @@ object CameraUiTemplates {
             UiTemplateType.SAMSUNG -> ModeLayoutConfig(
                 // Samsung template tuned to the supplied reference. Keep the app's existing
                 // top-control configuration/order untouched; only the lower camera controls change.
-                visibleModes = listOf(CameraMode.VIDEO, CameraMode.VIDEO, CameraMode.MORE),
+                visibleModes = listOf(CameraMode.VIDEO, CameraMode.CINEMA),
                 modeSelectorPosition = ModeSelectorPosition.BELOW_SHUTTER,
                 modeSelectorStyle = ModeSelectorStyle.MINIMAL_TEXT,
                 shutterStyle = ShutterStyle.CLASSIC_WHITE,

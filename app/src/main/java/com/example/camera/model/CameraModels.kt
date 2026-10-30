@@ -6,9 +6,7 @@ import android.util.Size
 
 enum class CameraMode(val title: String) {
     VIDEO("Video"),
-    CINEMA("Pro Video"),
-    AI_SUBJECT_TRACKING("AI Tracking"),
-    MORE("More")
+    CINEMA("Pro Video")
 }
 
 enum class FlashMode(val title: String) {
@@ -261,49 +259,30 @@ enum class VideoStabilizationMode(
         badgeLabel = "OFF",
         subtitle = "Stabilization Disabled",
         description = "Full uncropped sensor readout without digital dampening"
-    ),
-    EIS(
-        id = "eis",
-        title = "EIS",
-        badgeLabel = "EIS",
-        subtitle = "Standard Electronic Stabilization",
-        description = "Camera2 HAL electronic image stabilization with standard smoothing"
     );
 
-    val isEnabled: Boolean get() = this != OFF
+    val isEnabled: Boolean get() = false
 }
 
 enum class MainCameraStabilizationMode(val title: String, val subtitle: String) {
     OFF("Off", "Stabilization disabled"),
-    OIS_ONLY("OIS Only", "Physical optical voice-coil stabilization only"),
-    EIS_ONLY("EIS Only", "Electronic image stabilization only (OIS off)"),
-    HYBRID_OIS_EIS("OIS + EIS", "Synchronized optical + electronic stabilization"),
-    ULTRA("Ultra Action", "Maximum gyro-compensated action stabilization")
+    OIS_ONLY("OIS Only", "Physical optical voice-coil stabilization only")
 }
 
 data class HybridStabilizationConfig(
-    val isHybridEnabled: Boolean = true,
+    val isHybridEnabled: Boolean = false,
     val isOisPreferred: Boolean = true,
     val isOisEnabled: Boolean = true,
-    val isEisPreferred: Boolean = true,
-    val isAdaptiveFpsLens: Boolean = true,
+    val isEisPreferred: Boolean = false,
+    val isAdaptiveFpsLens: Boolean = false,
     val isUltraStabilizationEnabled: Boolean = false,
     val isEisOnly: Boolean = false,
-    val oisHardwareStatus: String = "Detecting",
-    val eisHardwareStatus: String = "Detecting",
-    val ultraStabilizationStatus: String = "Ready"
+    val oisHardwareStatus: String = "Active",
+    val eisHardwareStatus: String = "Disabled",
+    val ultraStabilizationStatus: String = "Disabled"
 ) {
     val stabilizationMode: MainCameraStabilizationMode
-        get() {
-            val oisEffective = isOisPreferred && isOisEnabled
-            return when {
-                isUltraStabilizationEnabled -> MainCameraStabilizationMode.ULTRA
-                isEisOnly || (!oisEffective && isEisPreferred) -> MainCameraStabilizationMode.EIS_ONLY
-                oisEffective && !isEisPreferred -> MainCameraStabilizationMode.OIS_ONLY
-                isHybridEnabled || (oisEffective && isEisPreferred) -> MainCameraStabilizationMode.HYBRID_OIS_EIS
-                else -> MainCameraStabilizationMode.OFF
-            }
-        }
+        get() = if (isOisPreferred && isOisEnabled) MainCameraStabilizationMode.OIS_ONLY else MainCameraStabilizationMode.OFF
 }
 
 data class TapFocusConfig(

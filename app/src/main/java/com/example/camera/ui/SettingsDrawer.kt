@@ -98,7 +98,7 @@ fun SettingsDrawer(
     viewfinderResolution: ViewfinderResolution = ViewfinderResolution.NORMAL,
     hybridStabilizationConfig: HybridStabilizationConfig = HybridStabilizationConfig(),
     tapFocusConfig: TapFocusConfig = TapFocusConfig(),
-    mainCameraStabilizationMode: MainCameraStabilizationMode = MainCameraStabilizationMode.HYBRID_OIS_EIS,
+    mainCameraStabilizationMode: MainCameraStabilizationMode = MainCameraStabilizationMode.OIS_ONLY,
     onMainCameraStabilizationModeSelected: (MainCameraStabilizationMode) -> Unit = {},
     videoCodec: String = "HEVC",
     jpegQuality: Int = 95,
@@ -517,19 +517,6 @@ private fun SettingsOverviewPage(
                     showDivider = true
                 )
                 ReferenceToggleRow(
-                    title = "Optical stabilization (OIS)",
-                    description = if (!isOisEnabled) {
-                        "Hardware OIS is disabled."
-                    } else if (isOisHardwareActive) {
-                        "Hardware OIS is active on the current camera."
-                    } else {
-                        "OIS is enabled; waiting for hardware confirmation from the camera."
-                    },
-                    checked = isOisEnabled,
-                    onCheckedChange = onOisToggle,
-                    showDivider = true
-                )
-                ReferenceToggleRow(
                     title = "Record audio",
                     description = "Capture audio with videos.",
                     checked = isAudioEnabled,
@@ -561,20 +548,6 @@ private fun SettingsOverviewPage(
                         "NONE" to "Off"
                     ),
                     onOptionSelected = onDoubleTapActionSelected,
-                    showDivider = true
-                )
-                ReferenceToggleRow(
-                    title = "Horizontal lock",
-                    description = "Keep the video horizon level while recording.",
-                    checked = isHorizontalLockSettingEnabled,
-                    onCheckedChange = onHorizontalLockSettingToggle,
-                    showDivider = true
-                )
-                ReferenceToggleRow(
-                    title = "Horizon level",
-                    description = "Show a level guide in the viewfinder.",
-                    checked = horizonLeveler,
-                    onCheckedChange = onHorizonLevelerToggle,
                     showDivider = true
                 )
                 ReferenceToggleRow(
@@ -2061,15 +2034,6 @@ private fun CameraLensSettingsPage(
             )
         }
 
-        item {
-            SettingsSwitchCard(
-                title = "Virtual Horizon Leveler",
-                description = "Live pitch and roll gyroscope orientation level line.",
-                isChecked = horizonLeveler,
-                onCheckedChange = onHorizonLevelerToggle,
-                tag = "toggle_horizon_leveler"
-            )
-        }
 
         item {
             SettingsSegmentedCard(
@@ -2418,43 +2382,7 @@ private fun SwitchPointSettingCard(
     }
 }
 
-@Composable
-private fun StabilizationSettingsPage(
-    mainCameraStabilizationMode: MainCameraStabilizationMode,
-    onMainCameraStabilizationModeSelected: (MainCameraStabilizationMode) -> Unit,
-    isVideoStabilizationEnabled: Boolean,
-    onStabilizationToggle: (Boolean) -> Unit,
-    isOisPreferred: Boolean,
-    onOisToggle: (Boolean) -> Unit,
-    isHorizontalLockSettingEnabled: Boolean = true,
-    onHorizontalLockSettingToggle: (Boolean) -> Unit = {},
-    isUltraStabilizationEnabled: Boolean,
-    onUltraStabilizationToggle: () -> Unit,
-    windNoiseReduction: Boolean,
-    onWindNoiseReductionToggle: (Boolean) -> Unit
-) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-        contentPadding = PaddingValues(bottom = 24.dp)
-    ) {
-        item {
-            SettingsSwitchCard(
-                title = "Hardware OIS (Optical Image Stabilization)",
-                description = if (isOisPreferred) {
-                    "ON: Main camera uses physical hardware voice-coil Optical Image Stabilization (OIS) whenever supported."
-                } else {
-                    "OFF: Hardware Optical Image Stabilization is disabled."
-                },
-                isChecked = isOisPreferred,
-                onCheckedChange = onOisToggle,
-                tag = "toggle_ois_switch"
-            )
-        }
 
-
-    }
-}
 
 @Composable
 private fun UiLayoutSettingsPage(

@@ -36,7 +36,6 @@ class CameraPreferences(context: Context) {
         private const val KEY_ULTRA_FAST_SHUTTER_ENABLED = "pref_ultra_fast_shutter_enabled"
         private const val KEY_ULTRA_FAST_SHUTTER_FPS = "pref_ultra_fast_shutter_fps"
         private const val KEY_ULTRA_FAST_SHUTTER_BURST_COUNT = "pref_ultra_fast_shutter_burst_count"
-        private const val KEY_TRACKING_LENS = "pref_tracking_lens"
         private const val KEY_KEEP_ULTRAWIDE_READY = "pref_keep_ultrawide_ready"
         private const val KEY_AUTO_SWITCH_TO_ULTRAWIDE = "pref_auto_switch_to_ultrawide"
         private const val KEY_SHOW_ULTRAWIDE_PREVIEW = "pref_show_ultrawide_preview"
@@ -241,17 +240,7 @@ class CameraPreferences(context: Context) {
         get() = prefs.getBoolean(KEY_SHOW_FRONT_PREVIEW, false)
         set(value) = prefs.edit().putBoolean(KEY_SHOW_FRONT_PREVIEW, value).apply()
 
-    var trackingLens: com.example.camera.tracking.model.TrackingCameraLens
-        get() {
-            val name = prefs.getString(KEY_TRACKING_LENS, com.example.camera.tracking.model.TrackingCameraLens.WIDE.name)
-                ?: com.example.camera.tracking.model.TrackingCameraLens.WIDE.name
-            return try {
-                com.example.camera.tracking.model.TrackingCameraLens.valueOf(name)
-            } catch (e: Exception) {
-                com.example.camera.tracking.model.TrackingCameraLens.WIDE
-            }
-        }
-        set(value) = prefs.edit().putString(KEY_TRACKING_LENS, value.name).apply()
+
 
     var isRefocusPhotoEnabled: Boolean
         get() = prefs.getBoolean(KEY_REFOCUS_PHOTO_ENABLED, false)
@@ -887,8 +876,8 @@ class CameraPreferences(context: Context) {
         set(value) = prefs.edit().putString("pref_double_tap_action", value).apply()
 
     var showHorizonLevel: Boolean
-        get() = prefs.getBoolean("pref_show_horizon_level", true)
-        set(value) = prefs.edit().putBoolean("pref_show_horizon_level", value).apply()
+        get() = false
+        set(@Suppress("UNUSED_PARAMETER") value) {}
 
     var antiBanding: String
         get() = prefs.getString("pref_anti_banding", "AUTO") ?: "AUTO"

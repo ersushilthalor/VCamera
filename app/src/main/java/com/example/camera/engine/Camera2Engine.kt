@@ -1574,7 +1574,6 @@ class Camera2Engine(private val context: Context) {
     var isVideoStabilizationEnabled: Boolean = false
         set(@Suppress("UNUSED_PARAMETER") value) {
             field = false
-            gyroStabilizationEngine.stop()
             updatePreviewSettings()
         }
     var videoBitrateOption: VideoBitrateOption = VideoBitrateOption.AUTO
@@ -1650,8 +1649,6 @@ class Camera2Engine(private val context: Context) {
 
     private var activeMeteringRectangle: MeteringRectangle? = null
 
-    val gyroStabilizationEngine by lazy { GyroStabilizationEngine(context) }
-
     var videoStabilizationMode: com.example.camera.model.VideoStabilizationMode = com.example.camera.model.VideoStabilizationMode.OFF
         set(@Suppress("UNUSED_PARAMETER") value) {
             field = com.example.camera.model.VideoStabilizationMode.OFF
@@ -1715,7 +1712,6 @@ class Camera2Engine(private val context: Context) {
             isEisOnly = false
         )
         preferences.isUltraStabilizationEnabled = false
-        gyroStabilizationEngine.stop()
         updatePreviewSettings()
     }
 
@@ -3642,7 +3638,6 @@ class Camera2Engine(private val context: Context) {
         val newStreamRatio = if (is43) 4f / 3f else 16f / 9f
         val wasVideoTemplate = (previousMode == CameraMode.VIDEO || previousMode == CameraMode.CINEMA)
         val isVideoTemplate = (mode == CameraMode.VIDEO || mode == CameraMode.CINEMA)
-        val wasMore = (previousMode == CameraMode.MORE)
         if (_isRecordingVideo.value) {
             stopVideoRecording()
         }
@@ -3657,8 +3652,7 @@ class Camera2Engine(private val context: Context) {
         val cameraH = min(optimalSize.width, optimalSize.height)
         syncPreviewBufferSizes(cameraW, cameraH)
 
-        // Software gyro EIS is intentionally not started in any mode.
-        gyroStabilizationEngine.stop()
+
 
 
 
@@ -3667,7 +3661,6 @@ class Camera2Engine(private val context: Context) {
         val needsReconfigure = (kotlin.math.abs(oldStreamRatio - newStreamRatio) > 0.05f) ||
                 (was43 != is43) ||
                 (wasVideoTemplate != isVideoTemplate) ||
-                (wasMore && is43) ||
                 optimalSizeChanged ||
                 (captureSession == null) ||
                 (!_isCameraReady.value)
@@ -8700,7 +8693,6 @@ class Camera2Engine(private val context: Context) {
         sessionConfigGeneration.incrementAndGet()
         isConfiguringSession = false
         pendingReconfigureSession = false
-        gyroStabilizationEngine.stop()
 
         closeCameraCaptureSession()
         releaseUltraWideStandby()

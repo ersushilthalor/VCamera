@@ -137,14 +137,11 @@ fun QuickOptionsFloatingPanel(
                 ) {
                     when (cameraMode) {
                         CameraMode.VIDEO -> {
-                            // Row 1: Dolly Zoom, Horizontal Lock, Stabilization, Resolution
+                            val isTorchOn = flashMode != FlashMode.OFF
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-
-
-
                                 QuickOptionCircleButton(
                                     icon = Icons.Outlined.VideoSettings,
                                     label = "Quality",
@@ -155,16 +152,7 @@ fun QuickOptionsFloatingPanel(
                                     testTag = "panel_resolution_button",
                                     modifier = Modifier.weight(1f)
                                 )
-                            }
 
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            // Row 2: Torch, Audio, Video Adjustments, Settings
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                val isTorchOn = flashMode != FlashMode.OFF
                                 QuickOptionCircleButton(
                                     icon = if (isTorchOn) Icons.Filled.FlashOn else Icons.Outlined.FlashOff,
                                     label = "Torch",
@@ -186,7 +174,14 @@ fun QuickOptionsFloatingPanel(
                                     testTag = "panel_audio_button",
                                     modifier = Modifier.weight(1f)
                                 )
+                            }
 
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
                                 QuickOptionCircleButton(
                                     icon = Icons.Outlined.Tune,
                                     label = "Tuning",
@@ -195,6 +190,17 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onVideoAdjustmentsClick,
                                     testTag = "panel_video_tuning_button",
+                                    modifier = Modifier.weight(1f)
+                                )
+
+                                QuickOptionCircleButton(
+                                    icon = Icons.Outlined.GridOn,
+                                    label = "Grid",
+                                    statusText = gridType.title,
+                                    isActive = gridType != GridType.NONE,
+                                    activeColor = accentColor,
+                                    onClick = onGridClick,
+                                    testTag = "panel_grid_button",
                                     modifier = Modifier.weight(1f)
                                 )
 

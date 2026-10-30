@@ -168,9 +168,6 @@ fun TopControlBar(
     isVideoAdjustmentsOpen: Boolean = false,
     hasActiveVideoAdjustments: Boolean = false,
     onVideoAdjustmentsClick: () -> Unit = {},
-    isHorizontalLockSettingEnabled: Boolean = true,
-    isHorizonLockEnabled: Boolean = false,
-    onToggleHorizonLock: () -> Unit = {},
     isDollyZoomSettingEnabled: Boolean = false,
     isDollyZoomActive: Boolean = false,
     onToggleDollyZoom: () -> Unit = {},
@@ -291,7 +288,6 @@ fun TopControlBar(
 
         val primaryBadge = @Composable {
             when (cameraMode) {
-                CameraMode.MORE, CameraMode.AI_SUBJECT_TRACKING -> {}
                 CameraMode.VIDEO -> {
                     val resLabel = when {
                         videoResolution?.width == 3840 || videoResolution?.height == 3840 -> "4K"
@@ -324,27 +320,6 @@ fun TopControlBar(
                 }
                 CameraMode.CINEMA -> {
                     // Pro Video resolution and aspect ratio are available from the six-dot menu.
-                }
-                CameraMode.MORE, CameraMode.AI_SUBJECT_TRACKING -> {
-                    Box(
-                        modifier = Modifier
-                            .height(34.dp)
-                            .clip(RoundedCornerShape(17.dp))
-                            .background(Color(0xB21A1A1E))
-                            .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(17.dp))
-                            .padding(horizontal = 12.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "MORE",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 0.5.sp,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
                 }
             }
         }
@@ -401,27 +376,7 @@ fun TopControlBar(
                         )
                     }
                 }
-                CameraMode.MORE, CameraMode.AI_SUBJECT_TRACKING -> {
-                    Box(
-                        modifier = Modifier
-                            .height(34.dp)
-                            .clip(RoundedCornerShape(17.dp))
-                            .background(Color(0xB21A1A1E))
-                            .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(17.dp))
-                            .padding(horizontal = 12.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "PRO",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 0.5.sp,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-                }
+                CameraMode.VIDEO -> {}
             }
         }
 
@@ -657,7 +612,7 @@ fun TopControlBar(
         // Render Top Controls according to layoutConfig and position
         val visibleItems = run {
             var items = layoutConfig.topControlsOrder
-                .filterNot { layoutConfig.hiddenTopControls.contains(it) || it == TopControlItem.STABILIZATION }
+                .filterNot { layoutConfig.hiddenTopControls.contains(it) }
             if (!items.contains(TopControlItem.SIX_DOT_MENU) && !layoutConfig.hiddenTopControls.contains(TopControlItem.SIX_DOT_MENU)) {
                 items = if (items.contains(TopControlItem.SETTINGS)) {
                     items.map { if (it == TopControlItem.SETTINGS) TopControlItem.SIX_DOT_MENU else it }
