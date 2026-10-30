@@ -1392,9 +1392,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * Unified continuous zoom transition and interpolation system.
-     * Transitions between any two zoom values over exactly 300ms (0.30s) using continuous
-     * sub-step interpolation with sinusoidal ease-in, faster middle, and smooth ease-out:
-     * - Total transition duration of exactly 300ms for every animated zoom transition.
+     * Uses continuous sub-step interpolation with sinusoidal ease-in, faster middle, and smooth ease-out:
+     * - Video and Pro Video use an exact 300ms transition for every pair of zoom values.
      * - Every intermediate 0.01x zoom value is visited in strict order without skipping or sudden jumps.
      * - Eliminates redundant camera engine calls using delta/time pacing.
      * - Synchronizes an iPhone-style overlapping preview animation on the actual preview layers
@@ -1451,13 +1450,18 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             16L
         }
+        val requestedTransitionDurationMs = if (isVideoMode) {
+            com.example.camera.engine.ZoomTransitionController.VIDEO_TRANSITION_DURATION_MS
+        } else {
+            durationMs
+        }
         val zoomTransitionDurationMs = if (is4KVideoMode) {
             com.example.camera.engine.ZoomTransitionController.framePacedTransitionDurationMs(
-                durationMs,
+                requestedTransitionDurationMs,
                 recordingFps
             )
         } else {
-            durationMs
+            requestedTransitionDurationMs
         }
 
         engine.isContinuousZoomTransitionActive = true
