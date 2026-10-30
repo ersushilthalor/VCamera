@@ -1367,35 +1367,20 @@ class CameraPreferences(context: Context) {
         )
     }
 
-    private fun videoAdjustmentPrefix(profileKey: String): String {
-        if (profileKey.isBlank()) return "pref_va_"
-        val safeKey = profileKey.map { if (it.isLetterOrDigit() || it == '_' || it == '-') it else '_' }
-            .joinToString("")
-        return "pref_va_${safeKey}_"
-    }
-
     /**
-     * Reads a lens-specific profile. On first use, migrate the old shared profile into
-     * that lens's namespace so existing users retain their adjustments while profiles
-     * become independent from this point forward.
+     * Video Tuning is shared across all physical lenses. The optional legacy key is
+     * retained only for source compatibility; it no longer creates separate profiles.
      */
     @Synchronized
-    fun getVideoAdjustments(profileKey: String = ""): com.example.camera.model.VideoAdjustments {
-        if (profileKey.isBlank()) return readVideoAdjustments("pref_va_")
-        val prefix = videoAdjustmentPrefix(profileKey)
-        val initializedKey = prefix + "initialized"
-        if (!prefs.getBoolean(initializedKey, false)) {
-            val legacy = readVideoAdjustments("pref_va_")
-            saveVideoAdjustments(legacy, profileKey)
-            prefs.edit().putBoolean(initializedKey, true).apply()
-            return legacy
-        }
-        return readVideoAdjustments(prefix)
-    }
+    fun getVideoAdjustments(@Suppress("UNUSED_PARAMETER") profileKey: String = ""): com.example.camera.model.VideoAdjustments =
+        readVideoAdjustments("pref_va_")
 
     @Synchronized
-    fun saveVideoAdjustments(va: com.example.camera.model.VideoAdjustments, profileKey: String = "") {
-        val prefix = videoAdjustmentPrefix(profileKey)
+    fun saveVideoAdjustments(
+        va: com.example.camera.model.VideoAdjustments,
+        @Suppress("UNUSED_PARAMETER") profileKey: String = ""
+    ) {
+        val prefix = "pref_va_"
         val editor = prefs.edit()
             .putFloat(prefix + "tonality", va.tonality)
             .putFloat(prefix + "saturation", va.saturation)
@@ -1424,11 +1409,6 @@ class CameraPreferences(context: Context) {
             .putFloat(prefix + "tex_grain", va.textureFilmGrain)
             .putFloat(prefix + "tex_halation", va.textureHalation)
             .putFloat(prefix + "tex_micro_contrast", va.textureMicroContrast)
-        if (profileKey.isNotBlank()) {
-            val safeKey = profileKey.map { if (it.isLetterOrDigit() || it == '_' || it == '-') it else '_' }
-                .joinToString("")
-            editor.putBoolean("pref_va_${safeKey}_initialized", true)
-        }
         editor.apply()
     }
 }
