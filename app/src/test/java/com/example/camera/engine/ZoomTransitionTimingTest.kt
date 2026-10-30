@@ -12,6 +12,21 @@ class ZoomTransitionTimingTest {
     }
 
     @Test
+    fun configuredOneXHoldDurationUsesTheFullSupportedRange() {
+        assertEquals(0L, ZoomTransitionController.clampHoldAtOneXDurationMs(0L))
+        assertEquals(20L, ZoomTransitionController.clampHoldAtOneXDurationMs(20L))
+        assertEquals(175L, ZoomTransitionController.clampHoldAtOneXDurationMs(175L))
+        assertEquals(300L, ZoomTransitionController.clampHoldAtOneXDurationMs(500L))
+    }
+
+    @Test
+    fun holdTimeHandoffOnlyAppliesToDirectHalfXToOneXTransition() {
+        assertEquals(true, ZoomTransitionController.isHoldTimeHandoffEligible(0.5f, 1.0f))
+        assertEquals(false, ZoomTransitionController.isHoldTimeHandoffEligible(0.5f, 2.0f))
+        assertEquals(false, ZoomTransitionController.isHoldTimeHandoffEligible(1.0f, 0.5f))
+    }
+
+    @Test
     fun recordingFrameRateDoesNotStretchZoomTransition() {
         val recordingFrameRates = listOf(24, 30, 60, 120)
 
