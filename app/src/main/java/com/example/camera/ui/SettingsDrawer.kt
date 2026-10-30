@@ -2569,3 +2569,570 @@ private fun UiLayoutSettingsPage(
         }
     }
 }
+
+@Composable
+private fun GeneralSettingsPage(
+    volumeKeyAction: String,
+    onVolumeKeyActionSelected: (String) -> Unit,
+    doubleTapAction: String,
+    onDoubleTapActionSelected: (String) -> Unit,
+    shutterFeedback: String,
+    onShutterFeedbackSelected: (String) -> Unit,
+    antibandingMode: String,
+    onAntibandingModeSelected: (String) -> Unit,
+    thermalProtection: Boolean,
+    onThermalProtectionToggle: (Boolean) -> Unit,
+    isAiAutoFramingEnabled: Boolean,
+    onAiAutoFramingToggle: (Boolean) -> Unit,
+    preferredGalleryPackage: String?,
+    onOpenGalleryChooser: () -> Unit,
+    onResetAll: () -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            SettingsSegmentedCard(
+                title = "Volume Key Action",
+                description = "Hardware volume rocker function while camera is active.",
+                options = listOf(
+                    "SHUTTER" to "Shutter",
+                    "ZOOM" to "Zoom",
+                    "VOLUME" to "System Vol"
+                ),
+                selectedOption = volumeKeyAction,
+                onOptionSelected = onVolumeKeyActionSelected
+            )
+        }
+
+        item {
+            SettingsSegmentedCard(
+                title = "Double Tap Viewfinder",
+                description = "Action when double-tapping the viewfinder screen.",
+                options = listOf(
+                    "FLIP" to "Flip Camera",
+                    "LOCK" to "Lock Focus",
+                    "NONE" to "None"
+                ),
+                selectedOption = doubleTapAction,
+                onOptionSelected = onDoubleTapActionSelected
+            )
+        }
+
+        item {
+            SettingsSegmentedCard(
+                title = "Shutter Feedback",
+                description = "Tactile and acoustic feedback on capture.",
+                options = listOf(
+                    "SOUND_AND_HAPTIC" to "All",
+                    "HAPTIC_ONLY" to "Haptic",
+                    "SOUND_ONLY" to "Sound",
+                    "MUTE" to "Mute"
+                ),
+                selectedOption = shutterFeedback,
+                onOptionSelected = onShutterFeedbackSelected
+            )
+        }
+
+        item {
+            SettingsSegmentedCard(
+                title = "Anti-Banding Filter",
+                description = "Prevents light flickering from fluorescent and LED indoor lighting.",
+                options = listOf(
+                    "AUTO" to "Auto",
+                    "50HZ" to "50 Hz",
+                    "60HZ" to "60 Hz",
+                    "OFF" to "Off"
+                ),
+                selectedOption = antibandingMode,
+                onOptionSelected = onAntibandingModeSelected
+            )
+        }
+
+        item {
+            SettingsSwitchCard(
+                title = "Adaptive Thermal Protection",
+                description = "Adjusts sensor framerate when device temperature exceeds safe limits.",
+                isChecked = thermalProtection,
+                onCheckedChange = onThermalProtectionToggle,
+                tag = "toggle_thermal_protection"
+            )
+        }
+
+        item {
+            SettingsActionCard(
+                title = "Preferred Gallery App",
+                description = preferredGalleryPackage ?: "System Default Gallery",
+                actionText = "CHANGE",
+                onClick = onOpenGalleryChooser
+            )
+        }
+    }
+}
+
+@Composable
+private fun AboutSettingsPage(
+    capabilities: HardwareCapabilities,
+    availableLenses: List<LensInfo>,
+    selectedLens: LensInfo?
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF1B1B1B),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Camera Pro Engine",
+                        color = Color(0xFFFF8A32),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Native Camera2 Pipeline • Version 1.0",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 12.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        text = "HARDWARE SPECIFICATIONS",
+                        color = Color.White.copy(alpha = 0.5f),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(text = "• Active Camera ID: ${selectedLens?.id ?: "0"}", color = Color.White, fontSize = 13.sp)
+                    Text(text = "• Detected Physical Lenses: ${availableLenses.size}", color = Color.White, fontSize = 13.sp)
+                    Text(text = "• RAW DNG Capture: ${if (capabilities.supportsRaw) "Supported" else "Unsupported"}", color = Color.White, fontSize = 13.sp)
+                    Text(text = "• Optical Image Stabilization: ${if (capabilities.supportsOis) "Supported" else "Unsupported"}", color = Color.White, fontSize = 13.sp)
+                    Text(text = "• Max Digital Zoom: ${capabilities.maxZoom}x", color = Color.White, fontSize = 13.sp)
+                    Text(text = "• ISO Range: ${capabilities.minIso} - ${capabilities.maxIso}", color = Color.White, fontSize = 13.sp)
+                }
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// REUSABLE MODERN SETTINGS CARDS
+// -------------------------------------------------------------
+
+
+
+@Composable
+private fun CategoryCard(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = Color(0xFF1B1B1B),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x22FF8A32)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = Color(0xFFFF8A32),
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+
+                Column {
+                    Text(
+                        text = title,
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = subtitle,
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = "Open",
+                tint = Color.White.copy(alpha = 0.4f),
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsSwitchCard(
+    title: String,
+    description: String,
+    isChecked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    tag: String
+) {
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = Color(0xFF1B1B1B),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                Text(
+                    text = title,
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = description,
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 13.sp,
+                    lineHeight = 20.sp
+                )
+            }
+
+            Switch(
+                checked = isChecked,
+                onCheckedChange = onCheckedChange,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = Color(0xFFFF8A32),
+                    uncheckedThumbColor = Color.White.copy(alpha = 0.7f),
+                    uncheckedTrackColor = Color.White.copy(alpha = 0.15f)
+                ),
+                modifier = Modifier.testTag(tag)
+            )
+        }
+    }
+}
+
+@Composable
+private fun <T> SettingsSegmentedCard(
+    title: String,
+    description: String,
+    options: List<Pair<T, String>>,
+    selectedOption: T,
+    onOptionSelected: (T) -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = Color(0xFF1B1B1B),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = title,
+                color = Color.White,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = description,
+                color = Color.White.copy(alpha = 0.6f),
+                fontSize = 12.sp,
+                lineHeight = 16.sp
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                options.forEach { (value, label) ->
+                    val isSelected = selectedOption == value
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { onOptionSelected(value) },
+                        label = {
+                            Text(
+                                text = label,
+                                fontSize = 11.5.sp,
+                                fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Color(0xFFFF8A32),
+                            selectedLabelColor = Color.Black,
+                            containerColor = Color.White.copy(alpha = 0.08f),
+                            labelColor = Color.White
+                        )
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsActionCard(
+    title: String,
+    description: String,
+    actionText: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = Color(0xFF1B1B1B),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                Text(
+                    text = title,
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = description,
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 13.sp,
+                    lineHeight = 20.sp
+                )
+            }
+
+            Button(
+                onClick = onClick,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFFF8A32),
+                    contentColor = Color.Black
+                ),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = actionText,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Dedicated Fullscreen Camera Settings Screen.
+ * Binds directly to CameraViewModel to eliminate method size limitations and keep CameraScreen clean.
+ */
+@Composable
+fun CameraSettingsScreen(
+    viewModel: CameraViewModel,
+    onDismiss: () -> Unit,
+    onOpenCustomUiStudio: () -> Unit = {}
+) {
+    val cameraMode by viewModel.cameraMode.collectAsStateWithLifecycle()
+    val capabilities by viewModel.engine.capabilities.collectAsStateWithLifecycle()
+    val displayedLenses by viewModel.displayedLenses.collectAsStateWithLifecycle()
+    val selectedLens by viewModel.selectedLens.collectAsStateWithLifecycle()
+    val selectedVideoResolution by viewModel.engine.selectedVideoResolution.collectAsStateWithLifecycle()
+    val zoomPresetsMode by viewModel.zoomPresetsMode.collectAsStateWithLifecycle()
+    val customZoomPresetsStr by viewModel.customZoomPresetsStr.collectAsStateWithLifecycle()
+    val videoFps by viewModel.videoFps.collectAsStateWithLifecycle()
+    val videoBitrate by viewModel.videoBitrateOption.collectAsStateWithLifecycle()
+    val isVideoStabilizationEnabled by viewModel.isVideoStabilizationEnabled.collectAsStateWithLifecycle()
+    val actualEisHardwareActive by viewModel.actualEisHardwareActive.collectAsStateWithLifecycle()
+    val isOisEnabled by viewModel.isOisEnabled.collectAsStateWithLifecycle()
+    val actualOisHardwareActive by viewModel.actualOisHardwareActive.collectAsStateWithLifecycle()
+    val isAudioEnabled by viewModel.isAudioEnabled.collectAsStateWithLifecycle()
+    val isRawEnabled by viewModel.isRawCaptureEnabled.collectAsStateWithLifecycle()
+    val saveSelfieAsPreviewed by viewModel.saveSelfieAsPreviewed.collectAsStateWithLifecycle()
+    val gridType by viewModel.gridType.collectAsStateWithLifecycle()
+    val cinemaConfig by viewModel.cinemaConfig.collectAsStateWithLifecycle()
+    val cinemaCapabilities by viewModel.cinemaCapabilities.collectAsStateWithLifecycle()
+    val viewfinderResolution by viewModel.viewfinderResolution.collectAsStateWithLifecycle()
+    val hybridStabilizationConfig by viewModel.hybridStabilizationConfig.collectAsStateWithLifecycle()
+    val tapFocusConfig by viewModel.tapFocusConfig.collectAsStateWithLifecycle()
+    val videoCodec by viewModel.videoCodec.collectAsStateWithLifecycle()
+    val jpegQuality by viewModel.jpegQuality.collectAsStateWithLifecycle()
+    val volumeKeyAction by viewModel.volumeKeyAction.collectAsStateWithLifecycle()
+    val doubleTapAction by viewModel.doubleTapAction.collectAsStateWithLifecycle()
+    val shutterFeedback by viewModel.shutterFeedback.collectAsStateWithLifecycle()
+    val antibandingMode by viewModel.antibandingMode.collectAsStateWithLifecycle()
+    val windNoiseReduction by viewModel.windNoiseReduction.collectAsStateWithLifecycle()
+    val audioSource by viewModel.audioSource.collectAsStateWithLifecycle()
+    val horizonLeveler by viewModel.horizonLeveler.collectAsStateWithLifecycle()
+    val viewfinderFps by viewModel.viewfinderFps.collectAsStateWithLifecycle()
+    val thermalProtection by viewModel.thermalProtection.collectAsStateWithLifecycle()
+    val isAutoHdrEnabled by viewModel.isAutoHdrEnabled.collectAsStateWithLifecycle()
+    val isAiAutoFramingEnabled by viewModel.isAiAutoFramingEnabled.collectAsStateWithLifecycle()
+    val currentZoom by viewModel.currentZoom.collectAsStateWithLifecycle()
+    val exposureCompensation by viewModel.exposureCompensation.collectAsStateWithLifecycle()
+    val manualIso by viewModel.manualIso.collectAsStateWithLifecycle()
+    val manualShutterSpeedNs by viewModel.manualShutterSpeedNs.collectAsStateWithLifecycle()
+    val focusMode by viewModel.focusMode.collectAsStateWithLifecycle()
+    val manualFocusDistance by viewModel.manualFocusDistance.collectAsStateWithLifecycle()
+    val uiCustomizationState by viewModel.uiCustomizationState.collectAsStateWithLifecycle()
+    val instantSwitchState by viewModel.instantSwitchState.collectAsStateWithLifecycle()
+    val floatingWindowAppearance by viewModel.floatingWindowAppearance.collectAsStateWithLifecycle()
+    val preferredGalleryPackage by viewModel.preferredGalleryPackage.collectAsStateWithLifecycle()
+
+    // With EIS removed, the only supported stabilization mode is hardware OIS or Off.
+    val mainCameraStabilizationMode = remember(isOisEnabled) {
+        if (isOisEnabled) MainCameraStabilizationMode.OIS_ONLY else MainCameraStabilizationMode.OFF
+    }
+
+    SettingsDrawer(
+        isOpen = true,
+        cameraMode = cameraMode,
+        capabilities = capabilities,
+        availableLenses = displayedLenses,
+        selectedLens = selectedLens,
+        selectedVideoResolution = selectedVideoResolution,
+        zoomPresetsMode = zoomPresetsMode,
+        customZoomPresetsStr = customZoomPresetsStr,
+        onZoomPresetsModeSelect = { viewModel.setZoomPresetsMode(it) },
+        onCustomZoomPresetsChange = { viewModel.setCustomZoomPresets(it) },
+        videoFps = videoFps,
+        videoBitrate = videoBitrate,
+        isVideoStabilizationEnabled = false,
+        isHardwareEisActive = false,
+        isOisEnabled = isOisEnabled,
+        isOisHardwareActive = actualOisHardwareActive,
+        isAudioEnabled = isAudioEnabled,
+        isRawEnabled = isRawEnabled,
+        saveSelfieAsPreviewed = saveSelfieAsPreviewed,
+        gridType = gridType,
+        cinemaConfig = cinemaConfig,
+        cinemaCapabilities = cinemaCapabilities,
+        viewfinderResolution = viewfinderResolution,
+        hybridStabilizationConfig = hybridStabilizationConfig,
+        tapFocusConfig = tapFocusConfig,
+        mainCameraStabilizationMode = mainCameraStabilizationMode,
+        onMainCameraStabilizationModeSelected = { viewModel.setMainCameraStabilizationMode(it) },
+        videoCodec = videoCodec,
+        jpegQuality = jpegQuality,
+        volumeKeyAction = volumeKeyAction,
+        doubleTapAction = doubleTapAction,
+        shutterFeedback = shutterFeedback,
+        antibandingMode = antibandingMode,
+        windNoiseReduction = windNoiseReduction,
+        audioSource = audioSource,
+        horizonLeveler = horizonLeveler,
+        viewfinderFps = viewfinderFps,
+        thermalProtection = thermalProtection,
+        isAutoHdrEnabled = isAutoHdrEnabled,
+        isAiAutoFramingEnabled = isAiAutoFramingEnabled,
+        currentZoom = currentZoom,
+        exposureCompensation = exposureCompensation,
+        manualIso = manualIso,
+        manualShutterSpeedNs = manualShutterSpeedNs,
+        focusMode = focusMode,
+        manualFocusDistance = manualFocusDistance,
+        onVideoCodecSelected = { viewModel.setVideoCodec(it) },
+        onJpegQualitySelected = { viewModel.setJpegQuality(it) },
+        onVolumeKeyActionSelected = { viewModel.setVolumeKeyAction(it) },
+        onDoubleTapActionSelected = { viewModel.setDoubleTapAction(it) },
+        onShutterFeedbackSelected = { viewModel.setShutterFeedback(it) },
+        onAntibandingModeSelected = { viewModel.setAntibandingMode(it) },
+        onWindNoiseReductionToggle = { viewModel.setWindNoiseReduction(it) },
+        onAudioSourceSelected = { viewModel.setAudioSource(it) },
+        onHorizonLevelerToggle = { viewModel.setHorizonLeveler(it) },
+        onViewfinderFpsSelected = { viewModel.setViewfinderFps(it) },
+        onThermalProtectionToggle = { viewModel.setThermalProtection(it) },
+        onAutoHdrToggle = { viewModel.setAutoHdrEnabled(it) },
+        onAiAutoFramingToggle = { viewModel.setAiAutoFramingEnabled(it) },
+        onZoomChange = { viewModel.setZoom(it, isPresetTap = false) },
+        onExposureCompensationChange = { viewModel.setExposureCompensation(it) },
+        onManualIsoChange = { viewModel.setManualIso(it) },
+        onManualShutterSpeedChange = { viewModel.setManualShutterSpeed(it) },
+        onFocusModeChange = { viewModel.setFocusMode(it) },
+        onManualFocusDistanceChange = { viewModel.setManualFocusDistance(it) },
+        onResetAllSettings = { viewModel.resetAllSettings() },
+        uiCustomizationState = uiCustomizationState,
+        onSelectTemplate = { viewModel.selectUiTemplate(it) },
+        onUpdateGlobalLayoutConfig = { viewModel.updateGlobalLayoutConfig(it) },
+        onUpdateModeLayoutConfig = { mode, config -> viewModel.updateModeLayoutConfig(mode, config) },
+        onResetModeLayoutConfig = { mode -> viewModel.resetModeLayoutToGlobal(mode) },
+        onSaveCustomPreset = { name, config -> viewModel.saveCustomPreset(name, config) },
+        onLoadCustomPreset = { viewModel.loadCustomPreset(it) },
+        onDeleteCustomPreset = { viewModel.deleteCustomPreset(it) },
+        onResetAllToTemplate = { viewModel.resetLayoutToTemplate(it) },
+        onLensSelected = { viewModel.selectLens(it) },
+        onForceDeepScan = { viewModel.forceDeepScanLenses() },
+        onVideoResolutionSelected = { viewModel.selectVideoResolution(it) },
+        onViewfinderResolutionSelected = { viewModel.setViewfinderResolution(it) },
+        onVideoFpsSelected = { viewModel.setVideoFps(it) },
+        onVideoBitrateSelected = { viewModel.setVideoBitrate(it) },
+        onStabilizationToggle = { viewModel.setVideoStabilization(it) },
+        onHybridStabilizationChange = { viewModel.setHybridStabilizationConfig(it) },
+        onOisToggle = { viewModel.setOisEnabled(it) },
+        onUltraStabilizationToggle = { viewModel.toggleUltraStabilization() },
+        onTapFocusConfigChange = { viewModel.setTapFocusConfig(it) },
+        onAudioToggle = { viewModel.toggleAudio() },
+        onRawToggle = { viewModel.toggleRawCapture() },
+        onSaveSelfieAsPreviewedToggle = { viewModel.setSaveSelfieAsPreviewed(it) },
+        onGridTypeSelected = { viewModel.setGridType(it) },
+        onCinemaConfigChange = { viewModel.updateCinemaConfig(it) },
+        onOpenCustomUiStudio = onOpenCustomUiStudio,
+        instantSwitchState = instantSwitchState,
+        lensSwitchOverlapDurationSec = viewModel.lensSwitchOverlapDurationSec.collectAsStateWithLifecycle().value,
+        onLensSwitchOverlapDurationChange = { viewModel.setLensSwitchOverlapDuration(it) },
+        lensSwitchHoldDurationSec = viewModel.lensSwitchHoldDurationSec.collectAsStateWithLifecycle().value,
+        onLensSwitchHoldDurationChange = { viewModel.setLensSwitchHoldDuration(it) },
+        isLensSwitchOverlapAnimationEnabled = viewModel.isLensSwitchOverlapAnimationEnabled.collectAsStateWithLifecycle().value,
+        onLensSwitchOverlapAnimationToggle = { viewModel.setLensSwitchOverlapAnimationEnabled(it) },
+        onKeepUltraWideReadyToggle = { viewModel.setKeepUltraWideReady(it) },
+        onAutoSwitchToUltraWideToggle = { viewModel.setAutoSwitchToUltraWide(it) },
+        onShowUltraWidePreviewToggle = { viewModel.setShowUltraWidePreview(it) },
+        onShowFrontCameraPreviewToggle = { viewModel.setShowFrontCameraPreview(it) },
+        floatingWindowAppearance = floatingWindowAppearance,
+        onFloatingWindowTransparencyChange = { viewModel.setFloatingWindowTransparency(it) },
+        onFloatingWindowBlurStrengthChange = { viewModel.setFloatingWindowBlurStrength(it) },
+        onFloatingWindowAppearanceChange = { viewModel.setFloatingWindowAppearance(it) },
+        onResetFloatingWindowAppearance = { viewModel.resetFloatingWindowAppearance() },
+        preferredGalleryPackage = preferredGalleryPackage,
+        onOpenGalleryChooser = { viewModel.setGallerySelectionDialogOpen(true) },
+        onDismiss = onDismiss
+    )
+}
