@@ -108,12 +108,23 @@ fun CameraScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
-        // Camera permission is required for the preview. Microphone permission is not
-        // required to open the app or take photos, so defer it until audio is requested.
-        if (!hasCameraPermission) {
-            permissionLauncher.launch(arrayOf(Manifest.permission.CAMERA))
+    fun requestMissingStartupPermissions() {
+        val missingPermissions = buildList {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                add(Manifest.permission.CAMERA)
+            }
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                add(Manifest.permission.RECORD_AUDIO)
+            }
         }
+        if (missingPermissions.isNotEmpty()) {
+            permissionLauncher.launch(missingPermissions.toTypedArray())
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        // Request camera and microphone access together as soon as the app opens.
+        requestMissingStartupPermissions()
     }
 
     LaunchedEffect(hasCameraPermission) {
@@ -125,7 +136,7 @@ fun CameraScreen(
     if (!hasCameraPermission) {
         CameraPermissionPrompt(
             onRequestPermission = {
-                permissionLauncher.launch(arrayOf(Manifest.permission.CAMERA))
+                requestMissingStartupPermissions()
             },
             modifier = modifier
         )
