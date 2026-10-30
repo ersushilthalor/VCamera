@@ -766,11 +766,11 @@ class CameraPreferences(context: Context) {
         }
 
     var isOisEnabled: Boolean
-        get() = prefs.getBoolean("pref_ois_enabled", prefs.getBoolean("pref_ois_preferred", true))
-        set(value) {
+        get() = true
+        set(@Suppress("UNUSED_PARAMETER") value) {
             prefs.edit()
-                .putBoolean("pref_ois_enabled", value)
-                .putBoolean("pref_ois_preferred", value)
+                .putBoolean("pref_ois_enabled", true)
+                .putBoolean("pref_ois_preferred", true)
                 .apply()
         }
 
