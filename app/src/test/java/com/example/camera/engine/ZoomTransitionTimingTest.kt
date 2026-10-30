@@ -12,11 +12,30 @@ class ZoomTransitionTimingTest {
     }
 
     @Test
-    fun configuredOneXHoldDurationUsesTheFullSupportedRange() {
-        assertEquals(0L, ZoomTransitionController.clampHoldAtOneXDurationMs(0L))
-        assertEquals(20L, ZoomTransitionController.clampHoldAtOneXDurationMs(20L))
-        assertEquals(175L, ZoomTransitionController.clampHoldAtOneXDurationMs(175L))
-        assertEquals(300L, ZoomTransitionController.clampHoldAtOneXDurationMs(500L))
+    fun oneXHoldDurationIsFixedAt200Milliseconds() {
+        assertEquals(200L, ZoomTransitionController.DEFAULT_HOLD_AT_ONE_X_DURATION_MS)
+    }
+
+    @Test
+    fun directHalfXToOneXKeepsFullZoomDurationAndAddsHoldAfterward() {
+        assertEquals(
+            300L,
+            ZoomTransitionController.calculateTransitionMotionDurationMs(
+                durationMs = 300L,
+                holdDurationMs = 200L,
+                isUltraWideToMainSwitch = true,
+                isDirectHalfXToOneXHold = true
+            )
+        )
+        assertEquals(
+            100L,
+            ZoomTransitionController.calculateTransitionMotionDurationMs(
+                durationMs = 300L,
+                holdDurationMs = 200L,
+                isUltraWideToMainSwitch = true,
+                isDirectHalfXToOneXHold = false
+            )
+        )
     }
 
     @Test

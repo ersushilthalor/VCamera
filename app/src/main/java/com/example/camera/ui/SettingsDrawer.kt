@@ -183,8 +183,6 @@ fun SettingsDrawer(
     onViewfinderCornerRadiusChange: (Int) -> Unit = {},
     lensSwitchOverlapDurationSec: Float = 0.3f,
     onLensSwitchOverlapDurationChange: (Float) -> Unit = {},
-    lensSwitchHoldDurationSec: Float = 0.02f,
-    onLensSwitchHoldDurationChange: (Float) -> Unit = {},
     isLensSwitchOverlapAnimationEnabled: Boolean = false,
     onLensSwitchOverlapAnimationToggle: (Boolean) -> Unit = {},
     onDismiss: () -> Unit = {}
@@ -349,8 +347,6 @@ fun SettingsDrawer(
                             instantSwitchState = instantSwitchState,
                             lensSwitchOverlapDurationSec = lensSwitchOverlapDurationSec,
                             onLensSwitchOverlapDurationChange = onLensSwitchOverlapDurationChange,
-                            lensSwitchHoldDurationSec = lensSwitchHoldDurationSec,
-                            onLensSwitchHoldDurationChange = onLensSwitchHoldDurationChange,
                             isLensSwitchOverlapAnimationEnabled = isLensSwitchOverlapAnimationEnabled,
                             onLensSwitchOverlapAnimationToggle = onLensSwitchOverlapAnimationToggle,
                             onKeepUltraWideReadyToggle = onKeepUltraWideReadyToggle,
@@ -1937,8 +1933,6 @@ private fun CameraLensSettingsPage(
     instantSwitchState: MotorolaInstantSwitchState,
     lensSwitchOverlapDurationSec: Float = 0.3f,
     onLensSwitchOverlapDurationChange: (Float) -> Unit = {},
-    lensSwitchHoldDurationSec: Float = 0.10f,
-    onLensSwitchHoldDurationChange: (Float) -> Unit = {},
     isLensSwitchOverlapAnimationEnabled: Boolean = false,
     onLensSwitchOverlapAnimationToggle: (Boolean) -> Unit = {},
     onKeepUltraWideReadyToggle: (Boolean) -> Unit = {},
@@ -1968,14 +1962,6 @@ private fun CameraLensSettingsPage(
             )
         }
 
-
-        item {
-            LensSwitchHoldDurationSettingCard(
-                holdDurationSec = lensSwitchHoldDurationSec,
-                onHoldDurationChange = onLensSwitchHoldDurationChange,
-                isOverlapAnimationEnabled = isLensSwitchOverlapAnimationEnabled
-            )
-        }
 
         item {
             SettingsSwitchCard(
@@ -2057,156 +2043,6 @@ private fun CameraLensSettingsPage(
                 selectedOption = viewfinderResolution,
                 onOptionSelected = onViewfinderResolutionSelected
             )
-        }
-    }
-}
-
-@Composable
-private fun LensSwitchHoldDurationSettingCard(
-    holdDurationSec: Float,
-    onHoldDurationChange: (Float) -> Unit,
-    isOverlapAnimationEnabled: Boolean = false
-) {
-    val roundedDuration = ((holdDurationSec.coerceIn(0.0f, 0.30f) * 100f).roundToInt() / 100f).coerceIn(0.0f, 0.30f)
-    val isDefault = kotlin.math.abs(roundedDuration - 0.02f) < 0.001f
-    val holdMillis = (roundedDuration * 1000f).roundToInt()
-    val displayValue = when {
-        holdMillis == 0 -> "0 ms"
-        isOverlapAnimationEnabled && isDefault -> "$holdMillis ms (Default • Fallback)"
-        isOverlapAnimationEnabled -> "$holdMillis ms (Fallback)"
-        isDefault -> "$holdMillis ms (Default)"
-        else -> "$holdMillis ms"
-    }
-
-    val options = listOf(
-        0.0f to "0 ms",
-        0.02f to "20 ms (Default)",
-        0.05f to "50 ms",
-        0.10f to "100 ms",
-        0.15f to "150 ms",
-        0.20f to "200 ms",
-        0.25f to "250 ms",
-        0.30f to "300 ms"
-    )
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("setting_lens_switch_hold_duration_card"),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E24))
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFFFF8A32).copy(alpha = 0.15f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Timer,
-                            contentDescription = null,
-                            tint = Color(0xFFFF8A32),
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    Column {
-                        Text(
-                            text = "Lens Switch Hold Duration",
-                            color = Color.White,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = if (isOverlapAnimationEnabled) {
-                                "Sixteen-frame handoff is used only for 0.5x ↔ 2x/3x. The 0.5x ↔ 1x switch keeps this selected hold time."
-                            } else {
-                                "0.5x ↔ 2x/3x skips the hold. The 0.5x ↔ 1x switch uses this selected duration."
-                            },
-                            color = Color.White.copy(alpha = 0.6f),
-                            fontSize = 12.sp,
-                            lineHeight = 16.sp
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Surface(
-                shape = RoundedCornerShape(8.dp),
-                color = Color.Black.copy(alpha = 0.35f),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = if (isOverlapAnimationEnabled) "Fallback Hold Time" else "Current Hold Time",
-                        color = Color.White.copy(alpha = 0.7f),
-                        fontSize = 12.sp
-                    )
-                    Text(
-                        text = displayValue,
-                        color = Color(0xFFFF8A32),
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                options.forEach { (value, label) ->
-                    val isSelected = kotlin.math.abs(roundedDuration - value) < 0.005f
-                    val tagValue = String.format(java.util.Locale.US, "%.2f", value)
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = { onHoldDurationChange(value) },
-                        modifier = Modifier.testTag("hold_duration_option_$tagValue"),
-                        label = {
-                            Text(
-                                text = label,
-                                fontSize = 11.5.sp,
-                                fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
-                            )
-                        },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = Color(0xFFFF8A32),
-                            selectedLabelColor = Color.Black,
-                            containerColor = Color.White.copy(alpha = 0.08f),
-                            labelColor = Color.White
-                        )
-                    )
-                }
-            }
         }
     }
 }
@@ -3118,8 +2954,6 @@ fun CameraSettingsScreen(
         instantSwitchState = instantSwitchState,
         lensSwitchOverlapDurationSec = viewModel.lensSwitchOverlapDurationSec.collectAsStateWithLifecycle().value,
         onLensSwitchOverlapDurationChange = { viewModel.setLensSwitchOverlapDuration(it) },
-        lensSwitchHoldDurationSec = viewModel.lensSwitchHoldDurationSec.collectAsStateWithLifecycle().value,
-        onLensSwitchHoldDurationChange = { viewModel.setLensSwitchHoldDuration(it) },
         isLensSwitchOverlapAnimationEnabled = viewModel.isLensSwitchOverlapAnimationEnabled.collectAsStateWithLifecycle().value,
         onLensSwitchOverlapAnimationToggle = { viewModel.setLensSwitchOverlapAnimationEnabled(it) },
         onKeepUltraWideReadyToggle = { viewModel.setKeepUltraWideReady(it) },

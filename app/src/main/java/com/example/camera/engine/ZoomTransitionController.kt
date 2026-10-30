@@ -60,9 +60,6 @@ class ZoomTransitionController(
         const val TOTAL_TRANSITION_DURATION_MS = 400L // Existing default duration for non-video camera modes
         const val VIDEO_TRANSITION_DURATION_MS = 300L // Fixed duration for Video and Pro Video
         const val DEFAULT_HOLD_AT_ONE_X_DURATION_MS = 200L // Default hold at exact 1x FOV before physical switch
-        const val HOLD_AT_ONE_X_DURATION_MS = 20L // Preserved for backwards compatibility
-        const val MIN_HOLD_AT_ONE_X_DURATION_MS = 0L
-        const val MAX_HOLD_AT_ONE_X_DURATION_MS = 300L
         private const val HOLD_FOV_CONFIRMATION_FRAMES = 2L
         private const val HOLD_FOV_FRAME_TIMEOUT_MS = 150L
         const val DEFAULT_OVERLAP_DURATION_MS = 400L
@@ -85,14 +82,26 @@ class ZoomTransitionController(
             abs(zoom - 2.0f) < 0.05f || abs(zoom - 3.0f) < 0.05f
 
         /**
-         * A direct 0.5x -> 1x tap uses the user-selected hold duration, never frame handoff.
+         * A direct 0.5x -> 1x tap uses a fixed 200ms hold, never frame handoff.
          * Keep this separate from telephoto eligibility so the two paths cannot overlap.
          */
         fun isHoldTimeHandoffEligible(fromZoom: Float, targetZoom: Float): Boolean =
             isHalfXZoom(fromZoom) && abs(targetZoom - 1.0f) < 0.05f
 
-        fun clampHoldAtOneXDurationMs(durationMs: Long): Long =
-            durationMs.coerceIn(MIN_HOLD_AT_ONE_X_DURATION_MS, MAX_HOLD_AT_ONE_X_DURATION_MS)
+        /** Keeps the direct 0.5x -> 1x motion at its full duration, then adds the hold separately. */
+        internal fun calculateTransitionMotionDurationMs(
+            durationMs: Long,
+            holdDurationMs: Long,
+            isUltraWideToMainSwitch: Boolean,
+            isDirectHalfXToOneXHold: Boolean
+        ): Long {
+            val requestedDuration = durationMs.coerceAtLeast(1L)
+            return if (isUltraWideToMainSwitch && !isDirectHalfXToOneXHold) {
+                (requestedDuration - holdDurationMs).coerceAtLeast(1L)
+            } else {
+                requestedDuration
+            }
+        }
 
         /** True only for direct 0.5x -> 2x/3x preset-endpoint transitions. */
         fun isHalfXToTelephotoPresetTransition(fromZoom: Float, targetZoom: Float): Boolean =
@@ -200,7 +209,6 @@ class ZoomTransitionController(
     }
 
     var overlapDurationMs: Long = DEFAULT_OVERLAP_DURATION_MS
-    var holdAtOneXDurationMs: Long = DEFAULT_HOLD_AT_ONE_X_DURATION_MS
     var isOverlapAnimationEnabled: Boolean = false
 
     private val _isTransitionActive = MutableStateFlow(false)
@@ -540,17 +548,19 @@ class ZoomTransitionController(
                 ultraWideLens != null && mainWideLens != null &&
                 (targetLens == null || targetLens.isPrimaryMain || targetLens.lensType == LensType.WIDE || targetLens.lensType == LensType.TELEPHOTO || targetLens.lensType == LensType.TELEPHOTO_3X)
             val isDirectHalfXToTelephotoPreset = isHalfXToTelephotoPresetTransition(startZ, endZ)
-            // The 1x handoff hold is part of the fixed 300ms budget, not extra time after it.
+            // For direct 0.5x -> 1x, keep the full zoom duration and add a fixed
+            // 200ms hold only after the Ultra-Wide 1x-equivalent crop reaches the preview.
             val holdDuration = if (skipHoldAtSwitchPoint || isDirectHalfXToTelephotoPreset) {
                 0L
             } else {
-                clampHoldAtOneXDurationMs(holdAtOneXDurationMs)
+                DEFAULT_HOLD_AT_ONE_X_DURATION_MS
             }
-            val transitionMotionDurationMs = if (isUltraWideToMainSwitch) {
-                (transitionDurationMs - holdDuration).coerceAtLeast(1L)
-            } else {
-                transitionDurationMs
-            }
+            val transitionMotionDurationMs = calculateTransitionMotionDurationMs(
+                durationMs = transitionDurationMs,
+                holdDurationMs = holdDuration,
+                isUltraWideToMainSwitch = isUltraWideToMainSwitch,
+                isDirectHalfXToOneXHold = isHoldTimeHandoffEligible(startZ, endZ)
+            )
 
             if (isUltraWideToMainSwitch) {
                 // 1. Keep view on Ultra-Wide lens; digitally crop Ultra-Wide to the selected focal length (effectiveSwitchZoom)
@@ -768,11 +778,11 @@ class ZoomTransitionController(
 
                 // 2. Hold that exact FOV for the same duration as the existing 1x switch hold time
                 // Direct 2x/3x preset taps should cross the lens switch without pausing at 1x.
-                // Keep the configured hold unchanged for 1x taps and all other transitions.
+                // Keep the fixed 200ms hold for 1x taps and other non-skipped transitions.
                 // Direct 2x/3x telephoto preset taps must never pause at the lens handoff,
                 // even if the caller forgets the skip flag. A deliberate 1x tap keeps its hold.
                 val isDirectTelephotoTarget = isDirectHalfXToTelephotoPreset
-                // Use the hold duration already deducted from the 300ms motion budget.
+                // Apply the fixed hold only after the 1x-equivalent Ultra-Wide crop is visible.
 
                 val useFrameBasedHandoff = !usesHoldTimeHandoff &&
                     isOverlapAnimationEnabled && isFrameBasedHandoffEligible(startZ, endZ)
