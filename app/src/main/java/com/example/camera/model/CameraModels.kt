@@ -353,13 +353,13 @@ enum class FloatingWindowGlassStyle(val id: String, val displayName: String) {
  * @param glassStyle Liquid Glass, Frosted Glass, Transparent Glass, etc.
  * @param transparency 0.0f (opaque/solid glass) to 1.0f (crystal clear / maximum backdrop visibility)
  * @param blurStrength 0.0f (sharp/no blur) to 50.0f (deep creamy optical frosted diffusion)
- * @param windowScale 0.75f (75% compact) to 1.25f (125% large) size multiplier for all floating windows
+ * @param windowScale Fixed at 1.0f (100%) for all floating windows
  */
 data class FloatingWindowAppearanceConfig(
     val glassStyle: FloatingWindowGlassStyle = FloatingWindowGlassStyle.LIQUID_GLASS,
     val transparency: Float = 0.55f, // Default 55% transparency
     val blurStrength: Float = 22.0f,  // Default 22 dp blur
-    val windowScale: Float = 0.88f,   // Content-based compact scale (default 88%)
+    val windowScale: Float = 1.0f,   // Content-based compact scale (default 88%)
     // Configurable settings inside Floating Windows:
     // 1. Video Settings Floating Window
     val showVideoResolution: Boolean = true,
@@ -381,44 +381,44 @@ data class FloatingWindowAppearanceConfig(
 ) {
     val transparencyPercent: Int get() = kotlin.math.round((transparency * 100f)).toInt().coerceIn(0, 100)
     val blurStrengthDp: Int get() = kotlin.math.round(blurStrength).toInt().coerceIn(0, 50)
-    val windowScalePercent: Int get() = kotlin.math.round((windowScale * 100f)).toInt().coerceIn(75, 125)
+    val windowScalePercent: Int get() = 100
 
     companion object {
         val LIQUID_GLASS = FloatingWindowAppearanceConfig(
             glassStyle = FloatingWindowGlassStyle.LIQUID_GLASS,
             transparency = 0.55f,
             blurStrength = 22.0f,
-            windowScale = 0.88f
+            windowScale = 1.0f
         )
         val FROSTED_GLASS = FloatingWindowAppearanceConfig(
             glassStyle = FloatingWindowGlassStyle.FROSTED_GLASS,
             transparency = 0.40f,
             blurStrength = 32.0f,
-            windowScale = 0.88f
+            windowScale = 1.0f
         )
         val TRANSPARENT_GLASS = FloatingWindowAppearanceConfig(
             glassStyle = FloatingWindowGlassStyle.TRANSPARENT_GLASS,
             transparency = 0.82f,
             blurStrength = 8.0f,
-            windowScale = 0.88f
+            windowScale = 1.0f
         )
         val SUBTLE_FROST = FloatingWindowAppearanceConfig(
             glassStyle = FloatingWindowGlassStyle.SUBTLE_FROST,
             transparency = 0.45f,
             blurStrength = 16.0f,
-            windowScale = 0.88f
+            windowScale = 1.0f
         )
         val DEEP_FROST = FloatingWindowAppearanceConfig(
             glassStyle = FloatingWindowGlassStyle.DEEP_FROST,
             transparency = 0.65f,
             blurStrength = 40.0f,
-            windowScale = 0.88f
+            windowScale = 1.0f
         )
         val SOLID_DARK = FloatingWindowAppearanceConfig(
             glassStyle = FloatingWindowGlassStyle.SOLID_DARK,
             transparency = 0.15f,
             blurStrength = 4.0f,
-            windowScale = 0.88f
+            windowScale = 1.0f
         )
 
         // Backward compatibility alias
