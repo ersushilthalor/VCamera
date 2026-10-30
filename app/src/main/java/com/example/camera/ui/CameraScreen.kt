@@ -628,7 +628,7 @@ fun CameraScreen(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(top = 58.dp)
+                .padding(top = 56.dp)
         )
 
 
