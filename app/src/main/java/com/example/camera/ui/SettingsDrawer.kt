@@ -1,0 +1,3960 @@
+package com.example.camera.ui
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.*
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import com.example.camera.data.CustomLutItem
+import com.example.camera.data.CustomLutRepository
+import com.example.camera.model.*
+import com.example.camera.ui.components.FrostedGlassBox
+import com.example.camera.viewmodel.CameraViewModel
+import kotlin.math.roundToInt
+
+/**
+ * Dedicated Settings Pages.
+ */
+enum class SettingsPage(val title: String, val subtitle: String, val icon: ImageVector) {
+    VIDEO("Video Settings", "Resolution, Frame Rate, Codec & Bitrate", Icons.Outlined.Videocam),
+    CINEMA("Pro Video Settings", "Resolution, FPS, Bitrate, Codec, Noise Reduction, Sharpness, Log & LUTs", Icons.Outlined.Movie),
+    PRO_MANUAL("Pro / Manual Settings", "ISO, Shutter, Focus, WB & Video Pipeline", Icons.Outlined.Tune),
+    CAMERA_LENS("Camera & Lens Settings", "Hardware lenses & Viewfinder", Icons.Outlined.Lens),
+    UI_LAYOUT("UI & Layout Settings", "Templates, Floating windows & Custom studio", Icons.Outlined.DashboardCustomize),
+    GENERAL("General Settings", "Volume key, Double tap, Feedback & Thermal", Icons.Outlined.Settings),
+    ABOUT("About & Hardware Info", "Device camera specs, Sensor & Storage stats", Icons.Outlined.Info)
+}
+
+/**
+ * Premium Dark Theme Camera Settings UI.
+ * Features:
+ * - Deep black backgrounds, subtle borders, clean typography, modern settings cards.
+ * - Dedicated sub-pages for every category with smooth navigation and back buttons.
+ * - Direct functional ON/OFF toggles and adjustments.
+ * - All text horizontally oriented with natural wrapping.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsDrawer(
+    isOpen: Boolean,
+    cameraMode: CameraMode,
+    capabilities: HardwareCapabilities,
+    availableLenses: List<LensInfo> = emptyList(),
+    selectedLens: LensInfo? = null,
+    selectedVideoResolution: CameraResolution?,
+    zoomPresetsMode: String = "STANDARD",
+    customZoomPresetsStr: String = "1, 2, 4, 8",
+    onZoomPresetsModeSelect: (String) -> Unit = {},
+    onCustomZoomPresetsChange: (String) -> Unit = {},
+    videoFps: Int = 30,
+    videoBitrate: VideoBitrateOption = VideoBitrateOption.AUTO,
+    // Legacy EIS values are retained only for source compatibility; the UI never exposes EIS.
+    isVideoStabilizationEnabled: Boolean = false,
+    isHardwareEisActive: Boolean = false,
+    isOisEnabled: Boolean = true,
+    isOisHardwareActive: Boolean = false,
+    isHorizontalLockSettingEnabled: Boolean = true,
+    onHorizontalLockSettingToggle: (Boolean) -> Unit = {},
+    isDollyZoomSettingEnabled: Boolean = false,
+    onDollyZoomSettingToggle: (Boolean) -> Unit = {},
+    isAudioEnabled: Boolean = true,
+    isRawEnabled: Boolean = false,
+    saveSelfieAsPreviewed: Boolean = true,
+    gridType: GridType = GridType.NONE,
+    cinemaConfig: CinemaConfig = CinemaConfig(),
+    cinemaCapabilities: CinemaHardwareCapabilities = CinemaHardwareCapabilities(),
+    viewfinderResolution: ViewfinderResolution = ViewfinderResolution.NORMAL,
+    hybridStabilizationConfig: HybridStabilizationConfig = HybridStabilizationConfig(),
+    tapFocusConfig: TapFocusConfig = TapFocusConfig(),
+    mainCameraStabilizationMode: MainCameraStabilizationMode = MainCameraStabilizationMode.HYBRID_OIS_EIS,
+    onMainCameraStabilizationModeSelected: (MainCameraStabilizationMode) -> Unit = {},
+    videoCodec: String = "HEVC",
+    jpegQuality: Int = 95,
+    volumeKeyAction: String = "SHUTTER",
+    doubleTapAction: String = "FLIP",
+    shutterFeedback: String = "SOUND_AND_HAPTIC",
+    antibandingMode: String = "AUTO",
+    windNoiseReduction: Boolean = true,
+    audioSource: String = "CAMCORDER",
+    horizonLeveler: Boolean = true,
+    viewfinderFps: Int = 60,
+    thermalProtection: Boolean = true,
+    isAutoHdrEnabled: Boolean = true,
+    isAiAutoFramingEnabled: Boolean = false,
+    currentZoom: Float = 1.0f,
+    exposureCompensation: Int = 0,
+    manualIso: Int? = null,
+    manualShutterSpeedNs: Long? = null,
+    focusMode: FocusMode = FocusMode.CONTINUOUS,
+    manualFocusDistance: Float = 0.0f,
+    // Callbacks
+    onVideoCodecSelected: (String) -> Unit = {},
+    onJpegQualitySelected: (Int) -> Unit = {},
+    onVolumeKeyActionSelected: (String) -> Unit = {},
+    onDoubleTapActionSelected: (String) -> Unit = {},
+    onShutterFeedbackSelected: (String) -> Unit = {},
+    onAntibandingModeSelected: (String) -> Unit = {},
+    onWindNoiseReductionToggle: (Boolean) -> Unit = {},
+    onAudioSourceSelected: (String) -> Unit = {},
+    onHorizonLevelerToggle: (Boolean) -> Unit = {},
+    onViewfinderFpsSelected: (Int) -> Unit = {},
+    onThermalProtectionToggle: (Boolean) -> Unit = {},
+    onAutoHdrToggle: (Boolean) -> Unit = {},
+    onAiAutoFramingToggle: (Boolean) -> Unit = {},
+    onZoomChange: (Float) -> Unit = {},
+    onExposureCompensationChange: (Int) -> Unit = {},
+    onManualIsoChange: (Int?) -> Unit = {},
+    onManualShutterSpeedChange: (Long?) -> Unit = {},
+    onFocusModeChange: (FocusMode) -> Unit = {},
+    onManualFocusDistanceChange: (Float) -> Unit = {},
+    onResetAllSettings: () -> Unit = {},
+    // UI Customization callbacks
+    uiCustomizationState: UiCustomizationState = UiCustomizationState(),
+    onSelectTemplate: (UiTemplateType) -> Unit = {},
+    onUpdateGlobalLayoutConfig: (ModeLayoutConfig) -> Unit = {},
+    onUpdateModeLayoutConfig: (CameraMode, ModeLayoutConfig) -> Unit = { _, _ -> },
+    onResetModeLayoutConfig: (CameraMode) -> Unit = {},
+    onSaveCustomPreset: (String, ModeLayoutConfig) -> Unit = { _, _ -> },
+    onLoadCustomPreset: (CustomUiPreset) -> Unit = {},
+    onDeleteCustomPreset: (String) -> Unit = {},
+    onResetAllToTemplate: (UiTemplateType) -> Unit = {},
+    onLensSelected: (LensInfo) -> Unit = {},
+    onForceDeepScan: () -> Unit = {},
+    onVideoResolutionSelected: (CameraResolution) -> Unit = {},
+    onViewfinderResolutionSelected: (ViewfinderResolution) -> Unit = {},
+    onVideoFpsSelected: (Int) -> Unit = {},
+    onVideoBitrateSelected: (VideoBitrateOption) -> Unit = {},
+    onStabilizationToggle: (Boolean) -> Unit = {},
+    onHybridStabilizationChange: (HybridStabilizationConfig) -> Unit = {},
+    onOisToggle: (Boolean) -> Unit = {},
+    onUltraStabilizationToggle: () -> Unit = {},
+    onTapFocusConfigChange: (TapFocusConfig) -> Unit = {},
+    onAudioToggle: () -> Unit = {},
+    onRawToggle: () -> Unit = {},
+    onSaveSelfieAsPreviewedToggle: (Boolean) -> Unit = {},
+    onGridTypeSelected: (GridType) -> Unit = {},
+    onCinemaConfigChange: (CinemaConfig) -> Unit = {},
+    onOpenCustomUiStudio: () -> Unit = {},
+    instantSwitchState: MotorolaInstantSwitchState = MotorolaInstantSwitchState(),
+    onKeepUltraWideReadyToggle: (Boolean) -> Unit = {},
+    onAutoSwitchToUltraWideToggle: (Boolean) -> Unit = {},
+    onShowUltraWidePreviewToggle: (Boolean) -> Unit = {},
+    onShowFrontCameraPreviewToggle: (Boolean) -> Unit = {},
+    floatingWindowAppearance: FloatingWindowAppearanceConfig = FloatingWindowAppearanceConfig.GLASSMORPHISM,
+    onFloatingWindowTransparencyChange: (Float) -> Unit = {},
+    onFloatingWindowBlurStrengthChange: (Float) -> Unit = {},
+    onFloatingWindowAppearanceChange: (FloatingWindowAppearanceConfig) -> Unit = {},
+    onResetFloatingWindowAppearance: () -> Unit = {},
+    preferredGalleryPackage: String? = null,
+    onOpenGalleryChooser: () -> Unit = {},
+    viewfinderCornerRadiusDp: Int = 0,
+    onViewfinderCornerRadiusChange: (Int) -> Unit = {},
+    lensSwitchOverlapDurationSec: Float = 0.3f,
+    onLensSwitchOverlapDurationChange: (Float) -> Unit = {},
+    lensSwitchHoldDurationSec: Float = 0.02f,
+    onLensSwitchHoldDurationChange: (Float) -> Unit = {},
+    isLensSwitchOverlapAnimationEnabled: Boolean = false,
+    onLensSwitchOverlapAnimationToggle: (Boolean) -> Unit = {},
+    onDismiss: () -> Unit = {}
+) {
+    if (!isOpen) return
+
+    var currentPage by remember { mutableStateOf<SettingsPage?>(null) }
+
+    // Intercept back button to return to overview before closing drawer
+    BackHandler(enabled = isOpen) {
+        if (currentPage != null) {
+            currentPage = null
+        } else {
+            onDismiss()
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF000000))
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .testTag("settings_screen")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 6.dp)
+        ) {
+            // Reference-style Settings header
+            Row(
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(
+                    onClick = {
+                        if (currentPage != null) currentPage = null else onDismiss()
+                    },
+                    modifier = Modifier.size(40.dp).testTag("settings_back_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = Color.White,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+                Text(
+                    text = "Settings",
+                    color = Color.White,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(start = 8.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Content Area: Either Categories Overview or Dedicated Page
+            AnimatedContent(
+                targetState = currentPage,
+                transitionSpec = {
+                    if (targetState != null) {
+                        slideInHorizontally { it } + fadeIn() togetherWith slideOutHorizontally { -it } + fadeOut()
+                    } else {
+                        slideInHorizontally { -it } + fadeIn() togetherWith slideOutHorizontally { it } + fadeOut()
+                    }
+                },
+                label = "settings_page_transition",
+                modifier = Modifier.fillMaxSize()
+            ) { targetPage ->
+                if (targetPage == null) {
+                    // 1. Categories Overview
+                    SettingsOverviewPage(
+                        onSelectPage = { currentPage = it },
+                        onResetAll = onResetAllSettings,
+                        saveSelfieAsPreviewed = saveSelfieAsPreviewed,
+                        onSaveSelfieAsPreviewedToggle = onSaveSelfieAsPreviewedToggle,
+                        volumeKeyAction = volumeKeyAction,
+                        onVolumeKeyActionSelected = onVolumeKeyActionSelected,
+                        doubleTapAction = doubleTapAction,
+                        onDoubleTapActionSelected = onDoubleTapActionSelected,
+                        shutterFeedback = shutterFeedback,
+                        onShutterFeedbackSelected = onShutterFeedbackSelected,
+                        antibandingMode = antibandingMode,
+                        onAntibandingModeSelected = onAntibandingModeSelected,
+                        isVideoStabilizationEnabled = isVideoStabilizationEnabled,
+                        onStabilizationToggle = onStabilizationToggle,
+                        isOisEnabled = isOisEnabled,
+                        isOisHardwareActive = isOisHardwareActive,
+                        onOisToggle = onOisToggle,
+                        isAudioEnabled = isAudioEnabled,
+                        onAudioToggle = onAudioToggle,
+                        videoBitrate = videoBitrate,
+                        onVideoBitrateSelected = onVideoBitrateSelected,
+                        isHorizontalLockSettingEnabled = isHorizontalLockSettingEnabled,
+                        onHorizontalLockSettingToggle = onHorizontalLockSettingToggle,
+                        horizonLeveler = horizonLeveler,
+                        onHorizonLevelerToggle = onHorizonLevelerToggle,
+                        thermalProtection = thermalProtection,
+                        onThermalProtectionToggle = onThermalProtectionToggle
+                    )
+                } else {
+                    // 2. Dedicated Sub-Pages
+                    when (targetPage) {
+                                                SettingsPage.VIDEO -> VideoSettingsPage(
+                            selectedVideoResolution = selectedVideoResolution,
+                            onVideoResolutionSelected = onVideoResolutionSelected,
+                            capabilities = capabilities,
+                            videoFps = videoFps,
+                            onVideoFpsSelected = onVideoFpsSelected,
+                            videoBitrate = videoBitrate,
+                            onVideoBitrateSelected = onVideoBitrateSelected,
+                            videoCodec = videoCodec,
+                            onVideoCodecSelected = onVideoCodecSelected,
+                            isAudioEnabled = isAudioEnabled,
+                            onAudioToggle = onAudioToggle,
+                            windNoiseReduction = windNoiseReduction,
+                            onWindNoiseReductionToggle = onWindNoiseReductionToggle,
+                            audioSource = audioSource,
+                            onAudioSourceSelected = onAudioSourceSelected,
+                            isVideoStabilizationEnabled = isVideoStabilizationEnabled,
+                            onStabilizationToggle = onStabilizationToggle,
+                            isHardwareEisActive = isHardwareEisActive,
+                            isOisPreferred = isOisEnabled,
+                            onOisToggle = onOisToggle,
+                            isHorizontalLockSettingEnabled = isHorizontalLockSettingEnabled,
+                            onHorizontalLockSettingToggle = onHorizontalLockSettingToggle,
+                            isUltraStabilizationEnabled = hybridStabilizationConfig.isUltraStabilizationEnabled,
+                            onUltraStabilizationToggle = onUltraStabilizationToggle,
+                            isDollyZoomSettingEnabled = isDollyZoomSettingEnabled,
+                            onDollyZoomSettingToggle = onDollyZoomSettingToggle
+                        )
+                        SettingsPage.CINEMA -> CinemaSettingsPage(
+                            cinemaConfig = cinemaConfig,
+                            onCinemaConfigChange = onCinemaConfigChange,
+                            cinemaCapabilities = cinemaCapabilities,
+                            capabilities = capabilities,
+                            isVideoStabilizationEnabled = isVideoStabilizationEnabled,
+                            onStabilizationToggle = onStabilizationToggle,
+                            isHardwareEisActive = isHardwareEisActive
+                        )
+                        SettingsPage.PRO_MANUAL -> ProManualSettingsPage(
+                            manualIso = manualIso,
+                            onManualIsoChange = onManualIsoChange,
+                            manualShutterSpeedNs = manualShutterSpeedNs,
+                            onManualShutterSpeedChange = onManualShutterSpeedChange,
+                            focusMode = focusMode,
+                            onFocusModeChange = onFocusModeChange,
+                            manualFocusDistance = manualFocusDistance,
+                            onManualFocusDistanceChange = onManualFocusDistanceChange,
+                            exposureCompensation = exposureCompensation,
+                            onExposureCompensationChange = onExposureCompensationChange,
+                            capabilities = capabilities
+                        )
+                        SettingsPage.CAMERA_LENS -> CameraLensSettingsPage(
+                            availableLenses = availableLenses,
+                            selectedLens = selectedLens,
+                            onLensSelected = onLensSelected,
+                            onForceDeepScan = onForceDeepScan,
+                            instantSwitchState = instantSwitchState,
+                            lensSwitchOverlapDurationSec = lensSwitchOverlapDurationSec,
+                            onLensSwitchOverlapDurationChange = onLensSwitchOverlapDurationChange,
+                            lensSwitchHoldDurationSec = lensSwitchHoldDurationSec,
+                            onLensSwitchHoldDurationChange = onLensSwitchHoldDurationChange,
+                            isLensSwitchOverlapAnimationEnabled = isLensSwitchOverlapAnimationEnabled,
+                            onLensSwitchOverlapAnimationToggle = onLensSwitchOverlapAnimationToggle,
+                            onKeepUltraWideReadyToggle = onKeepUltraWideReadyToggle,
+                            onAutoSwitchToUltraWideToggle = onAutoSwitchToUltraWideToggle,
+                            onShowUltraWidePreviewToggle = onShowUltraWidePreviewToggle,
+                            onShowFrontCameraPreviewToggle = onShowFrontCameraPreviewToggle,
+                            viewfinderFps = viewfinderFps,
+                            onViewfinderFpsSelected = onViewfinderFpsSelected,
+                            viewfinderResolution = viewfinderResolution,
+                            onViewfinderResolutionSelected = onViewfinderResolutionSelected,
+                            gridType = gridType,
+                            onGridTypeSelected = onGridTypeSelected,
+                            horizonLeveler = horizonLeveler,
+                            onHorizonLevelerToggle = onHorizonLevelerToggle
+                        )
+                        SettingsPage.UI_LAYOUT -> UiLayoutSettingsPage(
+                            uiCustomizationState = uiCustomizationState,
+                            onSelectTemplate = onSelectTemplate,
+                            onOpenCustomUiStudio = onOpenCustomUiStudio,
+                            onUpdateModeLayoutConfig = onUpdateModeLayoutConfig,
+                            onUpdateGlobalLayoutConfig = onUpdateGlobalLayoutConfig,
+                            floatingWindowAppearance = floatingWindowAppearance,
+                            onFloatingWindowTransparencyChange = onFloatingWindowTransparencyChange,
+                            onFloatingWindowBlurStrengthChange = onFloatingWindowBlurStrengthChange,
+                            onFloatingWindowAppearanceChange = onFloatingWindowAppearanceChange,
+                            onResetFloatingWindowAppearance = onResetFloatingWindowAppearance,
+                            viewfinderCornerRadiusDp = viewfinderCornerRadiusDp,
+                            onViewfinderCornerRadiusChange = onViewfinderCornerRadiusChange,
+                            viewfinderResolution = viewfinderResolution,
+                            onViewfinderResolutionSelected = onViewfinderResolutionSelected
+                        )
+                        SettingsPage.GENERAL -> GeneralSettingsPage(
+                            volumeKeyAction = volumeKeyAction,
+                            onVolumeKeyActionSelected = onVolumeKeyActionSelected,
+                            doubleTapAction = doubleTapAction,
+                            onDoubleTapActionSelected = onDoubleTapActionSelected,
+                            shutterFeedback = shutterFeedback,
+                            onShutterFeedbackSelected = onShutterFeedbackSelected,
+                            antibandingMode = antibandingMode,
+                            onAntibandingModeSelected = onAntibandingModeSelected,
+                            thermalProtection = thermalProtection,
+                            onThermalProtectionToggle = onThermalProtectionToggle,
+                            isAiAutoFramingEnabled = isAiAutoFramingEnabled,
+                            onAiAutoFramingToggle = onAiAutoFramingToggle,
+                            preferredGalleryPackage = preferredGalleryPackage,
+                            onOpenGalleryChooser = onOpenGalleryChooser,
+                            onResetAll = onResetAllSettings
+                        )
+                        SettingsPage.ABOUT -> AboutSettingsPage(
+                            capabilities = capabilities,
+                            availableLenses = availableLenses,
+                            selectedLens = selectedLens
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Main Overview list displaying all dedicated categories.
+ */
+@Composable
+private fun SettingsOverviewPage(
+    onSelectPage: (SettingsPage) -> Unit,
+    onResetAll: () -> Unit,
+    saveSelfieAsPreviewed: Boolean,
+    onSaveSelfieAsPreviewedToggle: (Boolean) -> Unit,
+    volumeKeyAction: String,
+    onVolumeKeyActionSelected: (String) -> Unit,
+    doubleTapAction: String,
+    onDoubleTapActionSelected: (String) -> Unit,
+    shutterFeedback: String,
+    onShutterFeedbackSelected: (String) -> Unit,
+    antibandingMode: String,
+    onAntibandingModeSelected: (String) -> Unit,
+    isVideoStabilizationEnabled: Boolean,
+    onStabilizationToggle: (Boolean) -> Unit,
+    isOisEnabled: Boolean,
+    isOisHardwareActive: Boolean,
+    onOisToggle: (Boolean) -> Unit,
+    isAudioEnabled: Boolean,
+    onAudioToggle: () -> Unit,
+    videoBitrate: VideoBitrateOption,
+    onVideoBitrateSelected: (VideoBitrateOption) -> Unit,
+    isHorizontalLockSettingEnabled: Boolean,
+    onHorizontalLockSettingToggle: (Boolean) -> Unit,
+    horizonLeveler: Boolean,
+    onHorizonLevelerToggle: (Boolean) -> Unit,
+    thermalProtection: Boolean,
+    onThermalProtectionToggle: (Boolean) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            ReferenceSettingsGroup("General") {
+                ReferenceChoiceRow(
+                    title = "Shutter feedback",
+                    selectedOption = shutterFeedback,
+                    options = listOf(
+                        "SOUND_AND_HAPTIC" to "Sound & haptic",
+                        "HAPTIC_ONLY" to "Haptic",
+                        "SOUND_ONLY" to "Sound",
+                        "MUTE" to "Mute"
+                    ),
+                    onOptionSelected = onShutterFeedbackSelected,
+                    showDivider = true
+                )
+                ReferenceToggleRow(
+                    title = "Mirror selfie",
+                    description = "Save front-camera photos as previewed.",
+                    checked = saveSelfieAsPreviewed,
+                    onCheckedChange = onSaveSelfieAsPreviewedToggle,
+                    showDivider = true
+                )
+                ReferenceNavigationRow(
+                    title = "Composition assistance",
+                    onClick = { onSelectPage(SettingsPage.CAMERA_LENS) },
+                    showDivider = true
+                )
+                ReferenceChoiceRow(
+                    title = "Anti-banding filter",
+                    selectedOption = antibandingMode,
+                    options = listOf(
+                        "AUTO" to "Auto",
+                        "50HZ" to "50 Hz",
+                        "60HZ" to "60 Hz",
+                        "OFF" to "Off"
+                    ),
+                    onOptionSelected = onAntibandingModeSelected,
+                    showDivider = false
+                )
+            }
+        }
+
+        
+        item {
+            ReferenceSettingsGroup("Video") {
+                ReferenceNavigationRow(
+                    title = "Resolution and frame rate",
+                    onClick = { onSelectPage(SettingsPage.VIDEO) },
+                    showDivider = true
+                )
+                ReferenceNavigationRow(
+                    title = "Pro Video settings",
+                    value = "Log, HDR, LUTs",
+                    onClick = { onSelectPage(SettingsPage.CINEMA) },
+                    showDivider = true
+                )
+                ReferenceChoiceRow(
+                    title = "Bitrate",
+                    selectedOption = videoBitrate,
+                    options = listOf(
+                        VideoBitrateOption.AUTO to "Auto",
+                        VideoBitrateOption.STANDARD to "Standard",
+                        VideoBitrateOption.HIGH to "High quality",
+                        VideoBitrateOption.MAX to "Maximum quality"
+                    ),
+                    onOptionSelected = onVideoBitrateSelected,
+                    showDivider = true
+                )
+                ReferenceToggleRow(
+                    title = "Optical stabilization (OIS)",
+                    description = if (!isOisEnabled) {
+                        "Hardware OIS is disabled."
+                    } else if (isOisHardwareActive) {
+                        "Hardware OIS is active on the current camera."
+                    } else {
+                        "OIS is enabled; waiting for hardware confirmation from the camera."
+                    },
+                    checked = isOisEnabled,
+                    onCheckedChange = onOisToggle,
+                    showDivider = true
+                )
+                ReferenceToggleRow(
+                    title = "Record audio",
+                    description = "Capture audio with videos.",
+                    checked = isAudioEnabled,
+                    onCheckedChange = { onAudioToggle() },
+                    showDivider = false
+                )
+            }
+        }
+
+        item {
+            ReferenceSettingsGroup("Handy features") {
+                ReferenceChoiceRow(
+                    title = "Volume button action",
+                    selectedOption = volumeKeyAction,
+                    options = listOf(
+                        "SHUTTER" to "Shutter",
+                        "ZOOM" to "Zoom",
+                        "VOLUME" to "System volume"
+                    ),
+                    onOptionSelected = onVolumeKeyActionSelected,
+                    showDivider = true
+                )
+                ReferenceChoiceRow(
+                    title = "Double tap viewfinder",
+                    selectedOption = doubleTapAction,
+                    options = listOf(
+                        "FLIP" to "Flip camera",
+                        "LOCK" to "Lock focus",
+                        "NONE" to "Off"
+                    ),
+                    onOptionSelected = onDoubleTapActionSelected,
+                    showDivider = true
+                )
+                ReferenceToggleRow(
+                    title = "Horizontal lock",
+                    description = "Keep the video horizon level while recording.",
+                    checked = isHorizontalLockSettingEnabled,
+                    onCheckedChange = onHorizontalLockSettingToggle,
+                    showDivider = true
+                )
+                ReferenceToggleRow(
+                    title = "Horizon level",
+                    description = "Show a level guide in the viewfinder.",
+                    checked = horizonLeveler,
+                    onCheckedChange = onHorizonLevelerToggle,
+                    showDivider = true
+                )
+                ReferenceToggleRow(
+                    title = "Adaptive thermal protection",
+                    description = "Manage camera workload when the phone gets hot.",
+                    checked = thermalProtection,
+                    onCheckedChange = onThermalProtectionToggle,
+                    showDivider = false
+                )
+            }
+        }
+
+        item {
+            ReferenceSettingsGroup("More settings") {
+                ReferenceNavigationRow(
+                    title = "Pro / Manual settings",
+                    value = "ISO, shutter, focus",
+                    onClick = { onSelectPage(SettingsPage.PRO_MANUAL) },
+                    showDivider = true
+                )
+                ReferenceNavigationRow(
+                    title = "UI & Layout settings",
+                    value = "Templates, controls, floating window",
+                    onClick = { onSelectPage(SettingsPage.UI_LAYOUT) },
+                    showDivider = true
+                )
+                ReferenceNavigationRow(
+                    title = "Camera & Lens settings",
+                    value = "Lens switching, preview, grid",
+                    onClick = { onSelectPage(SettingsPage.CAMERA_LENS) },
+                    showDivider = true
+                )
+                ReferenceNavigationRow(
+                    title = "General settings",
+                    value = "Controls, feedback, thermal",
+                    onClick = { onSelectPage(SettingsPage.GENERAL) },
+                    showDivider = false
+                )
+            }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(18.dp))
+            ReferenceSettingsGroup(null) {
+                ReferenceNavigationRow(
+                    title = "About Camera",
+                    onClick = { onSelectPage(SettingsPage.ABOUT) },
+                    showDivider = false
+                )
+            }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(18.dp))
+            Surface(
+                shape = RoundedCornerShape(22.dp),
+                color = Color(0xFF1B1B1B),
+                modifier = Modifier.fillMaxWidth().clickable { onResetAll() }
+            ) {
+                Text(
+                    text = "Restore defaults",
+                    color = Color(0xFFE58A8A),
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReferenceSettingsGroup(
+    title: String?,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        if (title != null) {
+            Text(
+                text = title,
+                color = Color(0xFF9E9E9E),
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(start = 16.dp, top = 20.dp, bottom = 10.dp)
+            )
+        }
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(22.dp),
+            color = Color(0xFF1B1B1B)
+        ) {
+            Column(content = content)
+        }
+    }
+}
+
+@Composable
+private fun ReferenceToggleRow(
+    title: String,
+    description: String? = null,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    showDivider: Boolean
+) {
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onCheckedChange(!checked) }
+                .padding(horizontal = 16.dp, vertical = if (description.isNullOrBlank()) 17.dp else 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                Text(
+                    text = title,
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Normal,
+                    lineHeight = 21.sp
+                )
+                if (!description.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Text(
+                        text = description,
+                        color = Color(0xFF9A9A9A),
+                        fontSize = 13.sp,
+                        lineHeight = 20.sp
+                    )
+                }
+            }
+            ReferenceSwitch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                modifier = Modifier.testTag("reference_switch_" + title.lowercase().replace(' ', '_'))
+            )
+        }
+        if (showDivider) {
+            HorizontalDivider(
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp),
+                thickness = 1.dp,
+                color = Color(0xFF303030)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReferenceSwitch(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .width(48.dp)
+            .height(28.dp)
+            .clip(CircleShape)
+            .background(if (checked) Color(0xFFFF8A32) else Color(0xFF5A5A5A))
+            .clickable { onCheckedChange(!checked) },
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(start = if (checked) 23.dp else 3.dp)
+                .size(22.dp)
+                .background(Color.White, CircleShape)
+        )
+    }
+}
+
+@Composable
+private fun ReferenceNavigationRow(
+    title: String,
+    value: String? = null,
+    onClick: () -> Unit,
+    showDivider: Boolean
+) {
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                // Keep both text columns constrained. An unweighted value Text can claim
+                // the entire row width and force the title to wrap one character at a time.
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = title,
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Normal,
+                lineHeight = 20.sp,
+                modifier = Modifier.weight(1f)
+            )
+            if (!value.isNullOrBlank()) {
+                Text(
+                    text = value,
+                    color = Color(0xFF9A9A9A),
+                    fontSize = 14.sp,
+                    lineHeight = 18.sp,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = Color(0xFF777777),
+                modifier = Modifier.size(22.dp)
+            )
+        }
+        if (showDivider) {
+            HorizontalDivider(
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp),
+                thickness = 1.dp,
+                color = Color(0xFF303030)
+            )
+        }
+    }
+}
+
+@Composable
+private fun <T> ReferenceChoiceRow(
+    title: String,
+    selectedOption: T,
+    options: List<Pair<T, String>>,
+    onOptionSelected: (T) -> Unit,
+    showDivider: Boolean
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedLabel = options.firstOrNull { it.first == selectedOption }?.second ?: selectedOption.toString()
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = true }
+                .padding(horizontal = 16.dp, vertical = 18.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = title,
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Normal,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = selectedLabel,
+                color = Color(0xFF9A9A9A),
+                fontSize = 14.sp,
+                modifier = Modifier.padding(start = 8.dp, end = 4.dp)
+            )
+            Icon(
+                imageVector = Icons.Default.ExpandMore,
+                contentDescription = "Choose " + title,
+                tint = Color(0xFF777777),
+                modifier = Modifier.size(22.dp)
+            )
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
+            ) {
+                options.forEach { (option, label) ->
+                    DropdownMenuItem(
+                        text = { Text(label) },
+                        onClick = {
+                            onOptionSelected(option)
+                            expanded = false
+                        }
+                    )
+                }
+            }
+        }
+        if (showDivider) {
+            HorizontalDivider(
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp),
+                thickness = 1.dp,
+                color = Color(0xFF303030)
+            )
+        }
+    }
+}
+
+
+@Composable
+private fun VideoSettingsPage(
+    selectedVideoResolution: CameraResolution?,
+    onVideoResolutionSelected: (CameraResolution) -> Unit,
+    capabilities: HardwareCapabilities,
+    videoFps: Int,
+    onVideoFpsSelected: (Int) -> Unit,
+    videoBitrate: VideoBitrateOption,
+    onVideoBitrateSelected: (VideoBitrateOption) -> Unit,
+    videoCodec: String,
+    onVideoCodecSelected: (String) -> Unit,
+    isAudioEnabled: Boolean,
+    onAudioToggle: () -> Unit,
+    windNoiseReduction: Boolean,
+    onWindNoiseReductionToggle: (Boolean) -> Unit,
+    audioSource: String,
+    onAudioSourceSelected: (String) -> Unit,
+    isVideoStabilizationEnabled: Boolean,
+    onStabilizationToggle: (Boolean) -> Unit,
+    isHardwareEisActive: Boolean = false,
+    isOisPreferred: Boolean = true,
+    onOisToggle: (Boolean) -> Unit = {},
+    isHorizontalLockSettingEnabled: Boolean = true,
+    onHorizontalLockSettingToggle: (Boolean) -> Unit = {},
+    isUltraStabilizationEnabled: Boolean,
+    onUltraStabilizationToggle: () -> Unit,
+    isDollyZoomSettingEnabled: Boolean = false,
+    onDollyZoomSettingToggle: (Boolean) -> Unit = {}
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            val supportedResolutions = capabilities.supportedVideoResolutions
+                .filterNot { it.width >= 7680 || it.height >= 7680 }
+            if (supportedResolutions.isNotEmpty()) {
+                val current = selectedVideoResolution ?: supportedResolutions.first()
+                SettingsSegmentedCard(
+                    title = "Video Resolution",
+                    description = "Standard recording resolution for video mode.",
+                    options = supportedResolutions.take(4).map { res ->
+                        val label = when {
+                            res.width >= 3840 -> "4K (${res.width}x${res.height})"
+                            res.width >= 2560 -> "2K (${res.width}x${res.height})"
+                            res.width >= 1920 -> "1080p (${res.width}x${res.height})"
+                            else -> "${res.width}x${res.height}"
+                        }
+                        res to label
+                    },
+                    selectedOption = current,
+                    onOptionSelected = onVideoResolutionSelected
+                )
+            }
+        }
+
+        item {
+            SettingsSegmentedCard(
+                title = "Frame Rate (FPS)",
+                description = "Frames captured per second for smooth motion or cinematic feel.",
+                options = listOf(24 to "24 fps", 30 to "30 fps", 60 to "60 fps"),
+                selectedOption = videoFps,
+                onOptionSelected = onVideoFpsSelected
+            )
+        }
+
+        item {
+            SettingsSwitchCard(
+                title = "Hardware OIS (Optical Image Stabilization)",
+                description = if (isOisPreferred) {
+                    "ON: Main camera uses physical hardware Optical Image Stabilization whenever supported."
+                } else {
+                    "OFF: Hardware Optical Image Stabilization is disabled."
+                },
+                isChecked = isOisPreferred,
+                onCheckedChange = onOisToggle,
+                tag = "toggle_ois_video_settings"
+            )
+        }
+
+        item {
+            SettingsSegmentedCard(
+                title = "Video Encoding Codec",
+                description = "HEVC (H.265) provides superior compression; H.264 offers broader device compatibility.",
+                options = listOf("HEVC" to "HEVC (H.265)", "H264" to "H.264 AVC"),
+                selectedOption = videoCodec,
+                onOptionSelected = onVideoCodecSelected
+            )
+        }
+
+        item {
+            SettingsSegmentedCard(
+                title = "Bitrate Quality",
+                description = "Controls video compression bitrate and file size.",
+                options = listOf(
+                    VideoBitrateOption.AUTO to "Auto",
+                    VideoBitrateOption.STANDARD to "Standard",
+                    VideoBitrateOption.HIGH to "High",
+                    VideoBitrateOption.MAX to "Max"
+                ),
+                selectedOption = videoBitrate,
+                onOptionSelected = onVideoBitrateSelected
+            )
+        }
+
+
+
+        item {
+            SettingsSwitchCard(
+                title = "Record Audio",
+                description = "Capture high-fidelity stereo audio with recorded videos.",
+                isChecked = isAudioEnabled,
+                onCheckedChange = { onAudioToggle() },
+                tag = "toggle_video_audio"
+            )
+        }
+
+        if (isAudioEnabled) {
+            item {
+                SettingsSwitchCard(
+                    title = "Wind Noise Reduction",
+                    description = "Filters low-frequency turbulence and outdoor wind interference.",
+                    isChecked = windNoiseReduction,
+                    onCheckedChange = onWindNoiseReductionToggle,
+                    tag = "toggle_wind_reduction"
+                )
+            }
+
+            item {
+                SettingsSegmentedCard(
+                    title = "Audio Input Source",
+                    description = "Choose microphone configuration for video recording.",
+                    options = listOf("CAMCORDER" to "Camcorder", "MIC" to "Direct Mic", "UNPROCESSED" to "Raw Audio"),
+                    selectedOption = audioSource,
+                    onOptionSelected = onAudioSourceSelected
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CinemaSettingSliderRow(
+    label: String,
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    onValueChange: (Float) -> Unit,
+    formatPattern: String = "%.2f",
+    unit: String = "",
+    valueMultiplier: Float = 1.0f
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            color = Color.White.copy(alpha = 0.85f),
+            fontSize = 12.sp,
+            modifier = Modifier.width(130.dp)
+        )
+        Slider(
+            value = value,
+            onValueChange = onValueChange,
+            valueRange = valueRange,
+            colors = SliderDefaults.colors(
+                thumbColor = Color(0xFFFF8A32),
+                activeTrackColor = Color(0xFFFF8A32),
+                inactiveTrackColor = Color.White.copy(alpha = 0.15f)
+            ),
+            modifier = Modifier
+                .weight(1f)
+                .height(28.dp)
+        )
+        Text(
+            text = String.format(formatPattern, value * valueMultiplier) + unit,
+            color = Color(0xFFFF8A32),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.width(48.dp),
+            textAlign = TextAlign.End
+        )
+    }
+}
+
+@Composable
+private fun CinemaSettingsPage(
+    cinemaConfig: CinemaConfig,
+    onCinemaConfigChange: (CinemaConfig) -> Unit,
+    cinemaCapabilities: CinemaHardwareCapabilities,
+    capabilities: HardwareCapabilities,
+    isVideoStabilizationEnabled: Boolean,
+    onStabilizationToggle: (Boolean) -> Unit,
+    isHardwareEisActive: Boolean = false
+) {
+    val context = LocalContext.current
+    val customLutRepo = remember(context) { CustomLutRepository(context) }
+    val customLuts by customLutRepo.customLuts.collectAsStateWithLifecycle()
+
+    val lutFilePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            var resolvedName: String? = null
+            try {
+                context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                    val nameIdx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (nameIdx >= 0 && cursor.moveToFirst()) {
+                        resolvedName = cursor.getString(nameIdx)
+                    }
+                }
+            } catch (ignored: Exception) {}
+
+            val fileName = (resolvedName ?: uri.lastPathSegment?.substringAfterLast('/'))
+                ?.removeSuffix(".cube")
+                ?.takeIf { it.isNotBlank() } ?: "Custom Grade"
+
+            val imported = customLutRepo.importLut(uri, fileName)
+            if (imported != null) {
+                android.widget.Toast.makeText(context, "Imported LUT: ${imported.title}", android.widget.Toast.LENGTH_SHORT).show()
+                onCinemaConfigChange(
+                    cinemaConfig.copy(
+                        selectedLut = CinematicLut.CUSTOM,
+                        customLutPath = imported.filePath,
+                        customLutName = imported.title,
+                        isBakeLutToOutput = true,
+                        isLutPreviewEnabled = true
+                    )
+                )
+            } else {
+                android.widget.Toast.makeText(context, "Invalid or unsupported .cube file format", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        // 1. Resolution
+        item {
+            val supportedResolutions = remember(cinemaCapabilities, capabilities) {
+                val fromCinema = cinemaCapabilities.supportedResolutions
+                if (fromCinema.isNotEmpty()) fromCinema
+                else if (capabilities.supportedVideoResolutions.isNotEmpty()) capabilities.supportedVideoResolutions
+                else listOf(
+                    CameraResolution(3840, 2160),
+                    CameraResolution(1920, 1080),
+                    CameraResolution(1280, 720)
+                )
+            }
+            val resOptions = supportedResolutions
+                .filterNot { it.width >= 7680 || it.height >= 7680 }
+                .distinctBy { "${it.width}x${it.height}" }
+                .take(4).map { res ->
+                val label = when {
+                    res.width >= 3840 -> "4K UHD (${res.width}x${res.height})"
+                    res.width >= 2560 -> "2K QHD (${res.width}x${res.height})"
+                    res.width >= 1920 -> "1080p FHD (${res.width}x${res.height})"
+                    else -> "720p HD (${res.width}x${res.height})"
+                }
+                res to label
+            }
+            val currentRes = cinemaConfig.selectedResolution ?: supportedResolutions.firstOrNull { it.width >= 3840 } ?: supportedResolutions.first()
+
+            SettingsSegmentedCard(
+                title = "Pro Video Resolution",
+                description = "Mastering recording resolution. 4K UHD captures maximum sensor fidelity, 1080p FHD offers wide playback compatibility.",
+                options = resOptions,
+                selectedOption = currentRes,
+                onOptionSelected = { onCinemaConfigChange(cinemaConfig.copy(selectedResolution = it)) }
+            )
+        }
+
+        // 2. Frame Rate (FPS)
+        item {
+            val fpsList = cinemaCapabilities.supportedFpsList.ifEmpty { listOf(24, 30, 60) }
+            val fpsOptions = mutableListOf<Pair<Int, String>>()
+            if (fpsList.contains(24)) fpsOptions.add(24 to "24 fps (Cinema)")
+            if (fpsList.contains(30)) fpsOptions.add(30 to "30 fps (Standard)")
+            if (fpsList.contains(60)) fpsOptions.add(60 to "60 fps (Smooth)")
+            if (fpsList.contains(120)) fpsOptions.add(120 to "120 fps (HFR)")
+            if (fpsOptions.isEmpty()) {
+                fpsOptions.addAll(listOf(24 to "24 fps (Cinema)", 30 to "30 fps (Standard)", 60 to "60 fps (Smooth)"))
+            }
+
+            SettingsSegmentedCard(
+                title = "Cinematic Frame Rate (FPS)",
+                description = "24 fps provides authentic Hollywood film cadence. 30 fps is standard broadcast; 60 fps delivers ultra-fluid motion.",
+                options = fpsOptions,
+                selectedOption = cinemaConfig.videoFps,
+                onOptionSelected = { onCinemaConfigChange(cinemaConfig.copy(videoFps = it)) }
+            )
+        }
+
+        // 3. Video Bitrate
+        item {
+            SettingsSegmentedCard(
+                title = "Pro Video Bitrate",
+                description = "Encoder compression data rate. 100 Mbps eliminates macroblocking in fast-moving and high-detail scenes.",
+                options = listOf(
+                    VideoBitrateOption.AUTO to "Auto (Adaptive)",
+                    VideoBitrateOption.STANDARD to "40 Mbps (Standard)",
+                    VideoBitrateOption.HIGH to "60 Mbps (High)",
+                    VideoBitrateOption.MAX to "100 Mbps (Mastering)"
+                ),
+                selectedOption = cinemaConfig.videoBitrate,
+                onOptionSelected = { onCinemaConfigChange(cinemaConfig.copy(videoBitrate = it)) }
+            )
+        }
+
+        // 4. Video Codec
+        item {
+            SettingsSegmentedCard(
+                title = "Video Encoding Codec",
+                description = "HEVC (H.265) supports 10-bit color with superior compression. H.264 provides universal compatibility. ProRes 422 delivers genuine 10-bit intra-frame mastering.",
+                options = listOf(
+                    CinemaCodec.H265 to "H.265 (HEVC)",
+                    CinemaCodec.H264 to "H.264 (AVC)",
+                    CinemaCodec.PRORES to "Apple ProRes 422",
+                    CinemaCodec.VP9 to "VP9 (WebM)"
+                ),
+                selectedOption = cinemaConfig.codec,
+                onOptionSelected = { newCodec ->
+                    val supportedDepths = cinemaCapabilities.getSupportedBitDepthsForCodec(newCodec)
+                    val validBitDepth = if (cinemaConfig.logBitDepth == LogBitDepth.BIT_10 && !supportedDepths.contains(LogBitDepth.BIT_10)) {
+                        LogBitDepth.BIT_8
+                    } else {
+                        cinemaConfig.logBitDepth
+                    }
+                    onCinemaConfigChange(cinemaConfig.copy(codec = newCodec, logBitDepth = validBitDepth))
+                }
+            )
+        }
+
+        // 5. Log & Color Profile
+        item {
+            SettingsSegmentedCard(
+                title = "Pro Video Color Profile",
+                description = "Logarithmic & HDR curves preserve maximum dynamic range for color grading. Native provides iPhone-style natural processing.",
+                options = listOf(
+                    CinemaColorProfile.NATIVE to "Native",
+                    CinemaColorProfile.S_LOG to "S-Log",
+                    CinemaColorProfile.N_LOG to "N-Log",
+                    CinemaColorProfile.HLG10 to "HLG10 HDR",
+                    CinemaColorProfile.APPLE_LOG_2 to "Apple Log 2",
+                    CinemaColorProfile.D_LOG_2 to "D-Log 2",
+                    CinemaColorProfile.SAMSUNG_APV_LOG to "Samsung APV Log",
+                    CinemaColorProfile.PROCESSED_JPEG to "Processed JPEG"
+                ),
+                selectedOption = cinemaConfig.colorProfile,
+                onOptionSelected = { profile ->
+                    val canDo10Bit = cinemaCapabilities.getSupportedBitDepthsForCodec(cinemaConfig.codec).contains(LogBitDepth.BIT_10)
+                    val updated = when (profile) {
+                        CinemaColorProfile.HLG10 -> {
+                            cinemaConfig.copy(
+                                colorProfile = CinemaColorProfile.HLG10,
+                                colorSpace = CinemaColorSpace.REC_2020,
+                                logBitDepth = if (canDo10Bit) LogBitDepth.BIT_10 else LogBitDepth.BIT_8,
+                                codec = if (cinemaConfig.codec == CinemaCodec.H264 && cinemaCapabilities.supportedCodecs.contains(CinemaCodec.H265)) CinemaCodec.H265 else cinemaConfig.codec
+                            )
+                        }
+                        else -> cinemaConfig.copy(colorProfile = profile)
+                    }
+                    onCinemaConfigChange(updated)
+                }
+            )
+        }
+
+        // 6. Log Bit Depth
+        item {
+            val supportedDepths = cinemaCapabilities.getSupportedBitDepthsForCodec(cinemaConfig.codec)
+            val bitDepthOptions = mutableListOf<Pair<LogBitDepth, String>>()
+            if (supportedDepths.contains(LogBitDepth.BIT_10)) {
+                bitDepthOptions.add(LogBitDepth.BIT_10 to "10-bit Log (1,024 shades)")
+            }
+            bitDepthOptions.add(LogBitDepth.BIT_8 to "8-bit Standard (256 shades)")
+
+            SettingsSegmentedCard(
+                title = "Log Bit Depth",
+                description = "10-bit delivers 1,024 luminance shades per RGB channel to eliminate banding in sky and skin-tone gradients.",
+                options = bitDepthOptions,
+                selectedOption = if (supportedDepths.contains(cinemaConfig.logBitDepth)) cinemaConfig.logBitDepth else LogBitDepth.BIT_8,
+                onOptionSelected = { onCinemaConfigChange(cinemaConfig.copy(logBitDepth = it)) }
+            )
+        }
+
+        // 7. Live Noise Reduction
+        item {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF1B1B1B),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Live Noise Reduction",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Camera2 hardware noise reduction. 'Off' keeps natural sensor texture and authentic cinematic film grain.",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        listOf(
+                            CinemaNoiseReduction.OFF to "Off (Authentic Grain)",
+                            CinemaNoiseReduction.LOW to "Low (Minimal)",
+                            CinemaNoiseReduction.MEDIUM to "Medium (Fast)",
+                            CinemaNoiseReduction.HIGH to "High (Smooth)"
+                        ).forEach { (mode, label) ->
+                            val isSelected = cinemaConfig.noiseReduction == mode
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = { onCinemaConfigChange(cinemaConfig.copy(noiseReduction = mode)) },
+                                label = {
+                                    Text(
+                                        text = label,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Color(0xFFFF8A32),
+                                    selectedLabelColor = Color.Black,
+                                    containerColor = Color.White.copy(alpha = 0.08f),
+                                    labelColor = Color.White
+                                )
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    CinemaSettingSliderRow(
+                        label = "Luma NR Filter",
+                        value = cinemaConfig.lumaNoiseReduction,
+                        valueRange = 0.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(lumaNoiseReduction = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Chroma NR Filter",
+                        value = cinemaConfig.chromaNoiseReduction,
+                        valueRange = 0.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(chromaNoiseReduction = it)) }
+                    )
+                }
+            }
+        }
+
+        // 8. Sharpness & Detail
+        item {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF1B1B1B),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Hardware Sharpness & Edge Mode",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "ISP edge detail filter. 'Off' eliminates digital haloing for an organic filmic look. 'Crisp' maximizes texture separation.",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        listOf(
+                            CinemaSharpness.OFF to "Off (Organic Filmic)",
+                            CinemaSharpness.NATURAL to "Natural",
+                            CinemaSharpness.CRISP to "Crisp (High Detail)"
+                        ).forEach { (mode, label) ->
+                            val isSelected = cinemaConfig.sharpness == mode
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = { onCinemaConfigChange(cinemaConfig.copy(sharpness = mode)) },
+                                label = {
+                                    Text(
+                                        text = label,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Color(0xFFFF8A32),
+                                    selectedLabelColor = Color.Black,
+                                    containerColor = Color.White.copy(alpha = 0.08f),
+                                    labelColor = Color.White
+                                )
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    CinemaSettingSliderRow(
+                        label = "Fine Sharpening",
+                        value = cinemaConfig.fineSharpening,
+                        valueRange = 0.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(fineSharpening = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Micro-Contrast",
+                        value = cinemaConfig.microContrast,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(microContrast = it)) }
+                    )
+                }
+            }
+        }
+
+        // 9. Cinematic 3D LUT
+        item {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF1B1B1B),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Cinematic 3D LUT",
+                                color = Color.White,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Real-time 3D color grade transforms inspired by Hollywood cinema.",
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 12.sp,
+                                lineHeight = 16.sp
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0x26FFD54F),
+                            border = BorderStroke(1.dp, Color(0xFFFF8A32).copy(alpha = 0.4f))
+                        ) {
+                            Text(
+                                text = if (cinemaConfig.selectedLut == CinematicLut.CUSTOM && !cinemaConfig.customLutName.isNullOrBlank()) {
+                                    cinemaConfig.customLutName ?: "Custom"
+                                } else {
+                                    cinemaConfig.selectedLut.label
+                                }.uppercase(),
+                                color = Color(0xFFFF8A32),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // LUT Selection Chips
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CinematicLut.displayPresets.filter { it != CinematicLut.CUSTOM }.forEach { lut ->
+                            val isSelected = cinemaConfig.selectedLut == lut
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = {
+                                    onCinemaConfigChange(
+                                        cinemaConfig.copy(
+                                            selectedLut = lut,
+                                            customLutPath = null,
+                                            customLutName = null,
+                                            isBakeLutToOutput = true,
+                                            isLutPreviewEnabled = true
+                                        )
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = lut.label,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Color(0xFFFF8A32),
+                                    selectedLabelColor = Color.Black,
+                                    containerColor = Color.White.copy(alpha = 0.08f),
+                                    labelColor = Color.White
+                                )
+                            )
+                        }
+
+                        // Custom imported LUT chips
+                        customLuts.forEach { customLut ->
+                            val isSelected = cinemaConfig.selectedLut == CinematicLut.CUSTOM && cinemaConfig.customLutPath == customLut.filePath
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = {
+                                    onCinemaConfigChange(
+                                        cinemaConfig.copy(
+                                            selectedLut = CinematicLut.CUSTOM,
+                                            customLutPath = customLut.filePath,
+                                            customLutName = customLut.title,
+                                            isBakeLutToOutput = true,
+                                            isLutPreviewEnabled = true
+                                        )
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = customLut.title,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Color(0xFFFF8A32),
+                                    selectedLabelColor = Color.Black,
+                                    containerColor = Color.White.copy(alpha = 0.08f),
+                                    labelColor = Color.White
+                                )
+                            )
+                        }
+                    }
+
+                    // Intensity & Bake Controls if LUT is active
+                    if (!cinemaConfig.selectedLut.isOff) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        CinemaSettingSliderRow(
+                            label = "LUT Grade Intensity",
+                            value = cinemaConfig.lutIntensity,
+                            valueRange = 0.0f..1.0f,
+                            onValueChange = { onCinemaConfigChange(cinemaConfig.copy(lutIntensity = it)) },
+                            formatPattern = "%.0f",
+                            unit = "%",
+                            valueMultiplier = 100f
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text(
+                                    text = "Bake LUT into Video Recording",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Bake color grade into output video or preserve clean flat log for post-production.",
+                                    color = Color.White.copy(alpha = 0.6f),
+                                    fontSize = 11.5.sp
+                                )
+                            }
+                            Switch(
+                                checked = cinemaConfig.isBakeLutToOutput,
+                                onCheckedChange = { onCinemaConfigChange(cinemaConfig.copy(isBakeLutToOutput = it)) },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.Black,
+                                    checkedTrackColor = Color(0xFFFF8A32),
+                                    uncheckedThumbColor = Color.White.copy(alpha = 0.7f),
+                                    uncheckedTrackColor = Color.White.copy(alpha = 0.15f)
+                                )
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Import Custom .cube LUT Button
+                    Button(
+                        onClick = { lutFilePickerLauncher.launch(arrayOf("*/*")) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.White.copy(alpha = 0.08f),
+                            contentColor = Color(0xFFFF8A32)
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Color(0xFFFF8A32).copy(alpha = 0.4f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Import Custom .cube LUT File",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+
+        // 10. Color Gamut & Space
+        item {
+            SettingsSegmentedCard(
+                title = "Color Space & Gamut",
+                description = "Recording color space transfer function. Rec.2020 delivers wide HDR color primaries; Rec.709 is standard broadcast.",
+                options = listOf(
+                    CinemaColorSpace.REC_709 to "Rec.709 (SDR)",
+                    CinemaColorSpace.REC_2020 to "Rec.2020 (HDR Wide)",
+                    CinemaColorSpace.DCI_P3 to "DCI-P3 (Cinema)"
+                ),
+                selectedOption = cinemaConfig.colorSpace,
+                onOptionSelected = { onCinemaConfigChange(cinemaConfig.copy(colorSpace = it)) }
+            )
+        }
+
+        // 11. Assist Tools
+        item {
+            SettingsSwitchCard(
+                title = "Live LUT Viewfinder Preview",
+                description = "Applies real-time 3D LUT color transform inside the camera viewfinder.",
+                isChecked = cinemaConfig.isLutPreviewEnabled,
+                onCheckedChange = { onCinemaConfigChange(cinemaConfig.copy(isLutPreviewEnabled = it)) },
+                tag = "toggle_lut_preview"
+            )
+        }
+
+        item {
+            SettingsSwitchCard(
+                title = "Pro Video Waveform Monitor",
+                description = "Real-time luminance IRE waveform display in the viewfinder.",
+                isChecked = cinemaConfig.isWaveformEnabled,
+                onCheckedChange = { onCinemaConfigChange(cinemaConfig.copy(isWaveformEnabled = it)) },
+                tag = "toggle_cinema_waveform"
+            )
+        }
+
+        item {
+            SettingsSwitchCard(
+                title = "Focus Peaking Assist",
+                description = "Highlights in-focus edges with a bright color overlay.",
+                isChecked = cinemaConfig.isFocusPeakingEnabled,
+                onCheckedChange = { onCinemaConfigChange(cinemaConfig.copy(isFocusPeakingEnabled = it)) },
+                tag = "toggle_focus_peaking"
+            )
+        }
+
+        item {
+            SettingsSegmentedCard(
+                title = "Zebra Highlight Stripes",
+                description = "Overlays diagonal stripes on overexposed scene highlights above threshold.",
+                options = listOf(
+                    ZebraThreshold.OFF to "Off",
+                    ZebraThreshold.IRE_70 to "70 IRE",
+                    ZebraThreshold.IRE_100 to "100 IRE"
+                ),
+                selectedOption = cinemaConfig.zebraThreshold,
+                onOptionSelected = { onCinemaConfigChange(cinemaConfig.copy(zebraThreshold = it)) }
+            )
+        }
+
+        item {
+            SettingsSwitchCard(
+                title = "Clean RAW Sensor Log Pipeline",
+                description = "Bypasses OEM post-processing algorithms for clean, artifact-free raw sensor rendering.",
+                isChecked = cinemaConfig.isRawSensorLogPipeline,
+                onCheckedChange = { onCinemaConfigChange(cinemaConfig.copy(isRawSensorLogPipeline = it)) },
+                tag = "toggle_raw_sensor_log"
+            )
+        }
+
+        // 12. Fine-Tuning & Detailed Processing Controls
+        item {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF1B1B1B),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Pro Video ISP & Grading Controls",
+                                color = Color.White,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Precision sliders for tonality, curves, color matrix & dynamic range.",
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 12.sp,
+                                lineHeight = 16.sp
+                            )
+                        }
+
+                        if (cinemaConfig.hasColorFineTuning) {
+                            TextButton(
+                                onClick = {
+                                    onCinemaConfigChange(
+                                        cinemaConfig.copy(
+                                            exposure = 0.0f,
+                                            contrast = 0.0f,
+                                            lumaCurve = 0.0f,
+                                            outputGamma = 1.0f,
+                                            washedOut = 0.0f,
+                                            brilliance = 0.0f,
+                                            whites = 0.0f,
+                                            highlights = 0.0f,
+                                            highlightRolloff = 0.0f,
+                                            midtones = 0.0f,
+                                            shadows = 0.0f,
+                                            shadowRolloff = 0.0f,
+                                            blacks = 0.0f,
+                                            blackLevel = 0.0f,
+                                            temperature = 0.0f,
+                                            tint = 0.0f,
+                                            saturation = 1.0f,
+                                            vibrance = 0.0f,
+                                            chromaStrength = 1.0f,
+                                            colorTransform = 0.0f,
+                                            fineSharpening = 0.0f,
+                                            microContrast = 0.0f,
+                                            localContrast = 0.0f,
+                                            toneMappingStrength = 0.0f,
+                                            lumaNoiseReduction = 0.0f,
+                                            chromaNoiseReduction = 0.0f
+                                        )
+                                    )
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = "RESET ALL",
+                                    color = Color(0xFFFF8A32),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Text(
+                        text = "1. EXPOSURE & TONE CURVE",
+                        color = Color(0xFFFF8A32),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    CinemaSettingSliderRow(
+                        label = "Live Exposure",
+                        value = cinemaConfig.exposure,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(exposure = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Contrast S-Curve",
+                        value = cinemaConfig.contrast,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(contrast = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Luma Curve",
+                        value = cinemaConfig.lumaCurve,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(lumaCurve = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Output Gamma",
+                        value = cinemaConfig.outputGamma,
+                        valueRange = 0.5f..1.5f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(outputGamma = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Washed-Out Recovery",
+                        value = cinemaConfig.washedOut,
+                        valueRange = 0.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(washedOut = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Brilliance",
+                        value = cinemaConfig.brilliance,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(brilliance = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Tone Map Strength",
+                        value = cinemaConfig.toneMappingStrength,
+                        valueRange = 0.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(toneMappingStrength = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Local Contrast",
+                        value = cinemaConfig.localContrast,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(localContrast = it)) }
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "2. TONAL ZONES",
+                        color = Color(0xFFFF8A32),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    CinemaSettingSliderRow(
+                        label = "Whites",
+                        value = cinemaConfig.whites,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(whites = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Highlights",
+                        value = cinemaConfig.highlights,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(highlights = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Highlight Roll-off",
+                        value = cinemaConfig.highlightRolloff,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(highlightRolloff = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Midtones",
+                        value = cinemaConfig.midtones,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(midtones = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Shadows",
+                        value = cinemaConfig.shadows,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(shadows = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Shadow Roll-off",
+                        value = cinemaConfig.shadowRolloff,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(shadowRolloff = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Blacks",
+                        value = cinemaConfig.blacks,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(blacks = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Black Level",
+                        value = cinemaConfig.blackLevel,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(blackLevel = it)) }
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "3. COLOR & WHITE BALANCE",
+                        color = Color(0xFFFF8A32),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    CinemaSettingSliderRow(
+                        label = "Temperature",
+                        value = cinemaConfig.temperature,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(temperature = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Tint",
+                        value = cinemaConfig.tint,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(tint = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Saturation",
+                        value = cinemaConfig.saturation,
+                        valueRange = 0.0f..2.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(saturation = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Vibrance",
+                        value = cinemaConfig.vibrance,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(vibrance = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Chroma Strength",
+                        value = cinemaConfig.chromaStrength,
+                        valueRange = 0.0f..2.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(chromaStrength = it)) }
+                    )
+                    CinemaSettingSliderRow(
+                        label = "Color Matrix",
+                        value = cinemaConfig.colorTransform,
+                        valueRange = -1.0f..1.0f,
+                        onValueChange = { onCinemaConfigChange(cinemaConfig.copy(colorTransform = it)) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProManualSettingsPage(
+    manualIso: Int?,
+    onManualIsoChange: (Int?) -> Unit,
+    manualShutterSpeedNs: Long?,
+    onManualShutterSpeedChange: (Long?) -> Unit,
+    focusMode: FocusMode,
+    onFocusModeChange: (FocusMode) -> Unit,
+    manualFocusDistance: Float,
+    onManualFocusDistanceChange: (Float) -> Unit,
+    exposureCompensation: Int,
+    onExposureCompensationChange: (Int) -> Unit,
+    capabilities: HardwareCapabilities
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            SettingsSegmentedCard(
+                title = "Focus Mode",
+                description = "Continuous autofocus or precision manual focus plane control.",
+                options = listOf(
+                    FocusMode.CONTINUOUS to "Auto AF",
+                    FocusMode.MANUAL to "Manual MF"
+                ),
+                selectedOption = focusMode,
+                onOptionSelected = onFocusModeChange
+            )
+        }
+    }
+}
+
+@Composable
+private fun CameraLensSettingsPage(
+    availableLenses: List<LensInfo>,
+    selectedLens: LensInfo?,
+    onLensSelected: (LensInfo) -> Unit,
+    onForceDeepScan: () -> Unit,
+    instantSwitchState: MotorolaInstantSwitchState,
+    lensSwitchOverlapDurationSec: Float = 0.3f,
+    onLensSwitchOverlapDurationChange: (Float) -> Unit = {},
+    lensSwitchHoldDurationSec: Float = 0.10f,
+    onLensSwitchHoldDurationChange: (Float) -> Unit = {},
+    isLensSwitchOverlapAnimationEnabled: Boolean = false,
+    onLensSwitchOverlapAnimationToggle: (Boolean) -> Unit = {},
+    onKeepUltraWideReadyToggle: (Boolean) -> Unit = {},
+    onAutoSwitchToUltraWideToggle: (Boolean) -> Unit = {},
+    onShowUltraWidePreviewToggle: (Boolean) -> Unit,
+    onShowFrontCameraPreviewToggle: (Boolean) -> Unit,
+    viewfinderFps: Int,
+    onViewfinderFpsSelected: (Int) -> Unit,
+    viewfinderResolution: ViewfinderResolution,
+    onViewfinderResolutionSelected: (ViewfinderResolution) -> Unit,
+    gridType: GridType,
+    onGridTypeSelected: (GridType) -> Unit,
+    horizonLeveler: Boolean,
+    onHorizonLevelerToggle: (Boolean) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            SettingsActionCard(
+                title = "Hardware Lens Deep Scan",
+                description = "Detected ${availableLenses.size} optical camera sensors on this device.",
+                actionText = "RE-SCAN",
+                onClick = onForceDeepScan
+            )
+        }
+
+
+        item {
+            LensSwitchHoldDurationSettingCard(
+                holdDurationSec = lensSwitchHoldDurationSec,
+                onHoldDurationChange = onLensSwitchHoldDurationChange,
+                isOverlapAnimationEnabled = isLensSwitchOverlapAnimationEnabled
+            )
+        }
+
+        item {
+            SettingsSwitchCard(
+                title = "Frame-Based Lens Handoff",
+                description = "Keep the old preview visible while zoom continues. Blend into the target camera over its first four valid preview frames. OFF keeps the existing switch behavior.",
+                isChecked = isLensSwitchOverlapAnimationEnabled,
+                onCheckedChange = onLensSwitchOverlapAnimationToggle,
+                tag = "toggle_lens_switch_overlap_animation"
+            )
+        }
+
+
+        item {
+            SettingsSwitchCard(
+                title = "Keep Ultra Wide Ready",
+                description = "Keep Main and Ultra-Wide cameras active and ready in background simultaneously for instant, zero-lag lens switching during photo and video recording.",
+                isChecked = instantSwitchState.isKeepUltraWideReady,
+                onCheckedChange = onKeepUltraWideReadyToggle,
+                tag = "toggle_keep_ultrawide_ready"
+            )
+        }
+
+        item {
+            SettingsSwitchCard(
+                title = "Auto Switch to Ultra Wide",
+                description = "Automatically switch to the ultra-wide lens when close-up subjects cannot achieve focus on the main lens, and switch back when moving away.",
+                isChecked = instantSwitchState.isAutoSwitchToUltraWide,
+                onCheckedChange = onAutoSwitchToUltraWideToggle,
+                tag = "toggle_auto_switch_to_ultra_wide"
+            )
+        }
+
+        item {
+            SettingsSwitchCard(
+                title = "Ultra-Wide Mini Preview",
+                description = "Picture-in-picture live view from the ultra-wide lens.",
+                isChecked = instantSwitchState.isShowUltraWidePreview,
+                onCheckedChange = onShowUltraWidePreviewToggle,
+                tag = "toggle_uw_preview"
+            )
+        }
+
+        item {
+            SettingsSegmentedCard(
+                title = "Framing Grid & Guides",
+                description = "Composition alignment overlays on top of the live viewfinder.",
+                options = listOf(
+                    GridType.NONE to "Off",
+                    GridType.THIRDS to "3x3 Rule",
+                    GridType.GOLDEN to "Golden Ratio",
+                    GridType.SQUARE to "1:1 Box",
+                    GridType.LEVEL to "Level Horizon"
+                ),
+                selectedOption = gridType,
+                onOptionSelected = onGridTypeSelected
+            )
+        }
+
+        item {
+            SettingsSwitchCard(
+                title = "Virtual Horizon Leveler",
+                description = "Live pitch and roll gyroscope orientation level line.",
+                isChecked = horizonLeveler,
+                onCheckedChange = onHorizonLevelerToggle,
+                tag = "toggle_horizon_leveler"
+            )
+        }
+
+        item {
+            SettingsSegmentedCard(
+                title = "Viewfinder Refresh Rate",
+                description = "Target preview display framerate on high refresh rate displays.",
+                options = listOf(30 to "30 FPS", 60 to "60 FPS", 120 to "120 FPS"),
+                selectedOption = viewfinderFps,
+                onOptionSelected = onViewfinderFpsSelected
+            )
+        }
+
+        item {
+            SettingsSegmentedCard(
+                title = "Viewfinder Resolution",
+                description = "Live camera preview resolution on viewfinder (Normal 1080p, 2K 1440p, or 4K 2160p). This controls only the real-time preview display and does not affect photo or video recording resolution.",
+                options = listOf(
+                    ViewfinderResolution.NORMAL to "Normal",
+                    ViewfinderResolution.RES_2K to "2K",
+                    ViewfinderResolution.RES_4K to "4K"
+                ),
+                selectedOption = viewfinderResolution,
+                onOptionSelected = onViewfinderResolutionSelected
+            )
+        }
+    }
+}
+
+@Composable
+private fun LensSwitchHoldDurationSettingCard(
+    holdDurationSec: Float,
+    onHoldDurationChange: (Float) -> Unit,
+    isOverlapAnimationEnabled: Boolean = false
+) {
+    val roundedDuration = ((holdDurationSec.coerceIn(0.0f, 0.30f) * 100f).roundToInt() / 100f).coerceIn(0.0f, 0.30f)
+    val isDefault = kotlin.math.abs(roundedDuration - 0.02f) < 0.001f
+    val holdMillis = (roundedDuration * 1000f).roundToInt()
+    val displayValue = when {
+        holdMillis == 0 -> "0 ms"
+        isOverlapAnimationEnabled && isDefault -> "$holdMillis ms (Default • Fallback)"
+        isOverlapAnimationEnabled -> "$holdMillis ms (Fallback)"
+        isDefault -> "$holdMillis ms (Default)"
+        else -> "$holdMillis ms"
+    }
+
+    val options = listOf(
+        0.0f to "0 ms",
+        0.02f to "20 ms (Default)",
+        0.05f to "50 ms",
+        0.10f to "100 ms",
+        0.15f to "150 ms",
+        0.20f to "200 ms",
+        0.25f to "250 ms",
+        0.30f to "300 ms"
+    )
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("setting_lens_switch_hold_duration_card"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E24))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFFFF8A32).copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Timer,
+                            contentDescription = null,
+                            tint = Color(0xFFFF8A32),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "Lens Switch Hold Duration",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = if (isOverlapAnimationEnabled) {
+                                "Sixteen-frame handoff is used only for 0.5x ↔ 2x/3x. The 0.5x ↔ 1x switch keeps this selected hold time."
+                            } else {
+                                "0.5x ↔ 2x/3x skips the hold. The 0.5x ↔ 1x switch uses this selected duration."
+                            },
+                            color = Color.White.copy(alpha = 0.6f),
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = Color.Black.copy(alpha = 0.35f),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (isOverlapAnimationEnabled) "Fallback Hold Time" else "Current Hold Time",
+                        color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 12.sp
+                    )
+                    Text(
+                        text = displayValue,
+                        color = Color(0xFFFF8A32),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                options.forEach { (value, label) ->
+                    val isSelected = kotlin.math.abs(roundedDuration - value) < 0.005f
+                    val tagValue = String.format(java.util.Locale.US, "%.2f", value)
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { onHoldDurationChange(value) },
+                        modifier = Modifier.testTag("hold_duration_option_$tagValue"),
+                        label = {
+                            Text(
+                                text = label,
+                                fontSize = 11.5.sp,
+                                fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Color(0xFFFF8A32),
+                            selectedLabelColor = Color.Black,
+                            containerColor = Color.White.copy(alpha = 0.08f),
+                            labelColor = Color.White
+                        )
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SwitchPointSettingCard(
+    switchPointMm: Float,
+    onSwitchPointChange: (Float) -> Unit
+) {
+    val roundedFocal = switchPointMm.roundToInt().coerceIn(23, 85)
+    val uwCrop = (roundedFocal.toFloat() / 16.0f * 100f).roundToInt() / 100f
+    val mainCrop = (roundedFocal.toFloat() / 23.0f * 100f).roundToInt() / 100f
+
+    val isDefaultOriginal = roundedFocal == 23
+    val displayValue = if (isDefaultOriginal) "23mm (Original)" else "${roundedFocal}mm"
+
+    val presets = listOf(
+        23 to "23mm (Original)",
+        28 to "28mm",
+        32 to "32mm",
+        40 to "40mm",
+        50 to "50mm",
+        60 to "60mm",
+        85 to "85mm"
+    )
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("setting_lens_switch_point_card"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E24))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFFFF8A32).copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Cameraswitch,
+                            contentDescription = null,
+                            tint = Color(0xFFFF8A32),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "Switch Point",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Lens handoff: Ultra-Wide (16mm) → Main (23mm)",
+                            color = Color.White.copy(alpha = 0.55f),
+                            fontSize = 11.5.sp
+                        )
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFFF8A32).copy(alpha = 0.18f))
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                ) {
+                    Text(
+                        text = displayValue,
+                        color = Color(0xFFFF8A32),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Real-time crop calculation and active value readout banner
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFF26262E))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Ultra-wide: ${String.format(java.util.Locale.US, "%.2f", uwCrop)}× crop",
+                    color = Color(0xFF64FFDA),
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = "Main: ${String.format(java.util.Locale.US, "%.2f", mainCrop)}× crop",
+                    color = Color(0xFFFF8A32),
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Continuous Slider 23mm -> 85mm
+            Slider(
+                value = roundedFocal.toFloat(),
+                onValueChange = { onSwitchPointChange(it.roundToInt().toFloat()) },
+                valueRange = 23f..85f,
+                steps = 61,
+                colors = SliderDefaults.colors(
+                    thumbColor = Color(0xFFFF8A32),
+                    activeTrackColor = Color(0xFFFF8A32),
+                    inactiveTrackColor = Color.White.copy(alpha = 0.18f)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("slider_lens_switch_point")
+            )
+
+            // Preset Quick Selection Chips
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                presets.forEach { (presetFocal, label) ->
+                    val isSelected = roundedFocal == presetFocal
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { onSwitchPointChange(presetFocal.toFloat()) },
+                        label = {
+                            Text(
+                                text = label,
+                                fontSize = 11.5.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Color(0xFFFF8A32),
+                            selectedLabelColor = Color.Black,
+                            containerColor = Color.White.copy(alpha = 0.08f),
+                            labelColor = Color.White
+                        ),
+                        border = FilterChipDefaults.filterChipBorder(
+                            enabled = true,
+                            selected = isSelected,
+                            borderColor = Color.White.copy(alpha = 0.15f),
+                            selectedBorderColor = Color(0xFFFF8A32)
+                        ),
+                        modifier = Modifier.testTag("chip_switch_point_$presetFocal")
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StabilizationSettingsPage(
+    mainCameraStabilizationMode: MainCameraStabilizationMode,
+    onMainCameraStabilizationModeSelected: (MainCameraStabilizationMode) -> Unit,
+    isVideoStabilizationEnabled: Boolean,
+    onStabilizationToggle: (Boolean) -> Unit,
+    isOisPreferred: Boolean,
+    onOisToggle: (Boolean) -> Unit,
+    isHorizontalLockSettingEnabled: Boolean = true,
+    onHorizontalLockSettingToggle: (Boolean) -> Unit = {},
+    isUltraStabilizationEnabled: Boolean,
+    onUltraStabilizationToggle: () -> Unit,
+    windNoiseReduction: Boolean,
+    onWindNoiseReductionToggle: (Boolean) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            SettingsSwitchCard(
+                title = "Hardware OIS (Optical Image Stabilization)",
+                description = if (isOisPreferred) {
+                    "ON: Main camera uses physical hardware voice-coil Optical Image Stabilization (OIS) whenever supported."
+                } else {
+                    "OFF: Hardware Optical Image Stabilization is disabled."
+                },
+                isChecked = isOisPreferred,
+                onCheckedChange = onOisToggle,
+                tag = "toggle_ois_switch"
+            )
+        }
+
+
+    }
+}
+
+@Composable
+private fun UiLayoutSettingsPage(
+    uiCustomizationState: UiCustomizationState,
+    onSelectTemplate: (UiTemplateType) -> Unit,
+    onOpenCustomUiStudio: () -> Unit,
+    onUpdateModeLayoutConfig: (CameraMode, ModeLayoutConfig) -> Unit = { _, _ -> },
+    onUpdateGlobalLayoutConfig: (ModeLayoutConfig) -> Unit = {},
+    floatingWindowAppearance: FloatingWindowAppearanceConfig,
+    onFloatingWindowTransparencyChange: (Float) -> Unit,
+    onFloatingWindowBlurStrengthChange: (Float) -> Unit,
+    onFloatingWindowAppearanceChange: (FloatingWindowAppearanceConfig) -> Unit,
+    onResetFloatingWindowAppearance: () -> Unit,
+    viewfinderCornerRadiusDp: Int,
+    onViewfinderCornerRadiusChange: (Int) -> Unit,
+    viewfinderResolution: ViewfinderResolution = ViewfinderResolution.NORMAL,
+    onViewfinderResolutionSelected: (ViewfinderResolution) -> Unit = {}
+) {
+    val allTemplates = remember {
+        listOf(
+            UiTemplateType.OPPO to "OPPO",
+            UiTemplateType.SAMSUNG to "One UI",
+            UiTemplateType.CUSTOM to "Custom UI"
+        )
+    }
+
+    val scalePresets = remember {
+        listOf(
+            0.75f to "75% Compact",
+            0.85f to "85% Small",
+            1.00f to "100% Normal",
+            1.12f to "112% Large",
+            1.25f to "125% XL"
+        )
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = 28.dp)
+    ) {
+        // 1. UI Template Style Selector (Multi-row grid with all templates visible: Pixel, One UI, iPhone, Vivo, etc.)
+        item {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF1B1B1B),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "UI Template Style",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Choose primary camera layout aesthetic (OPPO, Pixel, Samsung One UI, iPhone iOS, Vivo OriginOS, Leica, Cyber Glass, DSLR).",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    allTemplates.chunked(3).forEach { rowItems ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            rowItems.forEach { (template, label) ->
+                                val isSelected = uiCustomizationState.selectedTemplate == template
+                                Surface(
+                                    onClick = { onSelectTemplate(template) },
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (isSelected) Color(0xFFFF8A32) else Color.White.copy(alpha = 0.08f),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isSelected) Color(0xFFFF8A32) else Color.White.copy(alpha = 0.12f)
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(44.dp)
+                                        .testTag("ui_template_option_${template.name.lowercase()}")
+                                ) {
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier.padding(horizontal = 6.dp)
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            color = if (isSelected) Color.Black else Color.White,
+                                            fontSize = 12.sp,
+                                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Selected: ${uiCustomizationState.selectedTemplate.title} — ${uiCustomizationState.selectedTemplate.subtitle}",
+                        color = Color(0xFFFF8A32).copy(alpha = 0.9f),
+                        fontSize = 11.5.sp,
+                        lineHeight = 15.sp
+                    )
+                }
+            }
+        }
+
+        // 2. Custom UI Studio Action
+        item {
+            SettingsActionCard(
+                title = "Custom UI Studio",
+                description = "Fine-tune button positions, colors, typography, and controls density.",
+                actionText = "OPEN STUDIO",
+                onClick = onOpenCustomUiStudio
+            )
+        }
+
+        // 2a. Top Bar Controls & Icon Customization (Per Mode)
+        item {
+            var selectedModeForTopBar by remember { mutableStateOf(CameraMode.CINEMA) }
+            var expandedSlotItem by remember { mutableStateOf<TopControlItem?>(null) }
+            var showAddSlotMenu by remember { mutableStateOf(false) }
+
+            val currentModeConfig = remember(selectedModeForTopBar, uiCustomizationState) {
+                uiCustomizationState.getConfigForMode(selectedModeForTopBar)
+            }
+
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF1B1B1B),
+                border = BorderStroke(1.dp, Color(0xFF2563EB).copy(alpha = 0.4f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Top Bar Customization (Per Mode)",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Choose which top icons are shown, select actions, and set position (Left / Center / Right) independently for each camera mode.",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Mode Selector Chips
+                    val modeScroll = rememberScrollState()
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(modeScroll),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        CameraMode.entries.forEach { mode ->
+                            val isSel = selectedModeForTopBar == mode
+                            FilterChip(
+                                selected = isSel,
+                                onClick = { selectedModeForTopBar = mode },
+                                label = {
+                                    Text(
+                                        text = mode.title,
+                                        fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                        fontSize = 11.5.sp
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Color(0xFF2563EB),
+                                    selectedLabelColor = Color.White,
+                                    containerColor = Color.White.copy(alpha = 0.08f),
+                                    labelColor = Color.White.copy(alpha = 0.85f)
+                                )
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Subheading & Add Slot Button
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${selectedModeForTopBar.title} Top Slots:",
+                            color = Color(0xFF64B5F6),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Box {
+                            TextButton(
+                                onClick = { showAddSlotMenu = true },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = "Add Slot", tint = Color(0xFF64B5F6), modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Add Slot", color = Color(0xFF64B5F6), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            DropdownMenu(
+                                expanded = showAddSlotMenu,
+                                onDismissRequest = { showAddSlotMenu = false },
+                                modifier = Modifier.background(Color(0xFF1E2435))
+                            ) {
+                                TopControlItem.entries.forEach { opt ->
+                                    val alreadyInOrder = currentModeConfig.topControlsOrder.contains(opt)
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = opt.label + if (alreadyInOrder) " (already added)" else "",
+                                                color = if (alreadyInOrder) Color.Gray else Color.White,
+                                                fontSize = 12.sp
+                                            )
+                                        },
+                                        onClick = {
+                                            showAddSlotMenu = false
+                                            if (!alreadyInOrder) {
+                                                val updated = currentModeConfig.copy(
+                                                    topControlsOrder = currentModeConfig.topControlsOrder + opt,
+                                                    hiddenTopControls = currentModeConfig.hiddenTopControls - opt
+                                                )
+                                                onUpdateModeLayoutConfig(selectedModeForTopBar, updated)
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Slots List
+                    currentModeConfig.topControlsOrder.forEachIndexed { index, item ->
+                        val isHidden = currentModeConfig.hiddenTopControls.contains(item)
+                        val curPos = currentModeConfig.getIconPosition(item)
+
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFF181C28),
+                            border = BorderStroke(1.dp, if (!isHidden) Color(0xFF2563EB).copy(alpha = 0.35f) else Color.White.copy(alpha = 0.06f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                        Checkbox(
+                                            checked = !isHidden,
+                                            onCheckedChange = { visible ->
+                                                val set = currentModeConfig.hiddenTopControls.toMutableSet()
+                                                if (visible) set.remove(item) else set.add(item)
+                                                onUpdateModeLayoutConfig(selectedModeForTopBar, currentModeConfig.copy(hiddenTopControls = set))
+                                            }
+                                        )
+                                        Spacer(modifier = Modifier.width(2.dp))
+                                        Text(
+                                            text = "Slot ${index + 1}: ${item.label}",
+                                            color = if (!isHidden) Color.White else Color.White.copy(alpha = 0.5f),
+                                            fontSize = 12.5.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+
+                                    Row {
+                                        IconButton(
+                                            enabled = index > 0,
+                                            onClick = {
+                                                val list = currentModeConfig.topControlsOrder.toMutableList()
+                                                val temp = list[index - 1]
+                                                list[index - 1] = item
+                                                list[index] = temp
+                                                onUpdateModeLayoutConfig(selectedModeForTopBar, currentModeConfig.copy(topControlsOrder = list))
+                                            },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(Icons.Default.ArrowUpward, contentDescription = "Move earlier", tint = if (index > 0) Color.White else Color.Gray, modifier = Modifier.size(15.dp))
+                                        }
+                                        IconButton(
+                                            enabled = index < currentModeConfig.topControlsOrder.size - 1,
+                                            onClick = {
+                                                val list = currentModeConfig.topControlsOrder.toMutableList()
+                                                val temp = list[index + 1]
+                                                list[index + 1] = item
+                                                list[index] = temp
+                                                onUpdateModeLayoutConfig(selectedModeForTopBar, currentModeConfig.copy(topControlsOrder = list))
+                                            },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(Icons.Default.ArrowDownward, contentDescription = "Move later", tint = if (index < currentModeConfig.topControlsOrder.size - 1) Color.White else Color.Gray, modifier = Modifier.size(15.dp))
+                                        }
+                                        if (currentModeConfig.topControlsOrder.size > 1) {
+                                            IconButton(
+                                                onClick = {
+                                                    val list = currentModeConfig.topControlsOrder.filterNot { it == item }
+                                                    val set = currentModeConfig.hiddenTopControls.filterNot { it == item }.toSet()
+                                                    onUpdateModeLayoutConfig(selectedModeForTopBar, currentModeConfig.copy(topControlsOrder = list, hiddenTopControls = set))
+                                                },
+                                                modifier = Modifier.size(28.dp)
+                                            ) {
+                                                Icon(Icons.Outlined.Delete, contentDescription = "Remove Slot", tint = Color(0xFFFF6B6B), modifier = Modifier.size(15.dp))
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                // Action selector dropdown button
+                                Box(modifier = Modifier.fillMaxWidth()) {
+                                    Surface(
+                                        onClick = { expandedSlotItem = if (expandedSlotItem == item) null else item },
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = Color(0xFF202636),
+                                        border = BorderStroke(1.dp, Color(0xFF3B82F6).copy(alpha = 0.4f)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "Action: ${item.label}",
+                                                color = Color(0xFF64B5F6),
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                            Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
+                                        }
+                                    }
+
+                                    DropdownMenu(
+                                        expanded = expandedSlotItem == item,
+                                        onDismissRequest = { expandedSlotItem = null },
+                                        modifier = Modifier
+                                            .background(Color(0xFF1E2435))
+                                            .heightIn(max = 260.dp)
+                                    ) {
+                                        TopControlItem.entries.forEach { opt ->
+                                            val isCur = opt == item
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        text = opt.label,
+                                                        color = if (isCur) Color(0xFF64B5F6) else Color.White,
+                                                        fontWeight = if (isCur) FontWeight.Bold else FontWeight.Normal,
+                                                        fontSize = 12.sp
+                                                    )
+                                                },
+                                                onClick = {
+                                                    expandedSlotItem = null
+                                                    if (opt != item) {
+                                                        onUpdateModeLayoutConfig(selectedModeForTopBar, currentModeConfig.withItemAction(item, opt))
+                                                    }
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                // Position selector
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("Position:", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp)
+                                    TopIconPosition.entries.forEach { pos ->
+                                        val isPosSel = curPos == pos
+                                        Surface(
+                                            onClick = {
+                                                onUpdateModeLayoutConfig(selectedModeForTopBar, currentModeConfig.withIconPosition(item, pos))
+                                            },
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = if (isPosSel) Color(0xFF2563EB) else Color(0xFF222838),
+                                            border = BorderStroke(1.dp, if (isPosSel) Color(0xFF64B5F6) else Color.White.copy(alpha = 0.08f)),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(28.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Text(
+                                                    text = pos.label,
+                                                    color = if (isPosSel) Color.White else Color.White.copy(alpha = 0.7f),
+                                                    fontSize = 11.sp,
+                                                    fontWeight = if (isPosSel) FontWeight.Bold else FontWeight.Normal
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+
+        // 2c. Viewfinder Preview Resolution
+        item {
+            SettingsSegmentedCard(
+                title = "Viewfinder Resolution",
+                description = "Live camera viewfinder preview resolution. Controls only the on-screen preview clarity and does not affect final photo or video recording resolution.",
+                options = listOf(
+                    ViewfinderResolution.NORMAL to "Normal",
+                    ViewfinderResolution.RES_2K to "2K",
+                    ViewfinderResolution.RES_4K to "4K"
+                ),
+                selectedOption = viewfinderResolution,
+                onOptionSelected = onViewfinderResolutionSelected
+            )
+        }
+
+        // 3. All Floating Windows Size (Scale) Control
+        item {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF1B1B1B),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "All Floating Windows Size",
+                                color = Color.White,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Scale the size of all floating settings windows (Video, Pro Video, Pipeline).",
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 12.sp,
+                                lineHeight = 16.sp
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0x26FFD54F)
+                        ) {
+                            Text(
+                                text = "${(floatingWindowAppearance.windowScale * 100).roundToInt()}%",
+                                color = Color(0xFFFF8A32),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Slider(
+                        value = floatingWindowAppearance.windowScale.coerceIn(0.75f, 1.25f),
+                        onValueChange = { newScale ->
+                            onFloatingWindowAppearanceChange(
+                                floatingWindowAppearance.copy(windowScale = newScale.coerceIn(0.75f, 1.25f))
+                            )
+                        },
+                        valueRange = 0.75f..1.25f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFFFF8A32),
+                            activeTrackColor = Color(0xFFFF8A32),
+                            inactiveTrackColor = Color.White.copy(alpha = 0.18f)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("slider_floating_window_size")
+                    )
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        scalePresets.forEach { (scaleValue, label) ->
+                            val isSelected = kotlin.math.abs(floatingWindowAppearance.windowScale - scaleValue) < 0.03f
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = {
+                                    onFloatingWindowAppearanceChange(
+                                        floatingWindowAppearance.copy(windowScale = scaleValue)
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = label,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Color(0xFFFF8A32),
+                                    selectedLabelColor = Color.Black,
+                                    containerColor = Color.White.copy(alpha = 0.08f),
+                                    labelColor = Color.White
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Floating Window Backdrop Blur & Transparency
+        item {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF1B1B1B),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Floating Window Blur & Glass",
+                                color = Color.White,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Real-time 1:1 optical backdrop blur and frosted glass transparency.",
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 12.sp,
+                                lineHeight = 16.sp
+                            )
+                        }
+                        TextButton(onClick = onResetFloatingWindowAppearance) {
+                            Text(
+                                text = "RESET",
+                                color = Color(0xFFFF8A32),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    val stylePresets = listOf(
+                        FloatingWindowAppearanceConfig.LIQUID_GLASS to "Liquid Glass",
+                        FloatingWindowAppearanceConfig.FROSTED_GLASS to "Frosted Glass",
+                        FloatingWindowAppearanceConfig.TRANSPARENT_GLASS to "Transparent Glass",
+                        FloatingWindowAppearanceConfig.SUBTLE_FROST to "Subtle Frost",
+                        FloatingWindowAppearanceConfig.DEEP_FROST to "Deep Frost",
+                        FloatingWindowAppearanceConfig.SOLID_DARK to "Solid Dark"
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        stylePresets.forEach { (preset, label) ->
+                            val isSelected = floatingWindowAppearance.glassStyle == preset.glassStyle
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = {
+                                    onFloatingWindowAppearanceChange(
+                                        floatingWindowAppearance.copy(
+                                            glassStyle = preset.glassStyle,
+                                            transparency = preset.transparency,
+                                            blurStrength = preset.blurStrength,
+                                            windowScale = preset.windowScale
+                                        )
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = label,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Color(0xFFFF8A32),
+                                    selectedLabelColor = Color.Black,
+                                    containerColor = Color.White.copy(alpha = 0.08f),
+                                    labelColor = Color.White
+                                )
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Blur Strength Slider (0..50 dp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Backdrop Blur Strength",
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "${floatingWindowAppearance.blurStrengthDp} dp",
+                            color = Color(0xFFFF8A32),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Slider(
+                        value = floatingWindowAppearance.blurStrength.coerceIn(0f, 50f),
+                        onValueChange = onFloatingWindowBlurStrengthChange,
+                        valueRange = 0f..50f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFFFF8A32),
+                            activeTrackColor = Color(0xFFFF8A32),
+                            inactiveTrackColor = Color.White.copy(alpha = 0.18f)
+                        )
+                    )
+
+                    // Transparency Slider
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Glass Transparency",
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "${floatingWindowAppearance.transparencyPercent}%",
+                            color = Color(0xFFFF8A32),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Slider(
+                        value = floatingWindowAppearance.transparency.coerceIn(0f, 1f),
+                        onValueChange = onFloatingWindowTransparencyChange,
+                        valueRange = 0f..1f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFFFF8A32),
+                            activeTrackColor = Color(0xFFFF8A32),
+                            inactiveTrackColor = Color.White.copy(alpha = 0.18f)
+                        )
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Real-time Live Floating Window Preview Box
+                    Text(
+                        text = "LIVE WINDOW PREVIEW",
+                        color = Color(0xFFFF8A32),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(105.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                Brush.linearGradient(
+                                    colors = listOf(
+                                        Color(0xFFE91E63),
+                                        Color(0xFF3F51B5),
+                                        Color(0xFF009688),
+                                        Color(0xFFFF9800)
+                                    )
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        FrostedGlassBox(
+                            modifier = Modifier
+                                .fillMaxWidth(0.92f)
+                                .padding(vertical = 6.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            elevation = 10.dp
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = "${floatingWindowAppearance.glassStyle.displayName} • ${floatingWindowAppearance.transparencyPercent}% Translucent",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Backdrop Blur: ${floatingWindowAppearance.blurStrengthDp} dp",
+                                    color = Color(0xFFFF8A32),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Real-time physical frosted glass preview",
+                                    color = Color.White.copy(alpha = 0.75f),
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. Floating Window Settings & Content Customization ("Choose which settings appear in Floating Windows")
+        item {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF1B1B1B),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Floating Window Controls & Content",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Choose which settings and controls are displayed inside each floating window.",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Video Floating Window Section
+                    Text(
+                        text = "VIDEO FLOATING WINDOW",
+                        color = Color(0xFFFF8A32),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    FloatingContentToggleRow(
+                        label = "Video Resolution (HD / FHD / 2K / 4K)",
+                        checked = floatingWindowAppearance.showVideoResolution,
+                        onCheckedChange = {
+                            onFloatingWindowAppearanceChange(floatingWindowAppearance.copy(showVideoResolution = it))
+                        }
+                    )
+                    FloatingContentToggleRow(
+                        label = "Frame Rate (24 / 30 / 60 / 120 FPS)",
+                        checked = floatingWindowAppearance.showVideoFps,
+                        onCheckedChange = {
+                            onFloatingWindowAppearanceChange(floatingWindowAppearance.copy(showVideoFps = it))
+                        }
+                    )
+                    FloatingContentToggleRow(
+                        label = "Video Color & Tone Sliders",
+                        checked = floatingWindowAppearance.showVideoAdjustmentsColorTone,
+                        onCheckedChange = {
+                            onFloatingWindowAppearanceChange(floatingWindowAppearance.copy(showVideoAdjustmentsColorTone = it))
+                        }
+                    )
+                    FloatingContentToggleRow(
+                        label = "Video Effects & Sharpening Sliders",
+                        checked = floatingWindowAppearance.showVideoAdjustmentsEffects,
+                        onCheckedChange = {
+                            onFloatingWindowAppearanceChange(floatingWindowAppearance.copy(showVideoAdjustmentsEffects = it))
+                        }
+                    )
+
+                    HorizontalDivider(
+                        color = Color.White.copy(alpha = 0.08f),
+                        modifier = Modifier.padding(vertical = 10.dp)
+                    )
+
+                    // Pro Video Floating Window Section
+                    Text(
+                        text = "PRO VIDEO FLOATING WINDOW",
+                        color = Color(0xFFFF8A32),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    FloatingContentToggleRow(
+                        label = "Hollywood 3D LUTs & Intensity",
+                        checked = floatingWindowAppearance.showCinemaLutControls,
+                        onCheckedChange = {
+                            onFloatingWindowAppearanceChange(floatingWindowAppearance.copy(showCinemaLutControls = it))
+                        }
+                    )
+                    FloatingContentToggleRow(
+                        label = "Log Color Profile & Bit Depth",
+                        checked = floatingWindowAppearance.showCinemaColorProfile,
+                        onCheckedChange = {
+                            onFloatingWindowAppearanceChange(floatingWindowAppearance.copy(showCinemaColorProfile = it))
+                        }
+                    )
+                    FloatingContentToggleRow(
+                        label = "Pro Video Resolution, Aspect & FPS",
+                        checked = floatingWindowAppearance.showCinemaResolutionFps,
+                        onCheckedChange = {
+                            onFloatingWindowAppearanceChange(floatingWindowAppearance.copy(showCinemaResolutionFps = it))
+                        }
+                    )
+                    FloatingContentToggleRow(
+                        label = "Assist Tools (Waveform / Peaking / Zebra)",
+                        checked = floatingWindowAppearance.showCinemaAssistTools,
+                        onCheckedChange = {
+                            onFloatingWindowAppearanceChange(floatingWindowAppearance.copy(showCinemaAssistTools = it))
+                        }
+                    )
+
+                    HorizontalDivider(
+                        color = Color.White.copy(alpha = 0.08f),
+                        modifier = Modifier.padding(vertical = 10.dp)
+                    )
+
+                    // Pro & Pipeline Floating Windows Section
+                    Text(
+                        text = "PRO MANUAL & PIPELINE FLOATING WINDOWS",
+                        color = Color(0xFFFF8A32),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    FloatingContentToggleRow(
+                        label = "Pro Manual Exposure (ISO / Shutter / Focus / WB)",
+                        checked = floatingWindowAppearance.showProExposureControls,
+                        onCheckedChange = {
+                            onFloatingWindowAppearanceChange(floatingWindowAppearance.copy(showProExposureControls = it))
+                        }
+                    )
+                    FloatingContentToggleRow(
+                        label = "Pro Fine-Tuning (Tone / Sharpness / Saturation)",
+                        checked = floatingWindowAppearance.showProToneAdjustments,
+                        onCheckedChange = {
+                            onFloatingWindowAppearanceChange(floatingWindowAppearance.copy(showProToneAdjustments = it))
+                        }
+                    )
+                    FloatingContentToggleRow(
+                        label = "Pipeline Master ON/OFF Switch",
+                        checked = floatingWindowAppearance.showPipelineMasterToggle,
+                        onCheckedChange = {
+                            onFloatingWindowAppearanceChange(floatingWindowAppearance.copy(showPipelineMasterToggle = it))
+                        }
+                    )
+                    FloatingContentToggleRow(
+                        label = "Pipeline Preset Cards List",
+                        checked = floatingWindowAppearance.showPipelinePresetList,
+                        onCheckedChange = {
+                            onFloatingWindowAppearanceChange(floatingWindowAppearance.copy(showPipelinePresetList = it))
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FloatingContentToggleRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            text = label,
+            color = Color.White.copy(alpha = 0.9f),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f).padding(end = 12.dp)
+        )
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.Black,
+                checkedTrackColor = Color(0xFFFF8A32),
+                uncheckedThumbColor = Color.White.copy(alpha = 0.7f),
+                uncheckedTrackColor = Color.White.copy(alpha = 0.15f)
+            )
+        )
+    }
+}
+
+@Composable
+private fun GeneralSettingsPage(
+    volumeKeyAction: String,
+    onVolumeKeyActionSelected: (String) -> Unit,
+    doubleTapAction: String,
+    onDoubleTapActionSelected: (String) -> Unit,
+    shutterFeedback: String,
+    onShutterFeedbackSelected: (String) -> Unit,
+    antibandingMode: String,
+    onAntibandingModeSelected: (String) -> Unit,
+    thermalProtection: Boolean,
+    onThermalProtectionToggle: (Boolean) -> Unit,
+    isAiAutoFramingEnabled: Boolean,
+    onAiAutoFramingToggle: (Boolean) -> Unit,
+    preferredGalleryPackage: String?,
+    onOpenGalleryChooser: () -> Unit,
+    onResetAll: () -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            SettingsSegmentedCard(
+                title = "Volume Key Action",
+                description = "Hardware volume rocker function while camera is active.",
+                options = listOf(
+                    "SHUTTER" to "Shutter",
+                    "ZOOM" to "Zoom",
+                    "VOLUME" to "System Vol"
+                ),
+                selectedOption = volumeKeyAction,
+                onOptionSelected = onVolumeKeyActionSelected
+            )
+        }
+
+        item {
+            SettingsSegmentedCard(
+                title = "Double Tap Viewfinder",
+                description = "Action when double-tapping the viewfinder screen.",
+                options = listOf(
+                    "FLIP" to "Flip Camera",
+                    "LOCK" to "Lock Focus",
+                    "NONE" to "None"
+                ),
+                selectedOption = doubleTapAction,
+                onOptionSelected = onDoubleTapActionSelected
+            )
+        }
+
+        item {
+            SettingsSegmentedCard(
+                title = "Shutter Feedback",
+                description = "Tactile and acoustic feedback on capture.",
+                options = listOf(
+                    "SOUND_AND_HAPTIC" to "All",
+                    "HAPTIC_ONLY" to "Haptic",
+                    "SOUND_ONLY" to "Sound",
+                    "MUTE" to "Mute"
+                ),
+                selectedOption = shutterFeedback,
+                onOptionSelected = onShutterFeedbackSelected
+            )
+        }
+
+        item {
+            SettingsSegmentedCard(
+                title = "Anti-Banding Filter",
+                description = "Prevents light flickering from fluorescent and LED indoor lighting.",
+                options = listOf(
+                    "AUTO" to "Auto",
+                    "50HZ" to "50 Hz",
+                    "60HZ" to "60 Hz",
+                    "OFF" to "Off"
+                ),
+                selectedOption = antibandingMode,
+                onOptionSelected = onAntibandingModeSelected
+            )
+        }
+
+        item {
+            SettingsSwitchCard(
+                title = "Adaptive Thermal Protection",
+                description = "Adjusts sensor framerate when device temperature exceeds safe limits.",
+                isChecked = thermalProtection,
+                onCheckedChange = onThermalProtectionToggle,
+                tag = "toggle_thermal_protection"
+            )
+        }
+
+        item {
+            SettingsActionCard(
+                title = "Preferred Gallery App",
+                description = preferredGalleryPackage ?: "System Default Gallery",
+                actionText = "CHANGE",
+                onClick = onOpenGalleryChooser
+            )
+        }
+    }
+}
+
+@Composable
+private fun AboutSettingsPage(
+    capabilities: HardwareCapabilities,
+    availableLenses: List<LensInfo>,
+    selectedLens: LensInfo?
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF1B1B1B),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Camera Pro Engine",
+                        color = Color(0xFFFF8A32),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Native Camera2 Pipeline • Version 1.0",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 12.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        text = "HARDWARE SPECIFICATIONS",
+                        color = Color.White.copy(alpha = 0.5f),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.8.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(text = "• Active Camera ID: ${selectedLens?.id ?: "0"}", color = Color.White, fontSize = 13.sp)
+                    Text(text = "• Detected Physical Lenses: ${availableLenses.size}", color = Color.White, fontSize = 13.sp)
+                    Text(text = "• RAW DNG Capture: ${if (capabilities.supportsRaw) "Supported" else "Unsupported"}", color = Color.White, fontSize = 13.sp)
+                    Text(text = "• Optical Image Stabilization: ${if (capabilities.supportsOis) "Supported" else "Unsupported"}", color = Color.White, fontSize = 13.sp)
+                    Text(text = "• Max Digital Zoom: ${capabilities.maxZoom}x", color = Color.White, fontSize = 13.sp)
+                    Text(text = "• ISO Range: ${capabilities.minIso} - ${capabilities.maxIso}", color = Color.White, fontSize = 13.sp)
+                }
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// REUSABLE MODERN SETTINGS CARDS
+// -------------------------------------------------------------
+
+
+
+@Composable
+private fun CategoryCard(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = Color(0xFF1B1B1B),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x22FF8A32)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = Color(0xFFFF8A32),
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+
+                Column {
+                    Text(
+                        text = title,
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = subtitle,
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = "Open",
+                tint = Color.White.copy(alpha = 0.4f),
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsSwitchCard(
+    title: String,
+    description: String,
+    isChecked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    tag: String
+) {
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = Color(0xFF1B1B1B),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                Text(
+                    text = title,
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = description,
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 13.sp,
+                    lineHeight = 20.sp
+                )
+            }
+
+            Switch(
+                checked = isChecked,
+                onCheckedChange = onCheckedChange,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = Color(0xFFFF8A32),
+                    uncheckedThumbColor = Color.White.copy(alpha = 0.7f),
+                    uncheckedTrackColor = Color.White.copy(alpha = 0.15f)
+                ),
+                modifier = Modifier.testTag(tag)
+            )
+        }
+    }
+}
+
+@Composable
+private fun <T> SettingsSegmentedCard(
+    title: String,
+    description: String,
+    options: List<Pair<T, String>>,
+    selectedOption: T,
+    onOptionSelected: (T) -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = Color(0xFF1B1B1B),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = title,
+                color = Color.White,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = description,
+                color = Color.White.copy(alpha = 0.6f),
+                fontSize = 12.sp,
+                lineHeight = 16.sp
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                options.forEach { (value, label) ->
+                    val isSelected = selectedOption == value
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { onOptionSelected(value) },
+                        label = {
+                            Text(
+                                text = label,
+                                fontSize = 11.5.sp,
+                                fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Color(0xFFFF8A32),
+                            selectedLabelColor = Color.Black,
+                            containerColor = Color.White.copy(alpha = 0.08f),
+                            labelColor = Color.White
+                        )
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsActionCard(
+    title: String,
+    description: String,
+    actionText: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = Color(0xFF1B1B1B),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                Text(
+                    text = title,
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = description,
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 13.sp,
+                    lineHeight = 20.sp
+                )
+            }
+
+            Button(
+                onClick = onClick,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFFF8A32),
+                    contentColor = Color.Black
+                ),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = actionText,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Dedicated Fullscreen Camera Settings Screen.
+ * Binds directly to CameraViewModel to eliminate method size limitations and keep CameraScreen clean.
+ */
+@Composable
+fun CameraSettingsScreen(
+    viewModel: CameraViewModel,
+    onDismiss: () -> Unit,
+    onOpenCustomUiStudio: () -> Unit = {}
+) {
+    val cameraMode by viewModel.cameraMode.collectAsStateWithLifecycle()
+    val capabilities by viewModel.engine.capabilities.collectAsStateWithLifecycle()
+    val displayedLenses by viewModel.displayedLenses.collectAsStateWithLifecycle()
+    val selectedLens by viewModel.selectedLens.collectAsStateWithLifecycle()
+    val selectedVideoResolution by viewModel.engine.selectedVideoResolution.collectAsStateWithLifecycle()
+    val zoomPresetsMode by viewModel.zoomPresetsMode.collectAsStateWithLifecycle()
+    val customZoomPresetsStr by viewModel.customZoomPresetsStr.collectAsStateWithLifecycle()
+    val videoFps by viewModel.videoFps.collectAsStateWithLifecycle()
+    val videoBitrate by viewModel.videoBitrateOption.collectAsStateWithLifecycle()
+    val isVideoStabilizationEnabled by viewModel.isVideoStabilizationEnabled.collectAsStateWithLifecycle()
+    val actualEisHardwareActive by viewModel.actualEisHardwareActive.collectAsStateWithLifecycle()
+    val isOisEnabled by viewModel.isOisEnabled.collectAsStateWithLifecycle()
+    val actualOisHardwareActive by viewModel.actualOisHardwareActive.collectAsStateWithLifecycle()
+    val isAudioEnabled by viewModel.isAudioEnabled.collectAsStateWithLifecycle()
+    val isRawEnabled by viewModel.isRawCaptureEnabled.collectAsStateWithLifecycle()
+    val saveSelfieAsPreviewed by viewModel.saveSelfieAsPreviewed.collectAsStateWithLifecycle()
+    val gridType by viewModel.gridType.collectAsStateWithLifecycle()
+    val cinemaConfig by viewModel.cinemaConfig.collectAsStateWithLifecycle()
+    val cinemaCapabilities by viewModel.cinemaCapabilities.collectAsStateWithLifecycle()
+    val viewfinderResolution by viewModel.viewfinderResolution.collectAsStateWithLifecycle()
+    val hybridStabilizationConfig by viewModel.hybridStabilizationConfig.collectAsStateWithLifecycle()
+    val tapFocusConfig by viewModel.tapFocusConfig.collectAsStateWithLifecycle()
+    val videoCodec by viewModel.videoCodec.collectAsStateWithLifecycle()
+    val jpegQuality by viewModel.jpegQuality.collectAsStateWithLifecycle()
+    val volumeKeyAction by viewModel.volumeKeyAction.collectAsStateWithLifecycle()
+    val doubleTapAction by viewModel.doubleTapAction.collectAsStateWithLifecycle()
+    val shutterFeedback by viewModel.shutterFeedback.collectAsStateWithLifecycle()
+    val antibandingMode by viewModel.antibandingMode.collectAsStateWithLifecycle()
+    val windNoiseReduction by viewModel.windNoiseReduction.collectAsStateWithLifecycle()
+    val audioSource by viewModel.audioSource.collectAsStateWithLifecycle()
+    val horizonLeveler by viewModel.horizonLeveler.collectAsStateWithLifecycle()
+    val viewfinderFps by viewModel.viewfinderFps.collectAsStateWithLifecycle()
+    val thermalProtection by viewModel.thermalProtection.collectAsStateWithLifecycle()
+    val isAutoHdrEnabled by viewModel.isAutoHdrEnabled.collectAsStateWithLifecycle()
+    val isAiAutoFramingEnabled by viewModel.isAiAutoFramingEnabled.collectAsStateWithLifecycle()
+    val currentZoom by viewModel.currentZoom.collectAsStateWithLifecycle()
+    val exposureCompensation by viewModel.exposureCompensation.collectAsStateWithLifecycle()
+    val manualIso by viewModel.manualIso.collectAsStateWithLifecycle()
+    val manualShutterSpeedNs by viewModel.manualShutterSpeedNs.collectAsStateWithLifecycle()
+    val focusMode by viewModel.focusMode.collectAsStateWithLifecycle()
+    val manualFocusDistance by viewModel.manualFocusDistance.collectAsStateWithLifecycle()
+    val uiCustomizationState by viewModel.uiCustomizationState.collectAsStateWithLifecycle()
+    val instantSwitchState by viewModel.instantSwitchState.collectAsStateWithLifecycle()
+    val floatingWindowAppearance by viewModel.floatingWindowAppearance.collectAsStateWithLifecycle()
+    val preferredGalleryPackage by viewModel.preferredGalleryPackage.collectAsStateWithLifecycle()
+
+    // With EIS removed, the only supported stabilization mode is hardware OIS or Off.
+    val mainCameraStabilizationMode = remember(isOisEnabled) {
+        if (isOisEnabled) MainCameraStabilizationMode.OIS_ONLY else MainCameraStabilizationMode.OFF
+    }
+
+    SettingsDrawer(
+        isOpen = true,
+        cameraMode = cameraMode,
+        capabilities = capabilities,
+        availableLenses = displayedLenses,
+        selectedLens = selectedLens,
+        selectedVideoResolution = selectedVideoResolution,
+        zoomPresetsMode = zoomPresetsMode,
+        customZoomPresetsStr = customZoomPresetsStr,
+        onZoomPresetsModeSelect = { viewModel.setZoomPresetsMode(it) },
+        onCustomZoomPresetsChange = { viewModel.setCustomZoomPresets(it) },
+        videoFps = videoFps,
+        videoBitrate = videoBitrate,
+        isVideoStabilizationEnabled = false,
+        isHardwareEisActive = false,
+        isOisEnabled = isOisEnabled,
+        isOisHardwareActive = actualOisHardwareActive,
+        isAudioEnabled = isAudioEnabled,
+        isRawEnabled = isRawEnabled,
+        saveSelfieAsPreviewed = saveSelfieAsPreviewed,
+        gridType = gridType,
+        cinemaConfig = cinemaConfig,
+        cinemaCapabilities = cinemaCapabilities,
+        viewfinderResolution = viewfinderResolution,
+        hybridStabilizationConfig = hybridStabilizationConfig,
+        tapFocusConfig = tapFocusConfig,
+        mainCameraStabilizationMode = mainCameraStabilizationMode,
+        onMainCameraStabilizationModeSelected = { viewModel.setMainCameraStabilizationMode(it) },
+        videoCodec = videoCodec,
+        jpegQuality = jpegQuality,
+        volumeKeyAction = volumeKeyAction,
+        doubleTapAction = doubleTapAction,
+        shutterFeedback = shutterFeedback,
+        antibandingMode = antibandingMode,
+        windNoiseReduction = windNoiseReduction,
+        audioSource = audioSource,
+        horizonLeveler = horizonLeveler,
+        viewfinderFps = viewfinderFps,
+        thermalProtection = thermalProtection,
+        isAutoHdrEnabled = isAutoHdrEnabled,
+        isAiAutoFramingEnabled = isAiAutoFramingEnabled,
+        currentZoom = currentZoom,
+        exposureCompensation = exposureCompensation,
+        manualIso = manualIso,
+        manualShutterSpeedNs = manualShutterSpeedNs,
+        focusMode = focusMode,
+        manualFocusDistance = manualFocusDistance,
+        onVideoCodecSelected = { viewModel.setVideoCodec(it) },
+        onJpegQualitySelected = { viewModel.setJpegQuality(it) },
+        onVolumeKeyActionSelected = { viewModel.setVolumeKeyAction(it) },
+        onDoubleTapActionSelected = { viewModel.setDoubleTapAction(it) },
+        onShutterFeedbackSelected = { viewModel.setShutterFeedback(it) },
+        onAntibandingModeSelected = { viewModel.setAntibandingMode(it) },
+        onWindNoiseReductionToggle = { viewModel.setWindNoiseReduction(it) },
+        onAudioSourceSelected = { viewModel.setAudioSource(it) },
+        onHorizonLevelerToggle = { viewModel.setHorizonLeveler(it) },
+        onViewfinderFpsSelected = { viewModel.setViewfinderFps(it) },
+        onThermalProtectionToggle = { viewModel.setThermalProtection(it) },
+        onAutoHdrToggle = { viewModel.setAutoHdrEnabled(it) },
+        onAiAutoFramingToggle = { viewModel.setAiAutoFramingEnabled(it) },
+        onZoomChange = { viewModel.setZoom(it, isPresetTap = false) },
+        onExposureCompensationChange = { viewModel.setExposureCompensation(it) },
+        onManualIsoChange = { viewModel.setManualIso(it) },
+        onManualShutterSpeedChange = { viewModel.setManualShutterSpeed(it) },
+        onFocusModeChange = { viewModel.setFocusMode(it) },
+        onManualFocusDistanceChange = { viewModel.setManualFocusDistance(it) },
+        onResetAllSettings = { viewModel.resetAllSettings() },
+        uiCustomizationState = uiCustomizationState,
+        onSelectTemplate = { viewModel.selectUiTemplate(it) },
+        onUpdateGlobalLayoutConfig = { viewModel.updateGlobalLayoutConfig(it) },
+        onUpdateModeLayoutConfig = { mode, config -> viewModel.updateModeLayoutConfig(mode, config) },
+        onResetModeLayoutConfig = { mode -> viewModel.resetModeLayoutToGlobal(mode) },
+        onSaveCustomPreset = { name, config -> viewModel.saveCustomPreset(name, config) },
+        onLoadCustomPreset = { viewModel.loadCustomPreset(it) },
+        onDeleteCustomPreset = { viewModel.deleteCustomPreset(it) },
+        onResetAllToTemplate = { viewModel.resetLayoutToTemplate(it) },
+        onLensSelected = { viewModel.selectLens(it) },
+        onForceDeepScan = { viewModel.forceDeepScanLenses() },
+        onVideoResolutionSelected = { viewModel.selectVideoResolution(it) },
+        onViewfinderResolutionSelected = { viewModel.setViewfinderResolution(it) },
+        onVideoFpsSelected = { viewModel.setVideoFps(it) },
+        onVideoBitrateSelected = { viewModel.setVideoBitrate(it) },
+        onStabilizationToggle = { viewModel.setVideoStabilization(it) },
+        onHybridStabilizationChange = { viewModel.setHybridStabilizationConfig(it) },
+        onOisToggle = { viewModel.setOisEnabled(it) },
+        onUltraStabilizationToggle = { viewModel.toggleUltraStabilization() },
+        onTapFocusConfigChange = { viewModel.setTapFocusConfig(it) },
+        onAudioToggle = { viewModel.toggleAudio() },
+        onRawToggle = { viewModel.toggleRawCapture() },
+        onSaveSelfieAsPreviewedToggle = { viewModel.setSaveSelfieAsPreviewed(it) },
+        onGridTypeSelected = { viewModel.setGridType(it) },
+        onCinemaConfigChange = { viewModel.updateCinemaConfig(it) },
+        onOpenCustomUiStudio = onOpenCustomUiStudio,
+        instantSwitchState = instantSwitchState,
+        lensSwitchOverlapDurationSec = viewModel.lensSwitchOverlapDurationSec.collectAsStateWithLifecycle().value,
+        onLensSwitchOverlapDurationChange = { viewModel.setLensSwitchOverlapDuration(it) },
+        lensSwitchHoldDurationSec = viewModel.lensSwitchHoldDurationSec.collectAsStateWithLifecycle().value,
+        onLensSwitchHoldDurationChange = { viewModel.setLensSwitchHoldDuration(it) },
+        isLensSwitchOverlapAnimationEnabled = viewModel.isLensSwitchOverlapAnimationEnabled.collectAsStateWithLifecycle().value,
+        onLensSwitchOverlapAnimationToggle = { viewModel.setLensSwitchOverlapAnimationEnabled(it) },
+        onKeepUltraWideReadyToggle = { viewModel.setKeepUltraWideReady(it) },
+        onAutoSwitchToUltraWideToggle = { viewModel.setAutoSwitchToUltraWide(it) },
+        onShowUltraWidePreviewToggle = { viewModel.setShowUltraWidePreview(it) },
+        onShowFrontCameraPreviewToggle = { viewModel.setShowFrontCameraPreview(it) },
+        floatingWindowAppearance = floatingWindowAppearance,
+        onFloatingWindowTransparencyChange = { viewModel.setFloatingWindowTransparency(it) },
+        onFloatingWindowBlurStrengthChange = { viewModel.setFloatingWindowBlurStrength(it) },
+        onFloatingWindowAppearanceChange = { viewModel.setFloatingWindowAppearance(it) },
+        onResetFloatingWindowAppearance = { viewModel.resetFloatingWindowAppearance() },
+        preferredGalleryPackage = preferredGalleryPackage,
+        onOpenGalleryChooser = { viewModel.setGallerySelectionDialogOpen(true) },
+        onDismiss = onDismiss
+    )
+}

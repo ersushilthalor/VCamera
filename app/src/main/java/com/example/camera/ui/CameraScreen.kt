@@ -1,0 +1,1109 @@
+package com.example.camera.ui
+
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.Image
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import kotlinx.coroutines.delay
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.CompareArrows
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.ScreenLockRotation
+import androidx.compose.material.icons.outlined.GridView
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.camera.model.*
+import com.example.camera.ui.components.FrostedGlassBox
+import com.example.camera.ui.components.VideoAdjustmentsPanel
+import com.example.camera.ui.components.VideoAdjustmentsViewfinderOverlay
+import com.example.camera.viewmodel.CameraViewModel
+
+@Composable
+fun CameraScreen(
+    viewModel: CameraViewModel,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+
+    
+    // Permission handling
+    var hasCameraPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    var hasAudioPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    var pendingAudioEnable by remember { mutableStateOf(false) }
+    var pendingVideoStart by remember { mutableStateOf(false) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        hasCameraPermission = permissions[Manifest.permission.CAMERA] == true ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+        val audioGranted = permissions[Manifest.permission.RECORD_AUDIO] == true ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        hasAudioPermission = audioGranted
+
+        // Ask for microphone access only when the user explicitly enables audio or starts
+        // an audio-enabled video recording; never block the initial camera UI with this prompt.
+        if (pendingAudioEnable) {
+            pendingAudioEnable = false
+            if (audioGranted && !viewModel.isAudioEnabled.value) {
+                viewModel.toggleAudio()
+            }
+        }
+        if (pendingVideoStart) {
+            pendingVideoStart = false
+            if (!audioGranted && viewModel.isAudioEnabled.value) {
+                // Keep video recording usable when microphone permission is denied.
+                viewModel.toggleAudio()
+            }
+            viewModel.onMainActionButtonClick()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        // Camera permission is required for the preview. Microphone permission is not
+        // required to open the app or take photos, so defer it until audio is requested.
+        if (!hasCameraPermission) {
+            permissionLauncher.launch(arrayOf(Manifest.permission.CAMERA))
+        }
+    }
+
+    LaunchedEffect(hasCameraPermission) {
+        if (hasCameraPermission) {
+            viewModel.safeInitializeCamera()
+        }
+    }
+
+    if (!hasCameraPermission) {
+        CameraPermissionPrompt(
+            onRequestPermission = {
+                permissionLauncher.launch(arrayOf(Manifest.permission.CAMERA))
+            },
+            modifier = modifier
+        )
+        return
+    }
+
+    // Engine & VM States
+    val cameraMode by viewModel.cameraMode.collectAsStateWithLifecycle()
+
+    if (cameraMode == CameraMode.AI_SUBJECT_TRACKING) {
+        BackHandler {
+            viewModel.setCameraMode(CameraMode.VIDEO)
+        }
+        com.example.camera.tracking.ui.AiSubjectTrackingScreen(
+            onBack = {
+                viewModel.setCameraMode(CameraMode.VIDEO)
+            }
+        )
+        return
+    }
+
+    val capabilities by viewModel.engine.capabilities.collectAsStateWithLifecycle()
+    val selectedPhotoResolution by viewModel.engine.selectedPhotoResolution.collectAsStateWithLifecycle()
+    val selectedVideoResolution by viewModel.engine.selectedVideoResolution.collectAsStateWithLifecycle()
+    val previewAspectRatio by viewModel.engine.previewAspectRatio.collectAsStateWithLifecycle()
+    val previewBufferSize by viewModel.engine.previewBufferSize.collectAsStateWithLifecycle()
+    val mainPreviewBufferSize by viewModel.engine.mainPreviewBufferSize.collectAsStateWithLifecycle()
+    val ultraWidePreviewBufferSize by viewModel.engine.ultraWidePreviewBufferSize.collectAsStateWithLifecycle()
+    val isUsingUltraWideSurface by viewModel.isUsingUltraWideSurface.collectAsStateWithLifecycle()
+    val previewOverlapState by viewModel.previewOverlapState.collectAsStateWithLifecycle()
+    val sensorOrientation by viewModel.engine.sensorOrientation.collectAsStateWithLifecycle()
+    val storageStats by viewModel.engine.storageStats.collectAsStateWithLifecycle()
+    val isRecordingVideo by viewModel.engine.isRecordingVideo.collectAsStateWithLifecycle()
+    val isRecordingPaused by viewModel.engine.isRecordingPaused.collectAsStateWithLifecycle()
+    val isGpuRelayPreviewActive by viewModel.engine.isGpuRelayPreviewActive.collectAsStateWithLifecycle()
+    val isSavingVideo by viewModel.isSavingVideo.collectAsStateWithLifecycle()
+    val videoDurationSeconds by viewModel.engine.videoDurationSeconds.collectAsStateWithLifecycle()
+    val isCapturing by viewModel.engine.isCapturing.collectAsStateWithLifecycle()
+    val lastCapturedMedia by viewModel.engine.lastCapturedMedia.collectAsStateWithLifecycle()
+
+    val saveSelfieAsPreviewed by viewModel.saveSelfieAsPreviewed.collectAsStateWithLifecycle()
+    val isVideoSettingsPanelOpen by viewModel.isVideoSettingsPanelOpen.collectAsStateWithLifecycle()
+
+    val cinemaConfig by viewModel.cinemaConfig.collectAsStateWithLifecycle()
+    val cinemaCapabilities by viewModel.cinemaCapabilities.collectAsStateWithLifecycle()
+    val isCinemaSettingsOpen by viewModel.isCinemaSettingsOpen.collectAsStateWithLifecycle()
+    val isLogProfileWindowOpen by viewModel.isLogProfileWindowOpen.collectAsStateWithLifecycle()
+    val isLutWindowOpen by viewModel.isLutWindowOpen.collectAsStateWithLifecycle()
+    val isMoreModesOpen by viewModel.isMoreModesOpen.collectAsStateWithLifecycle()
+    val videoAdjustments by viewModel.videoAdjustments.collectAsStateWithLifecycle()
+    val isVideoAdjustmentsOpen by viewModel.isVideoAdjustmentsOpen.collectAsStateWithLifecycle()
+
+    val flashMode by viewModel.flashMode.collectAsStateWithLifecycle()
+    val timerMode by viewModel.timerMode.collectAsStateWithLifecycle()
+    val activeTimerCountdown by viewModel.activeTimerCountdown.collectAsStateWithLifecycle()
+    val gridType by viewModel.gridType.collectAsStateWithLifecycle()
+    val isManualProOpen by viewModel.isManualProOpen.collectAsStateWithLifecycle()
+    val activeProTab by viewModel.activeProTab.collectAsStateWithLifecycle()
+    val isSettingsOpen by viewModel.isSettingsOpen.collectAsStateWithLifecycle()
+    val isGallerySelectionDialogOpen by viewModel.isGallerySelectionDialogOpen.collectAsStateWithLifecycle()
+    val preferredGalleryPackage by viewModel.preferredGalleryPackage.collectAsStateWithLifecycle()
+    val focusRingPoint by viewModel.focusRingPoint.collectAsStateWithLifecycle()
+    val toastMessage by viewModel.toastMessage.collectAsStateWithLifecycle()
+    var isQuickOptionsOpen by rememberSaveable { mutableStateOf(false) }
+
+
+    LaunchedEffect(cameraMode) {
+        isQuickOptionsOpen = false
+    }
+
+    if (isQuickOptionsOpen) {
+        BackHandler {
+            isQuickOptionsOpen = false
+        }
+    }
+
+    if (isVideoSettingsPanelOpen) {
+        BackHandler {
+            viewModel.setVideoSettingsPanelOpen(false)
+        }
+    }
+
+    if (isLogProfileWindowOpen) {
+        BackHandler {
+            viewModel.setLogProfileWindowOpen(false)
+        }
+    }
+
+    if (isLutWindowOpen) {
+        BackHandler {
+            viewModel.setLutWindowOpen(false)
+        }
+    }
+
+    val exposureCompensation by viewModel.exposureCompensation.collectAsStateWithLifecycle()
+    val manualIso by viewModel.manualIso.collectAsStateWithLifecycle()
+    val manualShutterSpeedNs by viewModel.manualShutterSpeedNs.collectAsStateWithLifecycle()
+    val whiteBalance by viewModel.whiteBalance.collectAsStateWithLifecycle()
+    val focusMode by viewModel.focusMode.collectAsStateWithLifecycle()
+    val manualFocusDistance by viewModel.manualFocusDistance.collectAsStateWithLifecycle()
+    val isAeLocked by viewModel.isAeLocked.collectAsStateWithLifecycle()
+    val isAfLocked by viewModel.isAfLocked.collectAsStateWithLifecycle()
+    val isRawEnabled by viewModel.isRawCaptureEnabled.collectAsStateWithLifecycle()
+    val videoFps by viewModel.videoFps.collectAsStateWithLifecycle()
+    val colorProfile by viewModel.colorProfile.collectAsStateWithLifecycle()
+    val isAudioEnabled by viewModel.isAudioEnabled.collectAsStateWithLifecycle()
+    val onAudioToggleRequested: () -> Unit = {
+        if (!isAudioEnabled && !hasAudioPermission) {
+            pendingAudioEnable = true
+            permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+        } else {
+            viewModel.toggleAudio()
+        }
+    }
+    val currentVideoQuality by viewModel.currentVideoQuality.collectAsStateWithLifecycle()
+    val currentZoom by viewModel.currentZoom.collectAsStateWithLifecycle()
+    val displayedLenses by viewModel.displayedLenses.collectAsStateWithLifecycle()
+    val selectedLens by viewModel.selectedLens.collectAsStateWithLifecycle()
+    val activeZoomPresets by viewModel.activeZoomPresets.collectAsStateWithLifecycle()
+
+    val proSaturation by viewModel.proSaturation.collectAsStateWithLifecycle()
+    val proContrast by viewModel.proContrast.collectAsStateWithLifecycle()
+    val proHighlights by viewModel.proHighlights.collectAsStateWithLifecycle()
+    val proShadows by viewModel.proShadows.collectAsStateWithLifecycle()
+    val proSharpness by viewModel.proSharpness.collectAsStateWithLifecycle()
+    val proNoiseReduction by viewModel.proNoiseReduction.collectAsStateWithLifecycle()
+
+    val videoStabilizationMode by viewModel.videoStabilizationMode.collectAsStateWithLifecycle()
+    val isOisEnabled by viewModel.isOisEnabled.collectAsStateWithLifecycle()
+    val uiCustomizationState by viewModel.uiCustomizationState.collectAsStateWithLifecycle()
+    val activeLayoutConfig = remember(uiCustomizationState, cameraMode) {
+        uiCustomizationState.getConfigForMode(cameraMode)
+    }
+
+
+    val instantSwitchState by viewModel.instantSwitchState.collectAsStateWithLifecycle()
+    val isCameraReady by viewModel.engine.isCameraReady.collectAsStateWithLifecycle()
+    val doubleTapAction by viewModel.doubleTapAction.collectAsStateWithLifecycle()
+
+    val isUsingRearMainLens = remember(selectedLens, currentZoom) {
+        selectedLens?.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK &&
+                (selectedLens?.lensType == LensType.WIDE || (currentZoom in 0.85f..1.5f))
+    }
+    val isUsingRearLens = remember(selectedLens) {
+        selectedLens?.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK
+    }
+
+
+
+    var isCustomUiStudioOpen by remember { mutableStateOf(false) }
+    var isManualProSliderOpen by remember { mutableStateOf(false) }
+    var shutterAreaHeightDp by remember { mutableStateOf(216.dp) }
+    // Separate estimate for the preview boundary; the measured shutter panel replaces this after layout.
+    var viewfinderControlAreaHeightDp by remember { mutableStateOf(182.dp) }
+
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> {
+                    viewModel.engine.onAppBackgrounded()
+                }
+                androidx.lifecycle.Lifecycle.Event.ON_START -> {
+                    if (hasCameraPermission) {
+                        viewModel.engine.onAppForegrounded()
+                    }
+                }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    val floatingWindowAppearance by viewModel.floatingWindowAppearance.collectAsStateWithLifecycle()
+    val viewfinderCornerRadiusDp by viewModel.viewfinderCornerRadiusDp.collectAsStateWithLifecycle()
+
+    val isAnyWindowOpen = isCinemaSettingsOpen || isLogProfileWindowOpen || isLutWindowOpen ||
+            isManualProOpen || isMoreModesOpen ||
+            isVideoSettingsPanelOpen ||
+            isVideoAdjustmentsOpen || isSettingsOpen || isGallerySelectionDialogOpen ||
+            isCustomUiStudioOpen ||
+            isQuickOptionsOpen
+
+    LaunchedEffect(isAnyWindowOpen) {
+        com.example.camera.ui.components.BackdropBlurManager.isWindowActive = isAnyWindowOpen
+    }
+
+    CompositionLocalProvider(
+        com.example.camera.ui.components.LocalFloatingWindowAppearance provides floatingWindowAppearance
+    ) {
+        BoxWithConstraints(
+            modifier = modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .testTag("camera_main_screen")
+        ) {
+            val hasRealUltraWide = remember(displayedLenses) {
+                displayedLenses.any { it.lensType == LensType.ULTRAWIDE && it.isPhysical } || displayedLenses.any { it.baseZoomRatio < 0.9f }
+            }
+            val minViewfinderZoom = if (hasRealUltraWide) 0.5f else 1.0f
+            val activeFacing = selectedLens?.facing
+            val maxLensZoom = remember(displayedLenses, activeFacing) {
+                displayedLenses
+                    .filter { activeFacing == null || it.facing == activeFacing }
+                    .maxOfOrNull { it.maxZoomRatio } ?: 20.0f
+            }
+            val maxViewfinderZoom = maxOf(capabilities.maxZoom, maxLensZoom, 20.0f)
+            // OPPO video preview uses a dedicated portrait frame below the top controls.
+            // Keep other templates and all non-video modes on their existing full-screen layout.
+            // Use the same extended preview geometry for both Video and Pro Video (Cinema).
+            val isOppoVideoTemplate = (cameraMode == CameraMode.VIDEO || cameraMode == CameraMode.CINEMA) &&
+                    uiCustomizationState.selectedTemplate.name.contains("OPPO", ignoreCase = true)
+            val oppoVideoPreviewTopInset = 72.dp
+            // Match the preview's lower edge to the bottom of the shutter button, leaving
+            // a small gap before the mode selector. Include transient rows above the shutter.
+            val oppoVideoPreviewBottomOffset = 14.dp +
+                    (if (activeTimerCountdown != null) 62.dp else 0.dp) +
+                    (if (isRecordingVideo) 38.dp else 0.dp) +
+                    activeLayoutConfig.shutterSizeDp.dp + 4.dp
+            val oppoVideoPreviewHeight = (
+                    maxHeight - oppoVideoPreviewTopInset -
+                            viewfinderControlAreaHeightDp + oppoVideoPreviewBottomOffset
+                    ).coerceAtLeast(1.dp)
+            val viewfinderLayoutModifier = if (isOppoVideoTemplate) {
+                Modifier
+                    .fillMaxWidth()
+                    .padding(top = oppoVideoPreviewTopInset)
+                    .height(oppoVideoPreviewHeight)
+                    .align(Alignment.TopCenter)
+            } else {
+                Modifier.fillMaxSize()
+            }
+
+            // 1. Viewfinder layer preserving exact aspect ratio without distortion
+            Viewfinder(
+                aspectRatio = previewAspectRatio,
+                gridType = gridType,
+                focusRingPoint = focusRingPoint,
+                isAeLocked = isAeLocked,
+                isAfLocked = isAfLocked,
+                isFrontCamera = selectedLens?.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT,
+                cameraMode = cameraMode,
+                previewBufferSize = previewBufferSize,
+                mainPreviewBufferSize = mainPreviewBufferSize,
+                ultraWidePreviewBufferSize = ultraWidePreviewBufferSize,
+                sensorOrientation = sensorOrientation,
+                activeLut = cinemaConfig.selectedLut,
+                isLutPreviewEnabled = cinemaConfig.isLutPreviewEnabled,
+                cinemaConfig = cinemaConfig,
+                videoAdjustments = videoAdjustments,
+                isGpuRelayPreviewActive = isGpuRelayPreviewActive,
+                proSaturation = proSaturation,
+                proContrast = proContrast,
+                proHighlights = proHighlights,
+                proShadows = proShadows,
+                isProModeActive = isManualProOpen,
+                floatingWindowBlurStrength = floatingWindowAppearance.blurStrength,
+                isSettingsOpen = isSettingsOpen,
+                isCameraReady = isCameraReady,
+                onSurfaceTextureAvailable = { texture, width, height ->
+                    viewModel.engine.setPreviewSurfaceTexture(texture, width, height)
+                },
+                onSurfaceTextureSizeChanged = { texture, width, height ->
+                    viewModel.engine.onViewfinderSurfaceSizeChanged(texture, width, height)
+                },
+                isUsingUltraWideSurface = isUsingUltraWideSurface,
+                previewOverlapState = previewOverlapState,
+                onUltraWideSurfaceTextureAvailable = { texture, width, height ->
+                    viewModel.engine.setUltraWidePreviewSurfaceTexture(texture, width, height)
+                },
+                onUltraWideSurfaceTextureSizeChanged = { texture, width, height ->
+                    viewModel.engine.onUltraWideViewfinderSurfaceSizeChanged(texture, width, height)
+                },
+                onPreviewFrameAvailable = { source -> viewModel.engine.onPreviewFrameAvailable(source) },
+                onTapToFocus = { point, normX, normY ->
+                    viewModel.onTapToFocus(point, normX, normY)
+                },
+                onZoomChange = { zoom ->
+                    viewModel.setZoom(zoom, isPresetTap = false)
+                },
+                currentZoom = currentZoom,
+                minZoom = minViewfinderZoom,
+                maxZoom = maxViewfinderZoom,
+                onZoomPresetTap = { preset ->
+                    viewModel.setZoom(preset, isPresetTap = true)
+                },
+                onExposureCompensationChange = { ev ->
+                    viewModel.setExposureCompensation(ev)
+                },
+                onToggleLock = {
+                    viewModel.toggleAeAfLock()
+                },
+                currentExposureCompensation = exposureCompensation,
+                onFrameLuminanceStats = { stats ->
+                    viewModel.engine.onFrameLuminanceStats(stats)
+                },
+                modifier = viewfinderLayoutModifier
+            )
+        // 1b. Normal Video Adjustments Live Spatial Effects Overlay (Grain, Vignette, Soft Light)
+        if (cameraMode == CameraMode.VIDEO) {
+            VideoAdjustmentsViewfinderOverlay(
+                adjustments = videoAdjustments,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        // 1b. Cinema Viewfinder Assist Overlays (Waveform, Peaking, Zebras)
+        if (cameraMode == CameraMode.CINEMA) {
+            CinemaAssistOverlays(
+                cinemaConfig = cinemaConfig,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        // 1f. Real-Time Viewfinder HUD & Telemetry specific to the active UI Template
+        ViewfinderHudOverlay(
+            templateType = uiCustomizationState.selectedTemplate,
+            cameraMode = cameraMode,
+            exposureCompensation = exposureCompensation,
+            onExposureChange = { viewModel.setExposureCompensation(it) },
+            currentZoom = currentZoom,
+            onZoomChange = { viewModel.setZoom(it, isPresetTap = false) },
+            manualIso = manualIso,
+            manualShutterSpeedNs = manualShutterSpeedNs,
+            storageStats = storageStats,
+            capabilities = capabilities,
+            modifier = Modifier.fillMaxSize()
+        )
+
+                // Non-blocking video background saving indicator pill
+        if (isSavingVideo) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xCC0F172A),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.7f)),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 74.dp)
+                    .testTag("video_saving_indicator")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(10.dp),
+                        strokeWidth = 1.5.dp,
+                        color = Color(0xFFF59E0B)
+                    )
+                    Text(
+                        text = "Saving video...",
+                        color = Color.White,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+
+        // 1g. Motorola Instant Camera Switching Picture-in-Picture Little Preview
+        LittlePreviewOverlay(
+            showUltraWidePreview = instantSwitchState.isShowUltraWidePreview && isUsingRearMainLens,
+            showFrontPreview = instantSwitchState.isShowFrontCameraPreview && isUsingRearLens,
+            ultraWideStatus = instantSwitchState.ultraWideStatus,
+            frontStatus = instantSwitchState.frontStatus,
+            onUltraWideSurfaceTextureAvailable = { texture ->
+                viewModel.onUltraWideLittlePreviewSurfaceAvailable(texture)
+            },
+            onFrontSurfaceTextureAvailable = { texture ->
+                viewModel.onFrontLittlePreviewSurfaceAvailable(texture)
+            },
+            onUltraWideClick = {
+                viewModel.switchToUltraWideInstant()
+            },
+            onFrontClick = {
+                viewModel.switchToFrontInstant()
+            },
+            onCloseUltraWidePreview = {
+                viewModel.setShowUltraWidePreview(false)
+            },
+            onCloseFrontPreview = {
+                viewModel.setShowFrontCameraPreview(false)
+            }
+        )
+
+        // 2. Top Controls
+        TopControlBar(
+            cameraMode = cameraMode,
+            flashMode = flashMode,
+            timerMode = timerMode,
+            gridType = gridType,
+            isRawEnabled = isRawEnabled,
+            supportsRaw = capabilities.supportsRaw,
+            storageStats = storageStats,
+            videoQuality = currentVideoQuality,
+            videoResolution = selectedVideoResolution,
+            videoFps = videoFps,
+            cinemaConfig = cinemaConfig,
+            onCinemaSettingsClick = { viewModel.toggleCinemaSettings() },
+            onLogClick = { viewModel.toggleLogProfileWindow() },
+            isLogWindowOpen = isLogProfileWindowOpen,
+            onLutClick = { viewModel.toggleLutWindow() },
+            isLutWindowOpen = isLutWindowOpen,
+            onCinemaEvChange = { ev ->
+                viewModel.updateCinemaConfig(cinemaConfig.copy(exposureCompensation = ev))
+            },
+            isEvOpen = false,
+            onEvClick = { viewModel.toggleEvControlOpen() },
+            exposureCompensation = exposureCompensation,
+            evStepSize = capabilities.exposureCompensationStep,
+            onVideoQualityClick = { viewModel.cycleVideoQuality() },
+            onVideoSettingsClick = { viewModel.toggleVideoSettingsPanel() },
+            onCinemaResolutionClick = { viewModel.toggleVideoSettingsPanel() },
+            onCinemaAspectRatioClick = { viewModel.cycleCinemaAspectRatio() },
+            isVideoAdjustmentsOpen = isVideoAdjustmentsOpen,
+            hasActiveVideoAdjustments = !videoAdjustments.isDefault,
+            onVideoAdjustmentsClick = { viewModel.toggleVideoAdjustmentsOpen() },
+            onFlashClick = { viewModel.cycleFlashMode() },
+            onTimerClick = { viewModel.cycleTimerMode() },
+            onGridClick = { viewModel.cycleGridType() },
+            onRawClick = { viewModel.toggleRawCapture() },
+            onSettingsClick = { viewModel.setSettingsOpen(true) },
+            isProActive = isManualProOpen,
+            onToggleProClick = { viewModel.setManualProOpen(!isManualProOpen) },
+            isAudioEnabled = isAudioEnabled,
+            onAudioToggle = onAudioToggleRequested,
+            isQuickOptionsOpen = isQuickOptionsOpen,
+            onQuickOptionsToggle = { isQuickOptionsOpen = !isQuickOptionsOpen },
+            layoutConfig = activeLayoutConfig,
+            modifier = Modifier.align(Alignment.TopCenter)
+        )
+
+        // Dismiss barrier behind floating windows to close them when tapping on the camera preview
+        val isAnyFloatingOverlayOpen = isQuickOptionsOpen ||
+                (isVideoSettingsPanelOpen && (cameraMode == CameraMode.VIDEO || cameraMode == CameraMode.CINEMA)) ||
+                (isLogProfileWindowOpen && cameraMode == CameraMode.CINEMA) ||
+                (isLutWindowOpen && cameraMode == CameraMode.CINEMA)
+        if (isAnyFloatingOverlayOpen) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        isQuickOptionsOpen = false
+                        viewModel.setVideoSettingsPanelOpen(false)
+                        viewModel.setLogProfileWindowOpen(false)
+                        viewModel.setLutWindowOpen(false)
+                    }
+            )
+        }
+
+        // 2-alpha. Floating Quick Options Panel (Photo, Video, Cinema modes)
+        QuickOptionsFloatingPanel(
+            isOpen = isQuickOptionsOpen,
+            cameraMode = cameraMode,
+            flashMode = flashMode,
+            timerMode = timerMode,
+            gridType = gridType,
+            isRawEnabled = isRawEnabled,
+            isPipelineActive = false,
+            videoResolution = selectedVideoResolution,
+            videoFps = videoFps,
+            isAudioEnabled = isAudioEnabled,
+            hasActiveVideoAdjustments = !videoAdjustments.isDefault,
+            cinemaConfig = cinemaConfig,
+            isEvOpen = false,
+            exposureCompensation = exposureCompensation,
+            evStepSize = capabilities.exposureCompensationStep,
+            onFlashClick = { viewModel.cycleFlashMode() },
+            onTimerClick = { viewModel.cycleTimerMode() },
+            onGridClick = { viewModel.cycleGridType() },
+            onRawClick = { viewModel.toggleRawCapture() },
+            onVideoSettingsClick = {
+                isQuickOptionsOpen = false
+                viewModel.setVideoSettingsPanelOpen(true)
+            },
+            onAudioToggle = onAudioToggleRequested,
+            onVideoAdjustmentsClick = {
+                isQuickOptionsOpen = false
+                viewModel.setVideoAdjustmentsOpen(true)
+            },
+            onCinemaResolutionClick = {
+                isQuickOptionsOpen = false
+                viewModel.setVideoSettingsPanelOpen(true)
+            },
+            onCinemaAspectRatioClick = { viewModel.cycleCinemaAspectRatio() },
+            onCinemaSettingsClick = {
+                isQuickOptionsOpen = false
+                viewModel.setCinemaSettingsOpen(true)
+            },
+            onLogClick = {
+                isQuickOptionsOpen = false
+                viewModel.setLogProfileWindowOpen(true)
+            },
+            onLutClick = {
+                isQuickOptionsOpen = false
+                viewModel.setLutWindowOpen(true)
+            },
+            onEvClick = { viewModel.toggleEvControlOpen() },
+            onSettingsClick = {
+                isQuickOptionsOpen = false
+                viewModel.setSettingsOpen(true)
+            },
+            onDismiss = { isQuickOptionsOpen = false },
+            accentColor = Color(0xFFFF7A00),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 58.dp)
+        )
+
+
+        // 2b. Floating Frosted Video Settings Panel (Resolution & Frame Rate)
+        if (cameraMode == CameraMode.VIDEO || cameraMode == CameraMode.CINEMA) {
+            FloatingVideoSettingsPanel(
+                isOpen = isVideoSettingsPanelOpen,
+                currentResolution = if (cameraMode == CameraMode.CINEMA) cinemaConfig.selectedResolution ?: selectedVideoResolution else selectedVideoResolution,
+                currentFps = if (cameraMode == CameraMode.CINEMA) cinemaConfig.videoFps else videoFps,
+                    supportedFpsProvider = { res -> viewModel.getSupportedFpsForResolution(res) },
+                onResolutionSelected = { res ->
+                    viewModel.selectVideoResolution(res)
+                    if (cameraMode == CameraMode.CINEMA) {
+                        viewModel.updateCinemaConfig(cinemaConfig.copy(selectedResolution = res))
+                    }
+                },
+                onFpsSelected = { fps ->
+                    viewModel.setVideoFps(fps)
+                    if (cameraMode == CameraMode.CINEMA) {
+                        viewModel.updateCinemaConfig(cinemaConfig.copy(videoFps = fps))
+                    }
+                },
+                onDismiss = { viewModel.setVideoSettingsPanelOpen(false) },
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(top = 56.dp)
+            )
+        }
+
+        // 3. Manual Pro Control Bar (Cleanly positioned ABOVE shutter button and bottom controls)
+        ManualProControlBar(
+            isOpen = isManualProOpen,
+                activeTab = activeProTab,
+                capabilities = capabilities,
+                exposureCompensation = exposureCompensation,
+                manualIso = manualIso,
+                manualShutterSpeedNs = manualShutterSpeedNs,
+                whiteBalance = whiteBalance,
+                focusMode = focusMode,
+                manualFocusDistance = manualFocusDistance,
+                colorProfile = colorProfile,
+                proSaturation = proSaturation,
+                proContrast = proContrast,
+                proHighlights = proHighlights,
+                proShadows = proShadows,
+                proSharpness = proSharpness,
+                proNoiseReduction = proNoiseReduction,
+                onSliderVisibilityChange = { isManualProSliderOpen = it },
+                onTabSelected = { viewModel.setActiveProTab(it) },
+                onExposureChange = { viewModel.setExposureCompensation(it) },
+                onIsoChange = { viewModel.setManualIso(it) },
+                onShutterChange = { viewModel.setManualShutterSpeedNs(it) },
+                onWbChange = { viewModel.setWhiteBalance(it) },
+                onFocusModeChange = { viewModel.setFocusMode(it) },
+                onFocusDistanceChange = { viewModel.setManualFocusDistance(it) },
+                onColorProfileChange = { viewModel.setColorProfile(it) },
+                onProSaturationChange = { viewModel.setProSaturation(it) },
+                onProContrastChange = { viewModel.setProContrast(it) },
+                onProHighlightsChange = { viewModel.setProHighlights(it) },
+                onProShadowsChange = { viewModel.setProShadows(it) },
+                onProSharpnessChange = { viewModel.setProSharpness(it) },
+                onProNoiseReductionChange = { viewModel.setProNoiseReduction(it) },
+                onResetProAdjustments = { viewModel.resetProAdjustments() },
+                onClose = {
+                    viewModel.setManualProOpen(false)
+                    isManualProSliderOpen = false
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = shutterAreaHeightDp + 12.dp)
+            )
+
+        // 3d0. Dedicated Video Adjustments Panel
+        AnimatedVisibility(
+            visible = cameraMode == CameraMode.VIDEO &&
+                    isVideoAdjustmentsOpen,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 }),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 215.dp)
+        ) {
+            VideoAdjustmentsPanel(
+                adjustments = videoAdjustments,
+                onAdjustmentsChange = { updated ->
+                    viewModel.updateVideoAdjustments(updated)
+                },
+                onReset = {
+                    viewModel.resetVideoAdjustments()
+                },
+                onDismiss = {
+                    viewModel.setVideoAdjustmentsOpen(false)
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp)
+            )
+        }
+
+        // 3d. Dedicated Pro Video (Cinema) Mode Settings Window
+        AnimatedVisibility(
+            visible = cameraMode == CameraMode.CINEMA && isCinemaSettingsOpen,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 }),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 215.dp)
+        ) {
+            CinemaSettingsWindow(
+                config = cinemaConfig,
+                capabilities = cinemaCapabilities,
+                onConfigChange = { updatedConfig ->
+                    viewModel.updateCinemaConfig(updatedConfig)
+                },
+                onDismissRequest = { viewModel.setCinemaSettingsOpen(false) },
+                modifier = Modifier.padding(horizontal = 14.dp)
+            )
+        }
+
+        // 3d_log. Dedicated Pro Video Log Profiles Floating Window
+        AnimatedVisibility(
+            visible = cameraMode == CameraMode.CINEMA && isLogProfileWindowOpen,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { -it / 2 }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { -it / 2 }),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 56.dp)
+        ) {
+            com.example.camera.ui.components.LogProfileFloatingWindow(
+                config = cinemaConfig,
+                capabilities = cinemaCapabilities,
+                onSelectProfile = { profile ->
+                    viewModel.selectLogProfile(profile)
+                },
+                onSelectBitDepth = { depth ->
+                    viewModel.updateCinemaConfig(cinemaConfig.copy(logBitDepth = depth))
+                },
+                onDismissRequest = { viewModel.setLogProfileWindowOpen(false) }
+            )
+        }
+
+        // 3d_lut. Dedicated Pro Video Cinematic LUTs Floating Window
+        val customLutRepo = remember(context) { com.example.camera.data.CustomLutRepository(context) }
+        val customLuts by customLutRepo.customLuts.collectAsStateWithLifecycle()
+        val lutFilePickerLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.OpenDocument()
+        ) { uri: android.net.Uri? ->
+            if (uri != null) {
+                var resolvedName: String? = null
+                try {
+                    context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                        val nameIdx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                        if (nameIdx >= 0 && cursor.moveToFirst()) {
+                            resolvedName = cursor.getString(nameIdx)
+                        }
+                    }
+                } catch (ignored: Exception) {}
+
+                val fileName = (resolvedName ?: uri.lastPathSegment?.substringAfterLast('/'))
+                    ?.removeSuffix(".cube")
+                    ?.takeIf { it.isNotBlank() } ?: "Custom Grade"
+
+                val imported = customLutRepo.importLut(uri, fileName)
+                if (imported != null) {
+                    android.widget.Toast.makeText(context, "Imported LUT: ${imported.title}", android.widget.Toast.LENGTH_SHORT).show()
+                    viewModel.selectCustomLut(imported.filePath, imported.title)
+                } else {
+                    android.widget.Toast.makeText(context, "Invalid or unsupported .cube file format", android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+
+        AnimatedVisibility(
+            visible = cameraMode == CameraMode.CINEMA && isLutWindowOpen,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { -it / 2 }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { -it / 2 }),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 56.dp)
+        ) {
+            com.example.camera.ui.components.LutFloatingWindow(
+                config = cinemaConfig,
+                customLuts = customLuts,
+                onSelectLut = { lut ->
+                    viewModel.selectLut(lut)
+                },
+                onSelectCustomLut = { customLutItem ->
+                    val lutPath = customLutRepo.ensureLutReady(customLutItem)
+                    if (lutPath != null) {
+                        viewModel.selectCustomLut(lutPath, customLutItem.title)
+                    } else {
+                        android.widget.Toast.makeText(
+                            context,
+                            "Could not load LUT: ${customLutItem.title}",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    }
+                },
+                onIntensityChange = { intensity ->
+                    viewModel.updateCinemaConfig(cinemaConfig.copy(lutIntensity = intensity))
+                },
+                onBakeToggle = { bake ->
+                    viewModel.updateCinemaConfig(cinemaConfig.copy(isBakeLutToOutput = bake))
+                },
+                onImportLutClick = {
+                    lutFilePickerLauncher.launch(arrayOf("*/*"))
+                },
+                onDeleteCustomLut = { lutId ->
+                    customLutRepo.deleteLut(lutId)
+                },
+                onDismissRequest = { viewModel.setLutWindowOpen(false) }
+            )
+        }
+
+
+
+        
+        // More Modes drawer removed: all camera modes are available in the mode selector.
+
+        // 4. Toast Notification Overlay
+        AnimatedVisibility(
+            visible = toastMessage != null,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { -it }),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 110.dp)
+        ) {
+            toastMessage?.let { msg ->
+                FrostedGlassBox(
+                    shape = RoundedCornerShape(20.dp),
+                    elevation = 16.dp,
+                    baseAlpha = 0.78f,
+                    modifier = Modifier.testTag("camera_toast")
+                ) {
+                    Text(
+                        text = msg,
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                }
+            }
+        }
+
+        // 5. Bottom Controls
+        BottomControlBar(
+            cameraMode = cameraMode,
+            isOppoVideoTemplate = isOppoVideoTemplate,
+            currentZoom = currentZoom,
+            displayedLenses = displayedLenses,
+            selectedLens = selectedLens,
+            activeZoomPresets = activeZoomPresets,
+            capabilities = capabilities,
+            onShowToast = { msg -> viewModel.showToast(msg) },
+            onLensSelected = { lens -> viewModel.selectLens(lens) },
+            onZoomChange = { zoom -> viewModel.setZoom(zoom, isPresetTap = false) },
+            onZoomPresetTap = { preset -> viewModel.setZoom(preset, isPresetTap = true) },
+            isRecordingVideo = isRecordingVideo,
+            isRecordingPaused = isRecordingPaused,
+            onPauseResumeRecordingClick = { viewModel.toggleVideoRecordingPause() },
+            videoDurationSeconds = videoDurationSeconds,
+            isCapturing = isCapturing,
+            isManualProOpen = isManualProOpen,
+            lastCapturedMedia = lastCapturedMedia,
+            activeTimerCountdown = activeTimerCountdown,
+            onModeSelected = { viewModel.setCameraMode(it) },
+            onShutterClick = {
+                if ((cameraMode == CameraMode.VIDEO || cameraMode == CameraMode.CINEMA) &&
+                    !isRecordingVideo && isAudioEnabled && !hasAudioPermission
+                ) {
+                    pendingVideoStart = true
+                    permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+                } else {
+                    viewModel.onMainActionButtonClick()
+                }
+            },
+            onFlipCameraClick = { viewModel.toggleCameraFacing() },
+            onGalleryClick = {
+                viewModel.openGallery(context)
+            },
+            onCinemaModeClick = { viewModel.toggleCinemaSettings() },
+            onSettingsClick = { viewModel.setSettingsOpen(true) },
+            onTimerClick = { viewModel.cycleTimerMode() },
+            onToggleProClick = { viewModel.setManualProOpen(!isManualProOpen) },
+            onSetManualProOpen = { viewModel.setManualProOpen(it) },
+            onShutterAreaHeightMeasured = {
+                shutterAreaHeightDp = it
+                viewfinderControlAreaHeightDp = it
+            },
+            isEvOpen = false,
+            onEvClick = { viewModel.toggleEvControlOpen() },
+            exposureCompensation = exposureCompensation,
+            evStepSize = capabilities.exposureCompensationStep,
+            layoutConfig = activeLayoutConfig.copy(
+                showZoomCapsule = activeLayoutConfig.showZoomCapsule && (!isAnyWindowOpen || (isManualProOpen && !isManualProSliderOpen)),
+                zoomCapsuleVerticalOffsetDp = if (isManualProOpen) -76 else activeLayoutConfig.zoomCapsuleVerticalOffsetDp
+            ),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
+
+        // Overlay Settings cleanly on top of viewfinder to prevent destroying TextureView or flickering
+        if (isSettingsOpen) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF0C0E14))
+            ) {
+                CameraSettingsHost(
+                    viewModel = viewModel,
+                    onOpenCustomUiStudio = {
+                        viewModel.setSettingsOpen(false)
+                        isCustomUiStudioOpen = true
+                    },
+                    onOpenGalleryChooser = {
+                        viewModel.setGallerySelectionDialogOpen(true)
+                    },
+                    onDismiss = {
+                        viewModel.setSettingsOpen(false)
+                        if (cameraMode == CameraMode.MORE) {
+                            viewModel.setCameraMode(CameraMode.VIDEO)
+                        }
+                    }
+                )
+            }
+        }
+
+        // 7. Preferred Gallery App Selection Dialog
+        com.example.camera.gallery.GallerySelectionDialog(
+            isOpen = isGallerySelectionDialogOpen,
+            currentPreferredPackage = preferredGalleryPackage,
+            onAppSelected = { pkg ->
+                viewModel.setPreferredGalleryPackage(pkg)
+                if (lastCapturedMedia != null) {
+                    com.example.camera.gallery.GalleryLauncher.openMedia(
+                        context = context,
+                        uri = lastCapturedMedia!!.uri,
+                        isVideo = lastCapturedMedia!!.isVideo,
+                        preferredPackage = pkg
+                    )
+                }
+            },
+            onDismiss = { viewModel.setGallerySelectionDialogOpen(false) }
+        )
+
+        // 8. Dedicated Custom UI Studio & Simulator Page
+        if (isCustomUiStudioOpen) {
+            CustomUiStudioDialog(
+                initialConfig = activeLayoutConfig,
+                uiCustomizationState = uiCustomizationState,
+                currentCameraMode = cameraMode,
+                onDismiss = { isCustomUiStudioOpen = false },
+                onApplyToCamera = { newConfig ->
+                    viewModel.updateGlobalLayoutConfig(newConfig)
+                    viewModel.selectUiTemplate(UiTemplateType.CUSTOM)
+                    viewModel.showToast("Custom UI applied to Camera")
+                },
+                onSaveCustomPreset = { name, newConfig ->
+                    viewModel.saveCustomPreset(name, newConfig)
+                    viewModel.showToast("Preset '$name' saved")
+                },
+                onDeleteCustomPreset = { presetId ->
+                    viewModel.deleteCustomPreset(presetId)
+                    viewModel.showToast("Preset deleted")
+                }
+            )
+        }
+
+        }
+}
+}
+
+@Composable
+fun CameraPermissionPrompt(
+    onRequestPermission: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color(0xFF0C0E14))
+            .padding(32.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(18.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(96.dp)
+                    .shadow(16.dp, RoundedCornerShape(26.dp), spotColor = Color(0xFF2563EB).copy(alpha = 0.4f))
+                    .clip(RoundedCornerShape(26.dp))
+                    .background(Color(0xFFC9E0FF)),
+                contentAlignment = Alignment.Center
+            ) {
+                val context = androidx.compose.ui.platform.LocalContext.current
+                val hasBitmap = remember {
+                    try {
+                        context.resources.openRawResource(com.example.R.drawable.ic_app_camera_icon).close()
+                        true
+                    } catch (e: Throwable) {
+                        false
+                    }
+                }
+                if (hasBitmap) {
+                    Image(
+                        painter = painterResource(id = com.example.R.drawable.ic_app_camera_icon),
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Filled.CameraAlt,
+                        contentDescription = null,
+                        modifier = Modifier.size(52.dp),
+                        tint = Color(0xFF1E3A8A)
+                    )
+                }
+            }
+
+            Text(
+                text = "Camera & Audio Access",
+                color = Color.White,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            )
+
+            Text(
+                text = "To capture high-resolution photos and record cinematic video with optical lens switching, grant camera and microphone permissions.",
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = 14.sp,
+                textAlign = TextAlign.Center,
+                lineHeight = 20.sp
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Button(
+                onClick = onRequestPermission,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF2563EB),
+                    contentColor = Color.White
+                ),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .testTag("grant_permissions_button")
+            ) {
+                Text(
+                    text = "Grant Permissions",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}

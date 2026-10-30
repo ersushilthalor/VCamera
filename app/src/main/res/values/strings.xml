@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Video Camera Pro</string>
+    <string name="video_adjustments">Video Adjustments</string>
+    <string name="reset">Reset</string>
+    <string name="basic">Basic</string>
+    <string name="advanced">Advanced</string>
+    <string name="close">Close</string>
+</resources>

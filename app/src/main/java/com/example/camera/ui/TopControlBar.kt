@@ -1,0 +1,739 @@
+package com.example.camera.ui
+
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.camera.model.*
+
+fun getTopControlShape(layoutConfig: ModeLayoutConfig): androidx.compose.ui.graphics.Shape {
+    return when (layoutConfig.iconShapeOption) {
+        IconShapeOption.CIRCLE_GLASS -> CircleShape
+        IconShapeOption.ROUNDED_SQUARE -> RoundedCornerShape(10.dp)
+        IconShapeOption.HEXAGON -> RoundedCornerShape(6.dp)
+        IconShapeOption.PILL -> RoundedCornerShape(18.dp)
+        IconShapeOption.TRANSPARENT_NONE -> RoundedCornerShape(0.dp)
+    }
+}
+
+fun Modifier.topControlStyle(
+    layoutConfig: ModeLayoutConfig,
+    activeColor: Color? = null,
+    isPill: Boolean = false
+): Modifier {
+    // If transparent / floating icons requested, don't draw any background pod or border
+    if (layoutConfig.iconShapeOption == IconShapeOption.TRANSPARENT_NONE) {
+        return this
+    }
+
+    val shape = if (isPill) RoundedCornerShape(17.dp) else getTopControlShape(layoutConfig)
+    val style = layoutConfig.iconStyleOption
+
+    val (bgColor, borderColor, borderWidth) = if (activeColor != null) {
+        Triple(activeColor.copy(alpha = 0.25f), activeColor, 1.2.dp)
+    } else {
+        when (style) {
+            IconStyleOption.ROUNDED_MATERIAL -> Triple(
+                Color(0xB21A1A1E),
+                Color.White.copy(alpha = 0.22f),
+                1.dp
+            )
+            IconStyleOption.MINIMAL_OUTLINE -> Triple(
+                Color(0x22000000),
+                Color.White.copy(alpha = 0.55f),
+                1.dp
+            )
+            IconStyleOption.SHARP_GEOMETRIC -> Triple(
+                Color(0xE614161C),
+                Color.White.copy(alpha = 0.9f),
+                1.5.dp
+            )
+            IconStyleOption.BOLD_SOLID -> Triple(
+                Color(0xEE222630),
+                Color.White.copy(alpha = 0.85f),
+                1.5.dp
+            )
+            IconStyleOption.CYBER_NEON -> Triple(
+                Color(0xE60A1828),
+                Color(0xFF00E5FF),
+                1.5.dp
+            )
+            IconStyleOption.FROSTED_GLASS -> Triple(
+                Color(0x44FFFFFF),
+                Color.White.copy(alpha = 0.6f),
+                1.dp
+            )
+            IconStyleOption.NEOMORPHIC -> Triple(
+                Color(0xDD2D333F),
+                Color(0x66FFFFFF),
+                1.5.dp
+            )
+            IconStyleOption.RETRO_BADGE -> Triple(
+                Color(0xEE2A2219),
+                Color(0xFFFFB300),
+                1.5.dp
+            )
+        }
+    }
+
+    return this
+        .clip(shape)
+        .background(bgColor)
+        .border(borderWidth, borderColor, shape)
+}
+
+/**
+ * Exact 6-dot grid icon style (3 horizontal columns x 2 vertical rows = 6 dots)
+ * matching the ColorOS / Oppo camera UI more-options button.
+ */
+@Composable
+fun SixDotGridIcon(
+    tint: Color,
+    modifier: Modifier = Modifier
+) {
+    androidx.compose.foundation.Canvas(modifier = modifier.size(18.dp)) {
+        val dotRadius = 1.7.dp.toPx()
+        val spacingX = 5.2.dp.toPx()
+        val spacingY = 5.0.dp.toPx()
+        val centerX = size.width / 2f
+        val centerY = size.height / 2f
+
+        // 3 horizontal columns x 2 vertical rows = 6 dots grid
+        val colOffsets = listOf(-spacingX, 0f, spacingX)
+        val rowOffsets = listOf(-spacingY / 2f, spacingY / 2f)
+
+        for (dx in colOffsets) {
+            for (dy in rowOffsets) {
+                drawCircle(
+                    color = tint,
+                    radius = dotRadius,
+                    center = androidx.compose.ui.geometry.Offset(centerX + dx, centerY + dy)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Master Top Control Bar matching the reference UI design.
+ * Exactly 6 beautifully aligned elements across a pure dark glass bar:
+ * [Flash]  [Timer/Action]  [Pill 1]  [Pill 2]  [Grid/Assist]  [Settings]
+ */
+@Composable
+fun TopControlBar(
+    cameraMode: CameraMode,
+    flashMode: FlashMode,
+    timerMode: TimerMode,
+    gridType: GridType,
+    isRawEnabled: Boolean,
+    supportsRaw: Boolean,
+    storageStats: StorageStats = StorageStats(),
+    videoQuality: VideoQualityOption = VideoQualityOption.UHD_4K_30,
+    videoResolution: CameraResolution? = null,
+    videoFps: Int = 30,
+    cinemaConfig: CinemaConfig = CinemaConfig(),
+    isAudioEnabled: Boolean = true,
+    onAudioToggle: () -> Unit = {},
+        onPipelineClick: () -> Unit = {},
+    isPipelineActive: Boolean = false,
+    onCinemaSettingsClick: () -> Unit = {},
+    onCinemaEvChange: (Int) -> Unit = {},
+    isEvOpen: Boolean = false,
+    onEvClick: () -> Unit = {},
+    exposureCompensation: Int = 0,
+    evStepSize: Float = 0.333f,
+    onVideoQualityClick: () -> Unit = {},
+    onVideoSettingsClick: () -> Unit = {},
+    onCinemaResolutionClick: () -> Unit = {},
+    onCinemaAspectRatioClick: () -> Unit = {},
+    onToggleMegapixelMode: () -> Unit = {},
+    isVideoAdjustmentsOpen: Boolean = false,
+    hasActiveVideoAdjustments: Boolean = false,
+    onVideoAdjustmentsClick: () -> Unit = {},
+    isHorizontalLockSettingEnabled: Boolean = true,
+    isHorizonLockEnabled: Boolean = false,
+    onToggleHorizonLock: () -> Unit = {},
+    isDollyZoomSettingEnabled: Boolean = false,
+    isDollyZoomActive: Boolean = false,
+    onToggleDollyZoom: () -> Unit = {},
+    onFlashClick: () -> Unit,
+    onTimerClick: () -> Unit,
+    onGridClick: () -> Unit,
+    onRawClick: () -> Unit,
+    onSettingsClick: () -> Unit,
+    isMotionPhotoEnabled: Boolean = false,
+    onMotionPhotoClick: () -> Unit = {},
+    isProActive: Boolean = false,
+    onToggleProClick: () -> Unit = {},
+    onLogClick: () -> Unit = {},
+    isLogWindowOpen: Boolean = false,
+    onLutClick: () -> Unit = {},
+    isLutWindowOpen: Boolean = false,
+    isQuickOptionsOpen: Boolean = false,
+    onQuickOptionsToggle: () -> Unit = {},
+    layoutConfig: ModeLayoutConfig = ModeLayoutConfig(),
+    modifier: Modifier = Modifier
+) {
+    val accentColor = layoutConfig.getComposeAccentColor()
+    val iconSize = layoutConfig.topControlsIconSizeDp.dp
+    val buttonSize = (layoutConfig.topControlsIconSizeDp + 14).dp.coerceAtLeast(32.dp)
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(
+                androidx.compose.ui.graphics.Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0xEE0A0C12),
+                        Color(0x990E1118),
+                        Color.Transparent
+                    )
+                )
+            )
+            .statusBarsPadding()
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .testTag("master_top_control_bar")
+    ) {
+        val flashButton = @Composable {
+            val (flashIcon, flashColor) = when (flashMode) {
+                FlashMode.OFF -> Icons.Outlined.FlashOff to Color.White.copy(alpha = 0.85f)
+                FlashMode.AUTO -> Icons.Outlined.FlashAuto to accentColor
+                FlashMode.ON -> Icons.Outlined.FlashOn to accentColor
+                FlashMode.TORCH -> Icons.Outlined.Highlight to Color(0xFFFFB300)
+            }
+            val isFlashActive = flashMode != FlashMode.OFF
+            IconButton(
+                onClick = onFlashClick,
+                modifier = Modifier
+                    .size(buttonSize)
+                    .topControlStyle(layoutConfig, activeColor = if (isFlashActive) flashColor else null)
+                    .testTag("flash_button")
+            ) {
+                Icon(
+                    imageVector = flashIcon,
+                    contentDescription = "Flash: ${flashMode.title}",
+                    tint = flashColor,
+                    modifier = Modifier.size(iconSize)
+                )
+            }
+        }
+
+        val timerAudioButton = @Composable {
+            when (cameraMode) {
+                CameraMode.VIDEO, CameraMode.CINEMA -> {
+                    IconButton(
+                        onClick = onAudioToggle,
+                        modifier = Modifier
+                            .size(buttonSize)
+                            .topControlStyle(layoutConfig, activeColor = if (!isAudioEnabled) Color(0xFFFF6B6B) else null)
+                            .testTag("video_audio_toggle_button")
+                    ) {
+                        Icon(
+                            imageVector = if (isAudioEnabled) Icons.Outlined.Mic else Icons.Outlined.MicOff,
+                            contentDescription = if (isAudioEnabled) "Audio On" else "Audio Muted",
+                            tint = if (isAudioEnabled) Color.White.copy(alpha = 0.85f) else Color(0xFFFF6B6B),
+                            modifier = Modifier.size(iconSize)
+                        )
+                    }
+                }
+                else -> {
+                    IconButton(
+                        onClick = onTimerClick,
+                        modifier = Modifier
+                            .size(buttonSize)
+                            .topControlStyle(layoutConfig, activeColor = if (timerMode != TimerMode.OFF) accentColor else null)
+                            .testTag("timer_button")
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = if (timerMode == TimerMode.OFF) Icons.Outlined.TimerOff else Icons.Outlined.Timer,
+                                contentDescription = "Timer: ${timerMode.label}",
+                                tint = if (timerMode == TimerMode.OFF) Color.White.copy(alpha = 0.85f) else accentColor,
+                                modifier = Modifier.size(iconSize)
+                            )
+                            if (timerMode != TimerMode.OFF) {
+                                Text(
+                                    text = timerMode.label,
+                                    color = accentColor,
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Black,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    modifier = Modifier
+                                        .offset(x = 8.dp, y = 6.dp)
+                                        .background(Color.Black, shape = CircleShape)
+                                        .padding(1.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        val primaryBadge = @Composable {
+            when (cameraMode) {
+                CameraMode.MORE, CameraMode.AI_SUBJECT_TRACKING -> {}
+                CameraMode.VIDEO -> {
+                    val resLabel = when {
+                        videoResolution?.width == 3840 || videoResolution?.height == 3840 -> "4K"
+                        videoResolution?.width == 2560 || videoResolution?.height == 2560 -> "2K"
+                        videoResolution?.width == 1920 || videoResolution?.height == 1920 -> "1080P"
+                        videoResolution?.width == 1280 || videoResolution?.height == 1280 -> "720P"
+                        else -> "4K"
+                    }
+                    Box(
+                        modifier = Modifier
+                            .height(34.dp)
+                            .clip(RoundedCornerShape(17.dp))
+                            .background(Color(0xB21A1A1E))
+                            .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(17.dp))
+                            .clickable { onVideoSettingsClick() }
+                            .padding(horizontal = 12.dp)
+                            .testTag("video_top_bar_resolution_fps_pill"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "$resLabel · $videoFps",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.5.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+                CameraMode.CINEMA -> {
+                    // Pro Video resolution and aspect ratio are available from the six-dot menu.
+                }
+                CameraMode.MORE, CameraMode.AI_SUBJECT_TRACKING -> {
+                    Box(
+                        modifier = Modifier
+                            .height(34.dp)
+                            .clip(RoundedCornerShape(17.dp))
+                            .background(Color(0xB21A1A1E))
+                            .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(17.dp))
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "MORE",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.5.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+            }
+        }
+
+        val secondaryBadge = @Composable {
+            when (cameraMode) {
+                CameraMode.VIDEO -> {
+                    Box(
+                        modifier = Modifier
+                            .height(34.dp)
+                            .clip(RoundedCornerShape(17.dp))
+                            .background(Color(0xB21A1A1E))
+                            .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(17.dp))
+                            .clickable { onVideoSettingsClick() }
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "$videoFps",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.5.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+                CameraMode.CINEMA -> {
+                    val bitLabel = if (cinemaConfig.logBitDepth == LogBitDepth.BIT_10) "10b" else "8b"
+                    val label = if (cinemaConfig.colorProfile == CinemaColorProfile.PROCESSED_JPEG) {
+                        "RAW JPEG"
+                    } else {
+                        "LOG $bitLabel"
+                    }
+                    Box(
+                        modifier = Modifier
+                            .height(34.dp)
+                            .clip(RoundedCornerShape(17.dp))
+                            .background(Color(0xB21A1A1E))
+                            .border(1.dp, accentColor, RoundedCornerShape(17.dp))
+                            .clickable { onCinemaSettingsClick() }
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = label,
+                            color = accentColor,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.5.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+                CameraMode.MORE, CameraMode.AI_SUBJECT_TRACKING -> {
+                    Box(
+                        modifier = Modifier
+                            .height(34.dp)
+                            .clip(RoundedCornerShape(17.dp))
+                            .background(Color(0xB21A1A1E))
+                            .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(17.dp))
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "PRO",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.5.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+            }
+        }
+
+        val gridAssistButton = @Composable {
+            IconButton(
+                onClick = onGridClick,
+                modifier = Modifier
+                    .size(buttonSize)
+                    .topControlStyle(layoutConfig, activeColor = if (gridType != GridType.NONE) accentColor else null)
+                    .testTag("grid_button")
+            ) {
+                Icon(
+                    imageVector = if (gridType == GridType.NONE) Icons.Outlined.GridOff else Icons.Outlined.GridOn,
+                    contentDescription = "Grid: ${gridType.title}",
+                    tint = if (gridType == GridType.NONE) Color.White.copy(alpha = 0.85f) else accentColor,
+                    modifier = Modifier.size(iconSize)
+                )
+            }
+        }
+
+        val proExpButton = @Composable {
+            Box(
+                modifier = Modifier
+                    .height(34.dp)
+                    .topControlStyle(layoutConfig, activeColor = if (isProActive) accentColor else null, isPill = true)
+                    .clickable { onToggleProClick() }
+                    .padding(horizontal = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "PRO",
+                    color = if (isProActive) accentColor else Color.White,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    softWrap = false
+                )
+            }
+        }
+
+        val settingsButton = @Composable {
+            IconButton(
+                onClick = onSettingsClick,
+                modifier = Modifier
+                    .size(buttonSize)
+                    .topControlStyle(layoutConfig)
+                    .testTag("settings_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Settings,
+                    contentDescription = "Settings",
+                    tint = Color.White.copy(alpha = 0.9f),
+                    modifier = Modifier.size(iconSize)
+                )
+            }
+        }
+
+
+        val pipelineButton = @Composable {
+            IconButton(
+                onClick = onPipelineClick,
+                modifier = Modifier
+                    .size(buttonSize)
+                    .topControlStyle(layoutConfig, activeColor = if (isPipelineActive) Color(0xFFFFD54F) else null)
+                    .testTag("pipeline_preset_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Tune,
+                    contentDescription = null, // Dedicated pipeline icon has no text or label
+                    tint = if (isPipelineActive) Color(0xFFFFD54F) else Color.White.copy(alpha = 0.9f),
+                    modifier = Modifier.size(iconSize)
+                )
+            }
+        }
+
+
+
+
+        val logButton = @Composable {
+            val isLogActive = cinemaConfig.colorProfile != CinemaColorProfile.NATIVE || cinemaConfig.logBitDepth != LogBitDepth.OFF
+            Box(
+                modifier = Modifier
+                    .height(34.dp)
+                    .topControlStyle(
+                        layoutConfig,
+                        activeColor = if (isLogWindowOpen || isLogActive) accentColor else null,
+                        isPill = true
+                    )
+                    .clickable { onLogClick() }
+                    .padding(horizontal = 11.dp)
+                    .testTag("pro_video_log_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "LOG",
+                    color = if (isLogWindowOpen || isLogActive) accentColor else Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = 0.8.sp,
+                    maxLines = 1,
+                    softWrap = false
+                )
+            }
+        }
+
+        val lutButton = @Composable {
+            val isLutActive = !cinemaConfig.selectedLut.isOff
+            Box(
+                modifier = Modifier
+                    .height(34.dp)
+                    .topControlStyle(
+                        layoutConfig,
+                        activeColor = if (isLutWindowOpen || isLutActive) accentColor else null,
+                        isPill = true
+                    )
+                    .clickable { onLutClick() }
+                    .padding(horizontal = 9.dp)
+                    .testTag("pro_video_lut_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Palette,
+                        contentDescription = "LUT",
+                        tint = if (isLutWindowOpen || isLutActive) accentColor else Color.White,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        text = "LUT",
+                        color = if (isLutWindowOpen || isLutActive) accentColor else Color.White,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.5.sp,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+        }
+
+        val cinemaSettingsQuickButton = @Composable {
+            IconButton(
+                onClick = onCinemaSettingsClick,
+                modifier = Modifier
+                    .size(buttonSize)
+                    .topControlStyle(layoutConfig)
+                    .testTag("pro_video_tuning_controls_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Tune,
+                    contentDescription = "Fine Tuning Controls",
+                    tint = Color.White.copy(alpha = 0.9f),
+                    modifier = Modifier.size(iconSize)
+                )
+            }
+        }
+
+        val videoAdjustmentsButton = @Composable {
+            IconButton(
+                onClick = onVideoAdjustmentsClick,
+                modifier = Modifier
+                    .size(buttonSize)
+                    .topControlStyle(
+                        layoutConfig,
+                        activeColor = if (isVideoAdjustmentsOpen || hasActiveVideoAdjustments) Color(0xFFFFD54F) else null
+                    )
+                    .testTag("video_adjustments_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Tune,
+                    contentDescription = "Video Adjustments",
+                    tint = if (isVideoAdjustmentsOpen || hasActiveVideoAdjustments) Color(0xFFFFD54F) else Color.White,
+                    modifier = Modifier.size(iconSize)
+                )
+            }
+        }
+
+
+
+
+
+        val sixDotMenuButton = @Composable {
+            val sixDotOrange = Color(0xFFFF7A00)
+            IconButton(
+                onClick = onQuickOptionsToggle,
+                modifier = Modifier
+                    .size(buttonSize)
+                    .topControlStyle(
+                        layoutConfig,
+                        activeColor = if (isQuickOptionsOpen) sixDotOrange else null
+                    )
+                    .testTag("top_bar_six_dot_menu_button")
+            ) {
+                SixDotGridIcon(
+                    tint = if (isQuickOptionsOpen) sixDotOrange else Color.White.copy(alpha = 0.95f),
+                    modifier = Modifier.size(iconSize)
+                )
+            }
+        }
+
+
+        @Composable
+        fun RenderItem(item: TopControlItem) {
+            Box(
+                modifier = Modifier.wrapContentSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                when (item) {
+                    TopControlItem.FLASH -> flashButton()
+                    TopControlItem.TIMER -> timerAudioButton()
+                    TopControlItem.GRID -> gridAssistButton()
+                    TopControlItem.RESOLUTION -> {
+                        if (true) {
+                            primaryBadge()
+                        }
+                    }
+                    TopControlItem.RAW -> secondaryBadge()
+                    TopControlItem.PRO_EXP -> proExpButton()
+                    TopControlItem.LOG -> logButton()
+                    TopControlItem.LUT -> lutButton()
+                    TopControlItem.PRO_VIDEO_SETTINGS -> cinemaSettingsQuickButton()
+                    TopControlItem.PIPELINE -> pipelineButton()
+                    TopControlItem.SIX_DOT_MENU -> sixDotMenuButton()
+                    TopControlItem.SETTINGS -> settingsButton()
+                    else -> {}
+                }
+            }
+        }
+
+        // Render Top Controls according to layoutConfig and position
+        val visibleItems = run {
+            var items = layoutConfig.topControlsOrder
+                .filterNot { layoutConfig.hiddenTopControls.contains(it) || it == TopControlItem.STABILIZATION }
+            if (!items.contains(TopControlItem.SIX_DOT_MENU) && !layoutConfig.hiddenTopControls.contains(TopControlItem.SIX_DOT_MENU)) {
+                items = if (items.contains(TopControlItem.SETTINGS)) {
+                    items.map { if (it == TopControlItem.SETTINGS) TopControlItem.SIX_DOT_MENU else it }
+                } else {
+                    items + TopControlItem.SIX_DOT_MENU
+                }
+            }
+            items
+        }
+
+        val leftItems = visibleItems.filter { layoutConfig.getIconPosition(it) == TopIconPosition.LEFT }
+        val centerItems = visibleItems.filter { layoutConfig.getIconPosition(it) == TopIconPosition.CENTER }
+        val rightItems = visibleItems.filter { layoutConfig.getIconPosition(it) == TopIconPosition.RIGHT }
+
+        val shouldScroll = visibleItems.size > 5
+        val topScrollState = rememberScrollState()
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (shouldScroll) Modifier.horizontalScroll(topScrollState) else Modifier
+                ),
+            horizontalArrangement = if (shouldScroll) {
+                Arrangement.spacedBy(layoutConfig.topControlsSpacingDp.dp.coerceAtLeast(8.dp), Alignment.CenterHorizontally)
+            } else {
+                when (layoutConfig.topBarAlignment) {
+                    TopBarAlignment.SPACE_BETWEEN -> Arrangement.SpaceBetween
+                    TopBarAlignment.CENTER -> Arrangement.Center
+                    TopBarAlignment.COMPACT_LEFT -> Arrangement.Start
+                    TopBarAlignment.COMPACT_RIGHT -> Arrangement.End
+                }
+            },
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (shouldScroll || layoutConfig.topBarAlignment != TopBarAlignment.SPACE_BETWEEN) {
+                val orderedItems = if (layoutConfig.topIconPositions.isNotEmpty()) {
+                    leftItems + centerItems + rightItems
+                } else {
+                    visibleItems
+                }
+                orderedItems.forEach { item ->
+                    RenderItem(item)
+                }
+            } else {
+                // Left Group
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(layoutConfig.topControlsSpacingDp.dp, Alignment.Start)
+                ) {
+                    leftItems.forEach { item ->
+                        RenderItem(item)
+                    }
+                }
+
+                // Center Group
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(layoutConfig.topControlsSpacingDp.dp, Alignment.CenterHorizontally)
+                ) {
+                    centerItems.forEach { item ->
+                        RenderItem(item)
+                    }
+                }
+
+                // Right Group
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(layoutConfig.topControlsSpacingDp.dp, Alignment.End)
+                ) {
+                    rightItems.forEach { item ->
+                        RenderItem(item)
+                    }
+                }
+            }
+        }
+    }
+}
+

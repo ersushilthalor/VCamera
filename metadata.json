@@ -1,0 +1,6 @@
+{
+  "name": "Video Camera Pro",
+  "description": "Professional video-only camera app with continuous zoom transitions, background-ready multi-lens architecture, and instant lens switching.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

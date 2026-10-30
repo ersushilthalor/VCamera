@@ -1,0 +1,2349 @@
+package com.example.camera.viewmodel
+
+import android.app.Application
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.SurfaceTexture
+import android.hardware.camera2.CameraCharacteristics
+import android.net.Uri
+import android.util.Log
+import androidx.compose.ui.geometry.Offset
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.camera.data.CameraPreferences
+import com.example.camera.engine.Camera2Engine
+import com.example.camera.engine.CameraOpticalCalibration
+import com.example.camera.model.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import android.os.SystemClock
+import android.view.KeyEvent
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
+import kotlin.math.absoluteValue
+
+enum class ProControlTab(val label: String) {
+    EXPOSURE("EV"),
+    ISO("ISO"),
+    SHUTTER("SEC"),
+    WB("WB"),
+    FOCUS("FOCUS"),
+    TONE("TONE")
+}
+
+class CameraViewModel(application: Application) : AndroidViewModel(application) {
+
+    val engine = Camera2Engine(application.applicationContext)
+    internal val preferences = CameraPreferences(application.applicationContext)
+
+    val lastCapturedMedia: StateFlow<CapturedMedia?> = engine.lastCapturedMedia
+
+    // Mode & Base State must be initialized before combined flows
+    private val _cameraMode = MutableStateFlow(preferences.cameraMode)
+    val cameraMode: StateFlow<CameraMode> = _cameraMode.asStateFlow()
+
+    private val _selectedAspectRatio = MutableStateFlow(CameraAspectRatio.RATIO_9_16)
+    val selectedAspectRatio: StateFlow<CameraAspectRatio> = _selectedAspectRatio.asStateFlow()
+
+    private val _tapFocusConfig = MutableStateFlow(preferences.getModeTapFocusConfig(preferences.cameraMode))
+    val tapFocusConfig: StateFlow<TapFocusConfig> = _tapFocusConfig.asStateFlow()
+
+    val isRecordingVideo: StateFlow<Boolean> = engine.isRecordingVideo
+    val isRecordingPaused: StateFlow<Boolean> = engine.isRecordingPaused
+    val isSavingVideo: StateFlow<Boolean> = engine.isSavingVideo
+    val videoDurationSeconds: StateFlow<Int> = engine.videoDurationSeconds
+
+    
+    // UI Customization State
+    private val _uiCustomizationState = MutableStateFlow(preferences.uiCustomizationState)
+    val uiCustomizationState: StateFlow<UiCustomizationState> = _uiCustomizationState.asStateFlow()
+
+    // Filtered lenses strictly adhering to current facing:
+    // When on Back Camera -> ONLY back lenses (0.5x, 1x, 2x, etc.)
+    // When on Front Camera -> Do not display any lens selector or lens-switching controls
+    val displayedLenses: StateFlow<List<LensInfo>> = combine(
+        engine.availableLenses,
+        engine.selectedLens
+    ) { lenses, selected ->
+        val currentFacing = selected?.facing ?: preferences.lastFacing
+        if (currentFacing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT) {
+            emptyList()
+        } else {
+            lenses.filter { it.facing == currentFacing }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val selectedLens: StateFlow<LensInfo?> = engine.selectedLens
+
+    // Timer
+    private val _timerMode = MutableStateFlow(preferences.getModeTimerMode(preferences.cameraMode))
+    val timerMode: StateFlow<TimerMode> = _timerMode.asStateFlow()
+
+    private val _activeTimerCountdown = MutableStateFlow<Int?>(null)
+    val activeTimerCountdown: StateFlow<Int?> = _activeTimerCountdown.asStateFlow()
+
+    // Grid
+    private val _gridType = MutableStateFlow(preferences.getModeGridType(preferences.cameraMode))
+    val gridType: StateFlow<GridType> = _gridType.asStateFlow()
+
+    // Flash
+    private val _flashMode = MutableStateFlow(preferences.getModeFlashMode(preferences.cameraMode))
+    val flashMode: StateFlow<FlashMode> = _flashMode.asStateFlow()
+
+    // Manual Pro controls drawer / bar
+    private val _isManualProOpen = MutableStateFlow(false)
+    val isManualProOpen: StateFlow<Boolean> = _isManualProOpen.asStateFlow()
+
+    private val _activeProTab = MutableStateFlow(ProControlTab.EXPOSURE)
+    val activeProTab: StateFlow<ProControlTab> = _activeProTab.asStateFlow()
+
+    // Settings drawer & media viewer
+    private val _isSettingsOpen = MutableStateFlow(false)
+    val isSettingsOpen: StateFlow<Boolean> = _isSettingsOpen.asStateFlow()
+
+    private val _isVideoSettingsPanelOpen = MutableStateFlow(false)
+    val isVideoSettingsPanelOpen: StateFlow<Boolean> = _isVideoSettingsPanelOpen.asStateFlow()
+
+    private val _isGallerySelectionDialogOpen = MutableStateFlow(false)
+    val isGallerySelectionDialogOpen: StateFlow<Boolean> = _isGallerySelectionDialogOpen.asStateFlow()
+
+    private val _preferredGalleryPackage = MutableStateFlow(preferences.preferredGalleryPackage)
+    val preferredGalleryPackage: StateFlow<String?> = _preferredGalleryPackage.asStateFlow()
+
+    // Focus indicator ring
+    private val _focusRingPoint = MutableStateFlow<Offset?>(null)
+    val focusRingPoint: StateFlow<Offset?> = _focusRingPoint.asStateFlow()
+
+    // Mirror Selfie (Save selfie as previewed without flipping)
+    private val _saveSelfieAsPreviewed = MutableStateFlow(preferences.saveSelfieAsPreviewed)
+    val saveSelfieAsPreviewed: StateFlow<Boolean> = _saveSelfieAsPreviewed.asStateFlow()
+
+    // Cinema / Pro Video Mode State & Panel visibility
+    val cinemaConfig: StateFlow<CinemaConfig> = engine.cinemaConfig
+    val cinemaCapabilities: StateFlow<CinemaHardwareCapabilities> = engine.cinemaCapabilities
+    val capabilities: StateFlow<HardwareCapabilities> = engine.capabilities
+    private val _isCinemaSettingsOpen = MutableStateFlow(false)
+    val isCinemaSettingsOpen: StateFlow<Boolean> = _isCinemaSettingsOpen.asStateFlow()
+
+    // Pro Video Log Profile Floating Window
+    private val _isLogProfileWindowOpen = MutableStateFlow(false)
+    val isLogProfileWindowOpen: StateFlow<Boolean> = _isLogProfileWindowOpen.asStateFlow()
+
+    fun setLogProfileWindowOpen(open: Boolean) {
+        _isLogProfileWindowOpen.value = open
+        if (open) {
+            _isLutWindowOpen.value = false
+            _isCinemaSettingsOpen.value = false
+        }
+    }
+
+    fun toggleLogProfileWindow() {
+        setLogProfileWindowOpen(!_isLogProfileWindowOpen.value)
+    }
+
+    // Pro Video LUT Floating Window
+    private val _isLutWindowOpen = MutableStateFlow(false)
+    val isLutWindowOpen: StateFlow<Boolean> = _isLutWindowOpen.asStateFlow()
+
+    fun setLutWindowOpen(open: Boolean) {
+        _isLutWindowOpen.value = open
+        if (open) {
+            _isLogProfileWindowOpen.value = false
+            _isCinemaSettingsOpen.value = false
+        }
+    }
+
+    fun toggleLutWindow() {
+        setLutWindowOpen(!_isLutWindowOpen.value)
+    }
+
+    // Video Stabilization Floating Window (OFF / EIS / EIS+)
+    private val _isStabilizationWindowOpen = MutableStateFlow(false)
+    val isStabilizationWindowOpen: StateFlow<Boolean> = _isStabilizationWindowOpen.asStateFlow()
+
+    fun setStabilizationWindowOpen(open: Boolean) {
+        _isStabilizationWindowOpen.value = open
+        if (open) {
+            _isLogProfileWindowOpen.value = false
+            _isLutWindowOpen.value = false
+            _isCinemaSettingsOpen.value = false
+        }
+    }
+
+    fun toggleStabilizationWindow() {
+        setStabilizationWindowOpen(!_isStabilizationWindowOpen.value)
+    }
+
+    fun selectLogProfile(profile: CinemaColorProfile) {
+        val current = cinemaConfig.value
+        val canDo10Bit = cinemaCapabilities.value.getSupportedBitDepthsForCodec(current.codec).contains(LogBitDepth.BIT_10)
+        val updated = if (profile == CinemaColorProfile.HLG10) {
+            current.copy(
+                colorProfile = CinemaColorProfile.HLG10,
+                colorSpace = CinemaColorSpace.REC_2020,
+                logBitDepth = if (canDo10Bit) LogBitDepth.BIT_10 else LogBitDepth.BIT_8,
+                codec = if (current.codec == CinemaCodec.H264 && cinemaCapabilities.value.supportedCodecs.contains(CinemaCodec.H265)) CinemaCodec.H265 else current.codec
+            )
+        } else {
+            current.copy(colorProfile = profile)
+        }
+        updateCinemaConfig(updated)
+        showToast("Log Profile: ${profile.label}")
+    }
+
+    fun selectLut(lut: CinematicLut) {
+        val current = cinemaConfig.value
+        val updated = current.copy(
+            selectedLut = lut,
+            customLutPath = null,
+            customLutName = null,
+            isBakeLutToOutput = true,
+            isLutPreviewEnabled = true
+        )
+        updateCinemaConfig(updated)
+        showToast("LUT Applied: ${lut.label}")
+    }
+
+    fun selectCustomLut(path: String, title: String) {
+        val current = cinemaConfig.value
+        val updated = current.copy(
+            selectedLut = CinematicLut.CUSTOM,
+            customLutPath = path,
+            customLutName = title,
+            isBakeLutToOutput = true,
+            isLutPreviewEnabled = true
+        )
+        updateCinemaConfig(updated)
+        showToast("Custom LUT: $title")
+    }
+
+    // Floating Window Appearance (Transparency & Blur Strength)
+    private val _floatingWindowAppearance = MutableStateFlow(preferences.getFloatingWindowAppearance())
+    val floatingWindowAppearance: StateFlow<FloatingWindowAppearanceConfig> = _floatingWindowAppearance.asStateFlow()
+
+    fun setFloatingWindowTransparency(transparency: Float) {
+        val clamped = transparency.coerceIn(0.0f, 1.0f)
+        _floatingWindowAppearance.update { it.copy(transparency = clamped) }
+        preferences.floatingWindowTransparency = clamped
+    }
+
+    fun setFloatingWindowBlurStrength(blurStrength: Float) {
+        val clamped = blurStrength.coerceIn(0.0f, 50.0f)
+        _floatingWindowAppearance.update { it.copy(blurStrength = clamped) }
+        preferences.floatingWindowBlurStrength = clamped
+        com.example.camera.ui.components.BackdropBlurManager.onBlurStrengthChanged(clamped)
+    }
+
+    fun setFloatingWindowAppearance(config: FloatingWindowAppearanceConfig) {
+        _floatingWindowAppearance.value = config
+        preferences.saveFloatingWindowAppearance(config)
+        com.example.camera.ui.components.BackdropBlurManager.onBlurStrengthChanged(config.blurStrength)
+    }
+
+    fun setFloatingWindowGlassStyle(style: com.example.camera.model.FloatingWindowGlassStyle) {
+        val preset = when (style) {
+            com.example.camera.model.FloatingWindowGlassStyle.LIQUID_GLASS -> com.example.camera.model.FloatingWindowAppearanceConfig.LIQUID_GLASS
+            com.example.camera.model.FloatingWindowGlassStyle.FROSTED_GLASS -> com.example.camera.model.FloatingWindowAppearanceConfig.FROSTED_GLASS
+            com.example.camera.model.FloatingWindowGlassStyle.TRANSPARENT_GLASS -> com.example.camera.model.FloatingWindowAppearanceConfig.TRANSPARENT_GLASS
+            com.example.camera.model.FloatingWindowGlassStyle.SUBTLE_FROST -> com.example.camera.model.FloatingWindowAppearanceConfig.SUBTLE_FROST
+            com.example.camera.model.FloatingWindowGlassStyle.DEEP_FROST -> com.example.camera.model.FloatingWindowAppearanceConfig.DEEP_FROST
+            com.example.camera.model.FloatingWindowGlassStyle.SOLID_DARK -> com.example.camera.model.FloatingWindowAppearanceConfig.SOLID_DARK
+        }
+        val current = _floatingWindowAppearance.value
+        val merged = preset.copy(
+            showVideoResolution = current.showVideoResolution,
+            showVideoFps = current.showVideoFps,
+            showVideoStabilization = current.showVideoStabilization,
+            showCinemaColorProfile = current.showCinemaColorProfile,
+            showCinemaLutControls = current.showCinemaLutControls,
+            showCinemaResolutionFps = current.showCinemaResolutionFps,
+            showCinemaStabilization = current.showCinemaStabilization,
+            showCinemaAssistTools = current.showCinemaAssistTools,
+            showProExposureControls = current.showProExposureControls,
+            showProToneAdjustments = current.showProToneAdjustments,
+            showVideoAdjustmentsColorTone = current.showVideoAdjustmentsColorTone,
+            showVideoAdjustmentsEffects = current.showVideoAdjustmentsEffects,
+            showPipelineMasterToggle = current.showPipelineMasterToggle,
+            showPipelinePresetList = current.showPipelinePresetList
+        )
+        setFloatingWindowAppearance(merged)
+    }
+
+    fun resetFloatingWindowAppearance() {
+        val default = com.example.camera.model.FloatingWindowAppearanceConfig.LIQUID_GLASS
+        setFloatingWindowAppearance(default)
+    }
+
+    // Viewfinder Corner Radius (0..48 dp)
+    private val _viewfinderCornerRadiusDp = MutableStateFlow(preferences.viewfinderCornerRadiusDp)
+    val viewfinderCornerRadiusDp: StateFlow<Int> = _viewfinderCornerRadiusDp.asStateFlow()
+
+    fun setViewfinderCornerRadius(radiusDp: Int) {
+        val clamped = radiusDp.coerceIn(0, 48)
+        _viewfinderCornerRadiusDp.value = clamped
+        preferences.viewfinderCornerRadiusDp = clamped
+    }
+
+    
+    private val _zoomPresetsMode = MutableStateFlow(preferences.zoomPresetsMode)
+    val zoomPresetsMode: StateFlow<String> = _zoomPresetsMode.asStateFlow()
+
+    private val _customZoomPresetsStr = MutableStateFlow(preferences.customZoomPresetsStr)
+    val customZoomPresetsStr: StateFlow<String> = _customZoomPresetsStr.asStateFlow()
+
+    private val _activeZoomPresets = MutableStateFlow(preferences.getEffectiveZoomPresets(hasUltraWide = true))
+    val activeZoomPresets: StateFlow<List<Float>> = _activeZoomPresets.asStateFlow()
+
+    fun setZoomPresetsMode(mode: String) {
+        _zoomPresetsMode.value = mode
+        preferences.zoomPresetsMode = mode
+        refreshActiveZoomPresets()
+        val label = when (mode) {
+            "POWERS_OF_TWO" -> "1x, 2x, 4x, 8x"
+            "CINEMATIC" -> "Cine (1x, 2x, 3x, 6x, 10x)"
+            "CUSTOM" -> "Custom (${preferences.customZoomPresetsStr})"
+            else -> "Standard (0.5x, 1x, 2x, 3x, 5x, 10x)"
+        }
+        showToast("Zoom Presets: $label")
+    }
+
+    fun setCustomZoomPresets(presets: String) {
+        _customZoomPresetsStr.value = presets
+        preferences.customZoomPresetsStr = presets
+        refreshActiveZoomPresets()
+        showToast("Custom Zoom Presets Updated")
+    }
+
+    fun refreshActiveZoomPresets() {
+        val currentLens = engine.selectedLens.value ?: engine.availableLenses.value.firstOrNull()
+        val isFront = currentLens?.facing == CameraCharacteristics.LENS_FACING_FRONT ||
+            preferences.lastFacing == CameraCharacteristics.LENS_FACING_FRONT
+        if (isFront) {
+            _activeZoomPresets.value = emptyList()
+            return
+        }
+
+        val lenses = engine.availableLenses.value
+        val hasUW = lenses.any { it.lensType == LensType.ULTRAWIDE }
+        _activeZoomPresets.value = preferences.getEffectiveZoomPresets(hasUltraWide = hasUW)
+    }
+
+    
+
+    // More Modes Drawer visibility
+    private val _isMoreModesOpen = MutableStateFlow(false)
+    val isMoreModesOpen: StateFlow<Boolean> = _isMoreModesOpen.asStateFlow()
+
+    fun setMoreModesOpen(isOpen: Boolean) {
+        _isMoreModesOpen.value = isOpen
+    }
+
+    fun toggleMoreModes() {
+        _isMoreModesOpen.value = !_isMoreModesOpen.value
+    }
+
+    fun setCinemaSettingsOpen(isOpen: Boolean) {
+        _isCinemaSettingsOpen.value = isOpen
+    }
+
+    fun toggleCinemaSettings() {
+        _isCinemaSettingsOpen.value = !_isCinemaSettingsOpen.value
+    }
+
+    // Floating EV Control Window visibility (Video Mode and Cinema Mode)
+    private val _isEvControlOpen = MutableStateFlow(false)
+    val isEvControlOpen: StateFlow<Boolean> = _isEvControlOpen.asStateFlow()
+
+    fun setEvControlOpen(isOpen: Boolean) {
+        _isEvControlOpen.value = isOpen
+        if (isOpen) {
+            _isVideoSettingsPanelOpen.value = false
+            _isVideoAdjustmentsOpen.value = false
+            _isCinemaSettingsOpen.value = false
+        }
+    }
+
+    fun toggleEvControlOpen() {
+        setEvControlOpen(!_isEvControlOpen.value)
+    }
+
+    // Video adjustments are isolated per physical lens instead of sharing one global profile.
+    private fun videoAdjustmentProfileKey(lens: LensInfo?): String {
+        if (lens == null) return "default"
+        val cameraIdentity = lens.physicalCameraId
+            ?: "${lens.cameraId}_${lens.lensType.name}"
+        return "${lens.facing}_${cameraIdentity}"
+    }
+
+    private val _videoAdjustments = MutableStateFlow(
+        preferences.getVideoAdjustments(videoAdjustmentProfileKey(engine.selectedLens.value))
+    )
+    val videoAdjustments: StateFlow<com.example.camera.model.VideoAdjustments> = _videoAdjustments.asStateFlow()
+
+    private val _isVideoAdjustmentsOpen = MutableStateFlow(false)
+    val isVideoAdjustmentsOpen: StateFlow<Boolean> = _isVideoAdjustmentsOpen.asStateFlow()
+
+    fun setVideoAdjustmentsOpen(isOpen: Boolean) {
+        _isVideoAdjustmentsOpen.value = isOpen
+        if (isOpen) {
+            _isVideoSettingsPanelOpen.value = false
+            _isSettingsOpen.value = false
+            _isManualProOpen.value = false
+        }
+    }
+
+    fun toggleVideoAdjustmentsOpen() {
+        setVideoAdjustmentsOpen(!_isVideoAdjustmentsOpen.value)
+    }
+
+    private var saveVideoAdjustmentsJob: kotlinx.coroutines.Job? = null
+
+    fun updateVideoAdjustments(adjustments: com.example.camera.model.VideoAdjustments) {
+        val profileKey = videoAdjustmentProfileKey(engine.selectedLens.value)
+        _videoAdjustments.value = adjustments
+        engine.currentVideoAdjustments = adjustments
+
+        // Capture the profile key now so a lens switch during debounce cannot save
+        // the previous lens's adjustments into the newly selected lens profile.
+        saveVideoAdjustmentsJob?.cancel()
+        saveVideoAdjustmentsJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            kotlinx.coroutines.delay(300)
+            preferences.saveVideoAdjustments(adjustments, profileKey)
+        }
+    }
+
+    fun resetVideoAdjustments() {
+        saveVideoAdjustmentsJob?.cancel()
+        val profileKey = videoAdjustmentProfileKey(engine.selectedLens.value)
+        val def = com.example.camera.model.VideoAdjustments()
+        _videoAdjustments.value = def
+        engine.currentVideoAdjustments = def
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            preferences.saveVideoAdjustments(def, profileKey)
+        }
+    }
+
+
+
+    fun updateCinemaConfig(config: CinemaConfig) {
+        engine.setCinemaConfig(config)
+        preferences.saveCinemaConfig(config)
+    }
+
+    fun selectCinemaAspectRatio(aspectRatio: com.example.camera.model.CinemaAspectRatio) {
+        val current = cinemaConfig.value
+        if (current.aspectRatio != aspectRatio) {
+            val updated = current.copy(aspectRatio = aspectRatio)
+            updateCinemaConfig(updated)
+            _selectedAspectRatio.value = when (aspectRatio) {
+                com.example.camera.model.CinemaAspectRatio.IMAX -> CameraAspectRatio.RATIO_IMAX
+                com.example.camera.model.CinemaAspectRatio.CINEMATIC -> CameraAspectRatio.RATIO_CINEMATIC
+                else -> CameraAspectRatio.RATIO_16_9
+            }
+            engine.setPreviewAspectRatio(aspectRatio.ratioValue)
+            showToast("Cinema Ratio: ${aspectRatio.label}")
+        }
+    }
+
+    fun cycleCinemaAspectRatio() {
+        val current = cinemaConfig.value.aspectRatio
+        val values = com.example.camera.model.CinemaAspectRatio.values()
+        val nextIndex = (values.indexOf(current) + 1) % values.size
+        selectCinemaAspectRatio(values[nextIndex])
+    }
+
+    fun cycleCinemaResolution() {
+        val supported = cinemaCapabilities.value.supportedResolutions
+            .filterNot { it.width >= 7680 || it.height >= 7680 }
+            .takeIf { it.isNotEmpty() }
+            ?: listOf(
+                CameraResolution(3840, 2160),
+                CameraResolution(2560, 1440),
+                CameraResolution(1920, 1080),
+                CameraResolution(1280, 720)
+            )
+        val current = cinemaConfig.value.selectedResolution ?: supported.firstOrNull { it.width >= 3840 } ?: supported.first()
+        val curIndex = supported.indexOfFirst { it.width == current.width && it.height == current.height }
+        val nextIndex = if (curIndex >= 0 && curIndex + 1 < supported.size) curIndex + 1 else 0
+        val next = supported[nextIndex]
+        val supportedFps = getSupportedFpsForResolution(next)
+        val currentFps = cinemaConfig.value.videoFps
+        val targetFps = if (!supportedFps.contains(currentFps)) supportedFps.firstOrNull() ?: 30 else currentFps
+        updateCinemaConfig(cinemaConfig.value.copy(selectedResolution = next, videoFps = targetFps))
+        val label = when {
+            next.width >= 3840 -> "4K"
+            next.width >= 2560 -> "2K"
+            next.width >= 1920 -> "1080p"
+            else -> "720p"
+        }
+        showToast("Pro Video Resolution: $label")
+    }
+
+    fun toggleCustomPipelineEnabled(enabled: Boolean) {
+    }
+
+    // --- Camera Switching State ---
+    private val _instantSwitchState = MutableStateFlow(
+        MotorolaInstantSwitchState(
+            isKeepUltraWideReady = preferences.isKeepUltraWideReady,
+            isAutoSwitchToUltraWide = preferences.isAutoSwitchToUltraWide,
+            isShowUltraWidePreview = preferences.isShowUltraWidePreview,
+            isKeepFrontCameraReady = preferences.isKeepFrontCameraReady,
+            isShowFrontCameraPreview = preferences.isShowFrontCameraPreview,
+            ultraWideStatus = if (preferences.isKeepUltraWideReady) BackgroundCameraStatus.PREPARING else BackgroundCameraStatus.OFF,
+
+            lensSwitchOverlapDurationSec = preferences.lensSwitchOverlapDurationSec,
+            lensSwitchHoldDurationSec = preferences.lensSwitchHoldDurationSec,
+            isLensSwitchOverlapAnimationEnabled = preferences.isLensSwitchOverlapAnimationEnabled
+        )
+    )
+    val instantSwitchState: StateFlow<MotorolaInstantSwitchState> = _instantSwitchState.asStateFlow()
+
+    private val _isLensSwitchOverlapAnimationEnabled = MutableStateFlow(preferences.isLensSwitchOverlapAnimationEnabled)
+    val isLensSwitchOverlapAnimationEnabled: StateFlow<Boolean> = _isLensSwitchOverlapAnimationEnabled.asStateFlow()
+
+    fun setLensSwitchOverlapAnimationEnabled(enabled: Boolean) {
+        _isLensSwitchOverlapAnimationEnabled.value = enabled
+        preferences.isLensSwitchOverlapAnimationEnabled = enabled
+        engine.setLensSwitchOverlapAnimationEnabled(enabled)
+        _instantSwitchState.update { it.copy(isLensSwitchOverlapAnimationEnabled = enabled) }
+        showToast("Lens Switch Overlap Animation: ${if (enabled) "Enabled" else "Disabled"}")
+    }
+
+    private val _lensSwitchOverlapDurationSec = MutableStateFlow(preferences.lensSwitchOverlapDurationSec)
+    val lensSwitchOverlapDurationSec: StateFlow<Float> = _lensSwitchOverlapDurationSec.asStateFlow()
+
+    private val _lensSwitchHoldDurationSec = MutableStateFlow(preferences.lensSwitchHoldDurationSec)
+    val lensSwitchHoldDurationSec: StateFlow<Float> = _lensSwitchHoldDurationSec.asStateFlow()
+
+    val isUsingUltraWideSurface: StateFlow<Boolean> = engine.isUsingUltraWideSurface
+    val displayedPreviewSource: StateFlow<com.example.camera.engine.PreviewStreamSource> = engine.displayedPreviewSource
+    val previewOverlapState: StateFlow<com.example.camera.engine.PreviewOverlapState> = engine.previewOverlapState
+
+    fun setLensSwitchHoldDuration(seconds: Float) {
+        val clamped = (Math.round(seconds.coerceIn(
+            CameraPreferences.MIN_LENS_SWITCH_HOLD_DURATION_SEC,
+            CameraPreferences.MAX_LENS_SWITCH_HOLD_DURATION_SEC
+        ) * 100f) / 100f).coerceIn(
+            CameraPreferences.MIN_LENS_SWITCH_HOLD_DURATION_SEC,
+            CameraPreferences.MAX_LENS_SWITCH_HOLD_DURATION_SEC
+        )
+        preferences.lensSwitchHoldDurationSec = clamped
+        _lensSwitchHoldDurationSec.value = clamped
+        val ms = (clamped * 1000f + 0.5f).toLong()
+        engine.zoomTransitionController.holdAtOneXDurationMs = ms
+        _instantSwitchState.update { it.copy(lensSwitchHoldDurationSec = clamped) }
+        showToast("Lens Switch Hold: ${String.format(java.util.Locale.US, "%.2f", clamped)} sec")
+    }
+
+    fun setLensSwitchOverlapDuration(seconds: Float) {
+        val clamped = (Math.round(seconds.coerceIn(0.1f, 1.0f) * 10f) / 10f)
+        preferences.lensSwitchOverlapDurationSec = clamped
+        _lensSwitchOverlapDurationSec.value = clamped
+        engine.zoomTransitionController.overlapDurationMs = (clamped * 1000f + 0.5f).toLong()
+        _instantSwitchState.update { it.copy(lensSwitchOverlapDurationSec = clamped) }
+        showToast("Lens Switch Overlap: ${String.format(java.util.Locale.US, "%.1f", clamped)} sec")
+    }
+
+    fun setKeepUltraWideReady(enabled: Boolean) {
+        preferences.isKeepUltraWideReady = enabled
+        _instantSwitchState.value = _instantSwitchState.value.copy(
+            isKeepUltraWideReady = enabled,
+            ultraWideStatus = if (enabled) BackgroundCameraStatus.READY_QUIET else BackgroundCameraStatus.OFF
+        )
+        engine.setKeepUltraWideReady(enabled)
+        showToast(if (enabled) "Keep Ultra Wide Ready: ON" else "Keep Ultra Wide Ready: OFF")
+    }
+
+    fun setAutoSwitchToUltraWide(enabled: Boolean) {
+        preferences.isAutoSwitchToUltraWide = enabled
+        _instantSwitchState.update { it.copy(isAutoSwitchToUltraWide = enabled) }
+        engine.setAutoSwitchToUltraWide(enabled)
+        showToast(if (enabled) "Auto Switch to Ultra Wide: ON" else "Auto Switch to Ultra Wide: OFF")
+    }
+
+    fun setShowUltraWidePreview(enabled: Boolean) {
+        _instantSwitchState.value = _instantSwitchState.value.copy(isShowUltraWidePreview = enabled)
+        showToast(if (enabled) "Ultra-Wide Little Preview: ON" else "Ultra-Wide Little Preview: OFF")
+    }
+
+    fun setKeepFrontCameraReady(enabled: Boolean) {
+        _instantSwitchState.value = _instantSwitchState.value.copy(isKeepFrontCameraReady = enabled)
+        showToast(if (enabled) "Keep Front Camera Ready: ON" else "Keep Front Camera Ready: OFF")
+    }
+
+    fun setShowFrontCameraPreview(enabled: Boolean) {
+        _instantSwitchState.value = _instantSwitchState.value.copy(isShowFrontCameraPreview = enabled)
+        showToast(if (enabled) "Front Camera Little Preview: ON" else "Front Camera Little Preview: OFF")
+    }
+
+    fun onUltraWideLittlePreviewSurfaceAvailable(surfaceTexture: SurfaceTexture?) {
+        // Safe stub - no background camera HAL lock
+    }
+
+    fun onFrontLittlePreviewSurfaceAvailable(surfaceTexture: SurfaceTexture?) {
+        // Safe stub - no background camera HAL lock
+    }
+
+    fun switchToUltraWideInstant() {
+        val ultraLens = engine.availableLenses.value.firstOrNull { it.lensType == LensType.ULTRAWIDE && it.isPhysical }
+        if (ultraLens != null) {
+            selectLens(ultraLens)
+        } else {
+            showToast("Real Ultra-Wide lens is not available on this device")
+        }
+    }
+
+    fun switchToFrontInstant() {
+        val frontLens = engine.availableLenses.value.firstOrNull {
+            it.facing == CameraCharacteristics.LENS_FACING_FRONT
+        }
+        if (frontLens != null) {
+            _currentZoom.value = 1.0f
+            preferences.setModeZoom(_cameraMode.value, 1.0f)
+            preferences.lastFacing = frontLens.facing
+            preferences.saveLastLens(frontLens)
+            preferences.setModeLens(_cameraMode.value, frontLens)
+            selectLens(frontLens, instant = true)
+            refreshActiveZoomPresets()
+        } else {
+            toggleCameraFacing()
+        }
+    }
+
+    fun switchToMainInstant() {
+        val mainLens = engine.availableLenses.value.firstOrNull {
+            it.facing == CameraCharacteristics.LENS_FACING_BACK && it.lensType == LensType.WIDE && !it.isZoomPreset
+        } ?: engine.availableLenses.value.firstOrNull {
+            it.facing == CameraCharacteristics.LENS_FACING_BACK
+        }
+        if (mainLens != null) {
+            preferences.lastFacing = mainLens.facing
+            preferences.saveLastLens(mainLens)
+            preferences.setModeLens(_cameraMode.value, mainLens)
+            selectLens(mainLens, instant = true)
+            refreshActiveZoomPresets()
+        }
+    }
+
+
+    // Toast/Feedback banner
+    private val _toastMessage = MutableStateFlow<String?>(null)
+    val toastMessage: StateFlow<String?> = _toastMessage.asStateFlow()
+
+    // Parameters
+    private val _exposureCompensation = MutableStateFlow(preferences.getModeEv(preferences.cameraMode))
+    val exposureCompensation: StateFlow<Int> = _exposureCompensation.asStateFlow()
+
+    private val _manualIso = MutableStateFlow<Int?>(preferences.getModeIso(preferences.cameraMode))
+    val manualIso: StateFlow<Int?> = _manualIso.asStateFlow()
+
+    private val _manualShutterSpeedNs = MutableStateFlow<Long?>(preferences.getModeShutter(preferences.cameraMode))
+    val manualShutterSpeedNs: StateFlow<Long?> = _manualShutterSpeedNs.asStateFlow()
+
+    private val _whiteBalance = MutableStateFlow(preferences.getModeWhiteBalance(preferences.cameraMode))
+    val whiteBalance: StateFlow<WhiteBalanceMode> = _whiteBalance.asStateFlow()
+
+    private val _focusMode = MutableStateFlow(preferences.getModeFocusMode(preferences.cameraMode))
+    val focusMode: StateFlow<FocusMode> = _focusMode.asStateFlow()
+
+    private val _manualFocusDistance = MutableStateFlow(preferences.getModeFocusDistance(preferences.cameraMode))
+    val manualFocusDistance: StateFlow<Float> = _manualFocusDistance.asStateFlow()
+
+    val isAeLocked: StateFlow<Boolean> = engine.isAeLockedFlow
+    val isAfLocked: StateFlow<Boolean> = engine.isAfLockedFlow
+
+    val isCameraInitialized: StateFlow<Boolean> = engine.isCameraInitialized
+    val cameraInitError: StateFlow<String?> = engine.cameraInitError
+
+    fun safeInitializeCamera(onResult: (success: Boolean, errorMessage: String?) -> Unit = { _, _ -> }) {
+        viewModelScope.launch(Dispatchers.Default) {
+            engine.safeInitializeCamera { success, error ->
+                viewModelScope.launch(Dispatchers.Main) {
+                    onResult(success, error)
+                }
+            }
+        }
+    }
+
+    private val _isRawCaptureEnabled = MutableStateFlow(preferences.getModeRaw(preferences.cameraMode))
+    val isRawCaptureEnabled: StateFlow<Boolean> = _isRawCaptureEnabled.asStateFlow()
+
+    private val _videoStabilizationMode = MutableStateFlow(preferences.getModeVideoStabilizationMode(preferences.cameraMode))
+    val videoStabilizationMode: StateFlow<VideoStabilizationMode> = _videoStabilizationMode.asStateFlow()
+    private val _isOisEnabled = MutableStateFlow(preferences.isOisEnabled)
+    val isOisEnabled: StateFlow<Boolean> = _isOisEnabled.asStateFlow()
+    val actualOisHardwareActive: StateFlow<Boolean> = engine.actualOisHardwareActive
+    val actualEisHardwareActive: StateFlow<Boolean> = engine.actualEisHardwareActive
+    val hybridStabilizationConfig: StateFlow<HybridStabilizationConfig> = engine.hybridStabilizationConfig
+
+    private val _isVideoStabilizationEnabled = MutableStateFlow(preferences.getModeVideoStabilization(preferences.cameraMode))
+    val isVideoStabilizationEnabled: StateFlow<Boolean> = _isVideoStabilizationEnabled.asStateFlow()
+
+    private val _videoBitrateOption = MutableStateFlow(preferences.getModeVideoBitrate(preferences.cameraMode))
+    val videoBitrateOption: StateFlow<VideoBitrateOption> = _videoBitrateOption.asStateFlow()
+
+    private val _videoFps = MutableStateFlow(preferences.getModeVideoFps(preferences.cameraMode))
+    val videoFps: StateFlow<Int> = _videoFps.asStateFlow()
+
+    private val _viewfinderResolution = MutableStateFlow(preferences.viewfinderResolution)
+    val viewfinderResolution: StateFlow<ViewfinderResolution> = _viewfinderResolution.asStateFlow()
+
+    private val _colorProfile = MutableStateFlow(preferences.getModeColorProfile(preferences.cameraMode))
+    val colorProfile: StateFlow<ColorProfile> = _colorProfile.asStateFlow()
+
+    private val _isAudioEnabled = MutableStateFlow(preferences.getModeAudioEnabled(preferences.cameraMode))
+    val isAudioEnabled: StateFlow<Boolean> = _isAudioEnabled.asStateFlow()
+
+    private val _currentZoom = MutableStateFlow(preferences.getModeZoom(preferences.cameraMode))
+    val currentZoom: StateFlow<Float> = _currentZoom.asStateFlow()
+
+    // Active Video Quality (4K 30, 4K 60, 1080p 30, 1080p 60, 720p 30)
+    val currentVideoQuality: StateFlow<VideoQualityOption> = combine(
+        engine.selectedVideoResolution,
+        _videoFps
+    ) { res, fps ->
+        when {
+            res?.width == 3840 && fps == 60 -> VideoQualityOption.UHD_4K_60
+            res?.width == 3840 -> VideoQualityOption.UHD_4K_30
+            res?.width == 1920 && fps == 60 -> VideoQualityOption.FHD_1080_60
+            res?.width == 1920 -> VideoQualityOption.FHD_1080_30
+            res?.width == 1280 -> VideoQualityOption.HD_720_30
+            else -> VideoQualityOption.UHD_4K_30
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), VideoQualityOption.UHD_4K_30)
+
+
+    private var timerJob: Job? = null
+    private var focusDismissJob: Job? = null
+    private var toastDismissJob: Job? = null
+
+    init {
+        val initialMode = preferences.cameraMode
+        _cameraMode.value = initialMode
+
+        // Apply restored mode-specific preferences into engine
+        engine.flashMode = preferences.getModeFlashMode(initialMode)
+        engine.isRawCaptureEnabled = preferences.getModeRaw(initialMode)
+        val initialOis = preferences.isOisEnabled
+        _isOisEnabled.value = initialOis
+        engine.isOisEnabled = initialOis
+        // EIS was removed from the app. Clear legacy saved values at startup so a previous
+        // install cannot resurrect an EIS toggle/state when the user switches camera modes.
+        _videoStabilizationMode.value = VideoStabilizationMode.OFF
+        _isVideoStabilizationEnabled.value = false
+        preferences.videoStabilizationMode = VideoStabilizationMode.OFF
+        preferences.isVideoStabilizationEnabled = false
+        preferences.setModeVideoStabilizationMode(initialMode, VideoStabilizationMode.OFF)
+        preferences.setModeVideoStabilization(initialMode, false)
+        preferences.isUltraStabilizationEnabled = false
+        engine.videoStabilizationMode = VideoStabilizationMode.OFF
+        engine.isVideoStabilizationEnabled = false
+        engine.videoBitrateOption = preferences.getModeVideoBitrate(initialMode)
+        engine.videoFps = preferences.getModeVideoFps(initialMode)
+        engine.colorProfile = preferences.getModeColorProfile(initialMode)
+        engine.isAudioEnabled = preferences.getModeAudioEnabled(initialMode)
+        engine.whiteBalanceMode = preferences.getModeWhiteBalance(initialMode)
+        engine.focusMode = preferences.getModeFocusMode(initialMode)
+        engine.exposureCompensationIndex = preferences.getModeEv(initialMode)
+        engine.manualIso = preferences.getModeIso(initialMode)
+        engine.manualExposureTimeNs = preferences.getModeShutter(initialMode)
+        engine.manualFocusDistance = preferences.getModeFocusDistance(initialMode)
+        engine.saveSelfieAsPreviewed = preferences.saveSelfieAsPreviewed
+        engine.viewfinderResolution = preferences.viewfinderResolution
+        engine.setMode(initialMode)
+        engine.restoreInitialVideoResolution(CameraResolution(preferences.videoWidth, preferences.videoHeight))
+        engine.setCinemaConfig(preferences.getCinemaConfig())
+        setHybridStabilizationConfig(preferences.hybridStabilizationConfig)
+        engine.currentVideoAdjustments = _videoAdjustments.value
+
+        // Keep the tuning UI and both preview/recording processors synchronized with the
+        // selected physical lens. This also restores that lens's persisted profile on switch.
+        viewModelScope.launch {
+            engine.selectedLens.collect { lens ->
+                val profile = preferences.getVideoAdjustments(videoAdjustmentProfileKey(lens))
+                _videoAdjustments.value = profile
+                engine.currentVideoAdjustments = profile
+            }
+        }
+        engine.setKeepUltraWideReady(preferences.isKeepUltraWideReady)
+        engine.setAutoSwitchToUltraWide(preferences.isAutoSwitchToUltraWide)
+        engine.zoomTransitionController.overlapDurationMs = preferences.lensSwitchOverlapDurationMs
+        engine.zoomTransitionController.holdAtOneXDurationMs = preferences.lensSwitchHoldDurationMs
+        engine.setLensSwitchOverlapAnimationEnabled(preferences.isLensSwitchOverlapAnimationEnabled)
+
+        engine.antiBandingMode = preferences.antiBanding
+        com.example.camera.sound.CameraSoundManager.setFeedbackMode(preferences.shutterFeedback)
+
+        viewModelScope.launch {
+            engine.ultraWideStreamStatus.collect { status ->
+                _instantSwitchState.update { it.copy(ultraWideStatus = status) }
+            }
+        }
+
+        viewModelScope.launch {
+            engine.isAutoMacroActive.collect { isMacro ->
+                _instantSwitchState.update { it.copy(isAutoMacroActive = isMacro) }
+            }
+        }
+
+        engine.onLensSwitchCompletedListener = { switchedLens, targetZoom ->
+            viewModelScope.launch(Dispatchers.Main.immediate) {
+                if (!engine.zoomTransitionController.isTransitionActive.value) {
+                    _currentZoom.value = targetZoom
+                    preferences.setModeZoom(_cameraMode.value, targetZoom)
+                }
+            }
+        }
+
+
+
+        // Restore initial mode aspect ratio:
+        // - Cinema mode: mode-specific cinema aspect ratio (16:9, IMAX, Cinematic)
+        // - All other video modes: fixed 9:16
+        if (initialMode == CameraMode.CINEMA) {
+            val aspect = engine.cinemaConfig.value.aspectRatio
+            _selectedAspectRatio.value = when (aspect) {
+                com.example.camera.model.CinemaAspectRatio.IMAX -> CameraAspectRatio.RATIO_IMAX
+                com.example.camera.model.CinemaAspectRatio.CINEMATIC -> CameraAspectRatio.RATIO_CINEMATIC
+                else -> CameraAspectRatio.RATIO_16_9
+            }
+            engine.setPreviewAspectRatio(aspect.ratioValue)
+        } else {
+            _selectedAspectRatio.value = CameraAspectRatio.RATIO_9_16
+            engine.setPreviewAspectRatio(16f / 9f)
+        }
+
+        viewModelScope.launch {
+            engine.availableLenses.collect { lenses ->
+                if (lenses.isNotEmpty()) {
+                    refreshActiveZoomPresets()
+                    val savedModeZoom = preferences.getModeZoom(preferences.cameraMode)
+                    val savedModeLens = preferences.getModeLens(preferences.cameraMode, lenses)
+                    val effectiveLens = savedModeLens ?: engine.selectedLens.value
+                    val isFront = effectiveLens?.facing == CameraCharacteristics.LENS_FACING_FRONT
+                    if (savedModeLens != null && engine.selectedLens.value?.id != savedModeLens.id) {
+                        val initialZoom = if (isFront) 1.0f else savedModeZoom
+                        if (initialZoom > 0f) {
+                            _currentZoom.value = initialZoom
+                        }
+                        engine.selectLens(
+                            savedModeLens,
+                            preserveZoom = !isFront && savedModeZoom > 0f,
+                            targetZoom = initialZoom.takeIf { it > 0f }
+                        )
+                    } else if (isFront) {
+                        _currentZoom.value = 1.0f
+                        engine.setZoom(1.0f, isPresetTap = false)
+                    } else if (savedModeZoom > 0f) {
+                        _currentZoom.value = savedModeZoom
+                        engine.setZoom(savedModeZoom, isPresetTap = false)
+                    }
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            engine.currentZoomState.collect { zoom ->
+                _currentZoom.value = zoom
+                if (!engine.isContinuousZoomTransitionActive && !engine.zoomTransitionController.isTransitionActive.value) {
+                    preferences.currentZoom = zoom
+                    preferences.setModeZoom(_cameraMode.value, zoom)
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            engine.selectedLens.collect {
+                refreshActiveZoomPresets()
+            }
+        }
+    }
+
+    fun toggleSaveSelfieAsPreviewed() {
+        val next = !_saveSelfieAsPreviewed.value
+        _saveSelfieAsPreviewed.value = next
+        preferences.saveSelfieAsPreviewed = next
+        engine.saveSelfieAsPreviewed = next
+        showToast(if (next) "Save selfie as previewed: ON" else "Save selfie as previewed: OFF")
+    }
+
+    fun setSaveSelfieAsPreviewed(enabled: Boolean) {
+        _saveSelfieAsPreviewed.value = enabled
+        preferences.saveSelfieAsPreviewed = enabled
+        engine.saveSelfieAsPreviewed = enabled
+    }
+
+    fun setCameraMode(mode: CameraMode) {
+        val previousMode = _cameraMode.value
+        if (mode == previousMode) return
+
+        // 1. Persist previous mode's dynamic state
+        engine.selectedLens.value?.let { currentLens ->
+            preferences.setModeLens(previousMode, currentLens)
+        }
+        preferences.setModeZoom(previousMode, _currentZoom.value)
+
+        // 2. Set new mode
+        _cameraMode.value = mode
+        preferences.cameraMode = mode
+
+        // 3. Immediately synchronize aspect ratio:
+        // Cinema mode uses selected cinema aspect ratio (16:9, IMAX, Cinematic).
+        // Video mode keeps 9:16 aspect ratio.
+        if (mode == CameraMode.CINEMA) {
+            val aspect = engine.cinemaConfig.value.aspectRatio
+            _selectedAspectRatio.value = when (aspect) {
+                com.example.camera.model.CinemaAspectRatio.IMAX -> CameraAspectRatio.RATIO_IMAX
+                com.example.camera.model.CinemaAspectRatio.CINEMATIC -> CameraAspectRatio.RATIO_CINEMATIC
+                else -> CameraAspectRatio.RATIO_16_9
+            }
+            engine.setPreviewAspectRatio(aspect.ratioValue)
+        } else {
+            _selectedAspectRatio.value = CameraAspectRatio.RATIO_9_16
+            engine.setPreviewAspectRatio(16f / 9f)
+        }
+
+        if (mode == CameraMode.CINEMA) {
+            // Start Pro Video with assist overlays and edge sharpness OFF by default.
+            // The user can still enable Edge Sharpness manually from Settings.
+            val curCinema = engine.cinemaConfig.value
+            if (curCinema.zebraThreshold != com.example.camera.model.ZebraThreshold.OFF ||
+                curCinema.sharpness != com.example.camera.model.CinemaSharpness.OFF
+            ) {
+                updateCinemaConfig(
+                    curCinema.copy(
+                        zebraThreshold = com.example.camera.model.ZebraThreshold.OFF,
+                        sharpness = com.example.camera.model.CinemaSharpness.OFF
+                    )
+                )
+            }
+        }
+
+        if (mode != CameraMode.VIDEO) {
+            _isVideoAdjustmentsOpen.value = false
+        }
+
+        // 4. Restore mode-specific controls before switching engine mode to avoid exposure resets
+        val mFlash = preferences.getModeFlashMode(mode)
+        _flashMode.value = mFlash
+        engine.flashMode = mFlash
+
+        val mTimer = preferences.getModeTimerMode(mode)
+        _timerMode.value = mTimer
+
+        val mGrid = preferences.getModeGridType(mode)
+        _gridType.value = mGrid
+
+        val mRaw = preferences.getModeRaw(mode)
+        _isRawCaptureEnabled.value = mRaw
+        engine.isRawCaptureEnabled = mRaw
+
+        
+        // Never restore EIS state from legacy per-mode preferences.
+        _videoStabilizationMode.value = VideoStabilizationMode.OFF
+        _isVideoStabilizationEnabled.value = false
+        preferences.videoStabilizationMode = VideoStabilizationMode.OFF
+        preferences.isVideoStabilizationEnabled = false
+        preferences.setModeVideoStabilizationMode(mode, VideoStabilizationMode.OFF)
+        preferences.setModeVideoStabilization(mode, false)
+        preferences.isUltraStabilizationEnabled = false
+        engine.videoStabilizationMode = VideoStabilizationMode.OFF
+        engine.isVideoStabilizationEnabled = false
+        _isStabilizationWindowOpen.value = false
+
+        val mVideoFps = preferences.getModeVideoFps(mode)
+        _videoFps.value = mVideoFps
+        engine.videoFps = mVideoFps
+
+        val mVideoBitrate = preferences.getModeVideoBitrate(mode)
+        _videoBitrateOption.value = mVideoBitrate
+        engine.videoBitrateOption = mVideoBitrate
+
+        val mAudio = preferences.getModeAudioEnabled(mode)
+        _isAudioEnabled.value = mAudio
+        engine.isAudioEnabled = mAudio
+
+        val mAutoHdr = preferences.getModeAutoHdr(mode)
+        _autoHdrEnabled.value = mAutoHdr
+
+        val mAutoFraming = preferences.getModeAutoFraming(mode)
+        _autoFramingEnabled.value = mAutoFraming
+
+
+        val mWb = preferences.getModeWhiteBalance(mode)
+        _whiteBalance.value = mWb
+        engine.whiteBalanceMode = mWb
+
+        val mFocus = preferences.getModeFocusMode(mode)
+        _focusMode.value = mFocus
+        engine.focusMode = mFocus
+
+        val mEv = preferences.getModeEv(mode)
+        _exposureCompensation.value = mEv
+        engine.exposureCompensationIndex = mEv
+        if (mode == CameraMode.CINEMA) {
+            updateCinemaConfig(engine.cinemaConfig.value.copy(exposureCompensation = mEv))
+        }
+        _isEvControlOpen.value = false
+
+        val mIso = preferences.getModeIso(mode)
+        _manualIso.value = mIso
+        engine.manualIso = mIso
+
+        val mShutter = preferences.getModeShutter(mode)
+        _manualShutterSpeedNs.value = mShutter
+        engine.manualExposureTimeNs = mShutter
+
+        val mDist = preferences.getModeFocusDistance(mode)
+        _manualFocusDistance.value = mDist
+        engine.manualFocusDistance = mDist
+
+        val mColorProfile = preferences.getModeColorProfile(mode)
+        _colorProfile.value = mColorProfile
+        engine.colorProfile = mColorProfile
+
+        val mTapFocus = preferences.getModeTapFocusConfig(mode)
+        _tapFocusConfig.value = mTapFocus
+
+        val mHybridStab = preferences.getModeHybridStabilizationConfig(mode)
+        setHybridStabilizationConfig(mHybridStab)
+
+        // 5. Switch engine mode to synchronize preview buffer and session with restored settings
+        engine.setMode(mode)
+
+        if (mode == CameraMode.AI_SUBJECT_TRACKING) {
+            engine.closeCamera()
+        } else if (previousMode == CameraMode.AI_SUBJECT_TRACKING) {
+            safeInitializeCamera()
+        }
+
+        // 6. Restore mode-specific lens and zoom if available
+        val modeZoom = preferences.getModeZoom(mode)
+        val currentLens = engine.selectedLens.value
+        val isCurrentlyFront = currentLens?.facing == CameraCharacteristics.LENS_FACING_FRONT ||
+            preferences.lastFacing == CameraCharacteristics.LENS_FACING_FRONT
+        val modeLens = if (isCurrentlyFront) {
+            engine.availableLenses.value.firstOrNull { it.facing == CameraCharacteristics.LENS_FACING_FRONT }
+        } else {
+            preferences.getModeLens(mode, engine.availableLenses.value)
+        }
+        val effectiveLens = modeLens ?: currentLens
+        val isFront = effectiveLens?.facing == CameraCharacteristics.LENS_FACING_FRONT
+
+        if (isFront) {
+            _currentZoom.value = 1.0f
+            preferences.setModeZoom(mode, 1.0f)
+            if (modeLens != null && modeLens.id != engine.selectedLens.value?.id) {
+                engine.selectLens(modeLens, preserveZoom = false, targetZoom = 1.0f)
+            } else {
+                engine.setZoom(1.0f, isPresetTap = false)
+            }
+        } else if (modeLens != null && modeLens.id != engine.selectedLens.value?.id) {
+            if (modeZoom > 0f) {
+                _currentZoom.value = modeZoom
+            }
+            engine.selectLens(
+                modeLens,
+                preserveZoom = modeZoom > 0f,
+                targetZoom = modeZoom.takeIf { it > 0f }
+            )
+        } else if (modeZoom > 0f) {
+            _currentZoom.value = modeZoom
+            engine.setZoom(modeZoom, isPresetTap = false)
+        } else {
+            engine.updatePreviewSettings()
+        }
+
+        _isCinemaSettingsOpen.value = false
+        if (mode == CameraMode.MORE) {
+            _isMoreModesOpen.value = true
+        }
+
+    }
+
+    fun selectLens(lens: LensInfo, instant: Boolean = false) {
+        val currentLens = engine.selectedLens.value
+        val currentZ = _currentZoom.value
+
+        val switchPoint = CameraOpticalCalibration.DEFAULT_SWITCH_POINT_MM
+        val switchZoom = 1.0f
+
+        val targetZ = when (lens.lensType) {
+            LensType.ULTRAWIDE -> 0.5f
+            LensType.WIDE -> if (kotlin.math.abs(switchPoint - 23.0f) < 0.5f) 1.0f else switchZoom
+            LensType.TELEPHOTO -> 2.0f
+            LensType.TELEPHOTO_3X -> 3.0f
+            LensType.FRONT -> 1.0f
+            else -> if (lens.facing == CameraCharacteristics.LENS_FACING_FRONT) 1.0f else lens.baseZoomRatio
+        }
+
+        val isDifferentLens = currentLens == null || currentLens.id != lens.id || currentLens.lensType != lens.lensType
+        val isBetweenMainAndUw = (currentLens?.lensType == LensType.WIDE && lens.lensType == LensType.ULTRAWIDE) ||
+                (currentLens?.lensType == LensType.ULTRAWIDE && lens.lensType == LensType.WIDE) ||
+                (lens.lensType == LensType.ULTRAWIDE && currentZ >= switchZoom) ||
+                (lens.lensType == LensType.WIDE && currentZ < switchZoom)
+
+        if (instant) {
+            engine.zoomTransitionController.cancelTransition()
+            engine.isContinuousZoomTransitionActive = false
+            engine.selectLens(lens)
+            engine.zoomTransitionController.setSteadyStatePreview(lens.lensType == LensType.ULTRAWIDE)
+            preferences.lastFacing = lens.facing
+            preferences.saveLastLens(lens)
+            preferences.setModeLens(_cameraMode.value, lens)
+            _currentZoom.value = targetZ
+            preferences.setModeZoom(_cameraMode.value, targetZ)
+            val lensDesc = when (lens.lensType) {
+                LensType.ULTRAWIDE -> "0.5x Ultra-Wide"
+                LensType.WIDE -> "1x Main"
+                LensType.TELEPHOTO -> "2x Telephoto"
+                LensType.TELEPHOTO_3X -> "3x Telephoto"
+                LensType.MACRO -> "Macro"
+                LensType.FRONT -> "Front Selfie"
+            }
+            showToast("Switched to $lensDesc Lens")
+            return
+        }
+
+        val isSignificantZoomChange = (targetZ - currentZ).absoluteValue >= 0.05f
+
+        if (isDifferentLens && (isSignificantZoomChange || isBetweenMainAndUw) && lens.facing == (currentLens?.facing ?: lens.facing)) {
+            // Smooth continuous sub-step interpolation across complete range (300ms fixed duration)
+            startContinuousZoomTransition(fromZoom = currentZ, targetZoom = targetZ, targetLens = lens)
+            val lensDesc = when (lens.lensType) {
+                LensType.ULTRAWIDE -> "0.5x Ultra-Wide"
+                LensType.WIDE -> "1x Main"
+                LensType.TELEPHOTO -> "2x Telephoto"
+                LensType.TELEPHOTO_3X -> "3x Telephoto"
+                LensType.MACRO -> "Macro"
+                LensType.FRONT -> "Front Selfie"
+            }
+            showToast("Switched to $lensDesc Lens")
+            return
+        }
+
+        engine.selectLens(lens)
+        preferences.lastFacing = lens.facing
+        preferences.saveLastLens(lens)
+        preferences.setModeLens(_cameraMode.value, lens)
+        val lensDesc = when (lens.lensType) {
+            LensType.ULTRAWIDE -> "0.5x Ultra-Wide"
+            LensType.WIDE -> "1x Main"
+            LensType.TELEPHOTO -> "2x Telephoto"
+            LensType.TELEPHOTO_3X -> "3x Telephoto"
+            LensType.MACRO -> "Macro"
+            LensType.FRONT -> "Front Selfie"
+        }
+        showToast("Switched to $lensDesc Lens")
+    }
+
+    fun forceDeepScanLenses() {
+        val count = engine.detectHardwareLenses(forceDeepScan = true)
+        showToast("Deep scan found $count hardware & aux lenses")
+    }
+
+    fun toggleCameraFacing() {
+        val currentLens = engine.selectedLens.value ?: return
+        val targetFacing = if (currentLens.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT) {
+            android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK
+        } else {
+            android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
+        }
+        val targetLens = engine.availableLenses.value.firstOrNull {
+            it.facing == targetFacing && (it.lensType == LensType.WIDE || it.lensType == LensType.FRONT) && !it.isZoomPreset
+        } ?: engine.availableLenses.value.firstOrNull { it.facing == targetFacing }
+
+        if (targetLens != null) {
+            val isTargetFront = targetFacing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
+            preferences.lastFacing = targetFacing
+            preferences.saveLastLens(targetLens)
+            preferences.setModeLens(_cameraMode.value, targetLens)
+            if (isTargetFront) {
+                _currentZoom.value = 1.0f
+                preferences.setModeZoom(_cameraMode.value, 1.0f)
+                engine.selectLens(targetLens, preserveZoom = false, targetZoom = 1.0f)
+            } else {
+                engine.selectLens(targetLens)
+            }
+            refreshActiveZoomPresets()
+            val label = if (isTargetFront) "Front Camera" else "Rear Camera"
+            showToast("Switched to $label")
+        }
+    }
+
+    fun cycleFlashMode() {
+        if (_cameraMode.value == CameraMode.VIDEO || _cameraMode.value == CameraMode.CINEMA) {
+            val nextMode = if (_flashMode.value == FlashMode.TORCH) FlashMode.OFF else FlashMode.TORCH
+            setFlashMode(nextMode)
+            showToast(if (nextMode == FlashMode.TORCH) "Torch: ON" else "Torch: OFF")
+            return
+        }
+        val nextMode = when (_flashMode.value) {
+            FlashMode.OFF -> FlashMode.AUTO
+            FlashMode.AUTO -> FlashMode.ON
+            FlashMode.ON -> FlashMode.TORCH
+            FlashMode.TORCH -> FlashMode.OFF
+        }
+        _flashMode.value = nextMode
+        preferences.flashMode = nextMode
+        preferences.setModeFlashMode(_cameraMode.value, nextMode)
+        engine.flashMode = nextMode
+        engine.updatePreviewSettings()
+        showToast("Flash: ${nextMode.title}")
+    }
+
+    fun cycleTimerMode() {
+        val nextMode = when (_timerMode.value) {
+            TimerMode.OFF -> TimerMode.SEC_3
+            TimerMode.SEC_3 -> TimerMode.SEC_5
+            TimerMode.SEC_5 -> TimerMode.SEC_10
+            TimerMode.SEC_10 -> TimerMode.OFF
+        }
+        _timerMode.value = nextMode
+        preferences.timerMode = nextMode
+        preferences.setModeTimerMode(_cameraMode.value, nextMode)
+        showToast("Timer: ${nextMode.label}")
+    }
+
+    fun setGridType(type: GridType) {
+        _gridType.value = type
+        preferences.gridType = type
+        preferences.setModeGridType(_cameraMode.value, type)
+    }
+
+    fun cycleGridType() {
+        val nextGrid = when (_gridType.value) {
+            GridType.NONE -> GridType.THIRDS
+            GridType.THIRDS -> GridType.GOLDEN
+            GridType.GOLDEN -> GridType.SQUARE
+            GridType.SQUARE -> GridType.LEVEL
+            GridType.LEVEL -> GridType.NONE
+        }
+        _gridType.value = nextGrid
+        preferences.gridType = nextGrid
+        preferences.setModeGridType(_cameraMode.value, nextGrid)
+        showToast("Grid: ${nextGrid.title}")
+    }
+
+    fun toggleRawCapture() {
+        val next = !_isRawCaptureEnabled.value
+        _isRawCaptureEnabled.value = next
+        preferences.isRawEnabled = next
+        preferences.setModeRaw(_cameraMode.value, next)
+        engine.isRawCaptureEnabled = next
+        val caps = engine.capabilities.value
+        if (caps.supportsRaw) {
+            engine.restartCamera()
+            showToast(if (next) "RAW (DNG + JPEG) Enabled" else "RAW Disabled")
+        } else {
+            showToast(if (next) "RAW Enabled" else "RAW Disabled")
+        }
+    }
+
+    fun cycleVideoQuality() {
+        val supportedQualities = listOf(
+            VideoQualityOption.UHD_4K_30,
+            VideoQualityOption.UHD_4K_60,
+            VideoQualityOption.FHD_1080_30,
+            VideoQualityOption.FHD_1080_60,
+            VideoQualityOption.HD_720_30
+        )
+        val currentIndex = supportedQualities.indexOf(currentVideoQuality.value).let { if (it >= 0) it else 0 }
+        val nextQuality = supportedQualities[(currentIndex + 1) % supportedQualities.size]
+        setVideoQuality(nextQuality)
+    }
+
+    fun setVideoQuality(quality: VideoQualityOption) {
+        engine.selectVideoResolution(quality.resolution)
+        engine.videoFps = quality.fps
+        _videoFps.value = quality.fps
+        preferences.videoWidth = quality.width
+        preferences.videoHeight = quality.height
+        preferences.videoFps = quality.fps
+        showToast("Video Quality: ${quality.fullLabel}")
+    }
+
+    fun toggleManualPro() {
+        _isManualProOpen.value = !_isManualProOpen.value
+    }
+
+    fun setManualProOpen(open: Boolean) {
+        _isManualProOpen.value = open
+    }
+
+    fun setActiveProTab(tab: ProControlTab) {
+        _activeProTab.value = tab
+    }
+
+    fun setExposureCompensation(value: Int) {
+        _exposureCompensation.value = value
+        preferences.exposureCompensation = value
+        preferences.setModeEv(_cameraMode.value, value)
+        engine.exposureCompensationIndex = value
+
+        // Exposure compensation operates on top of continuous Auto Exposure:
+        // Ensure AE is active, unlocked, and adapting continuously to lighting changes
+        engine.isAeLocked = false
+
+        // In Video and Cinema modes, clear any manual ISO or shutter speed lock
+        // so camera HAL continuously adapts ISO and shutter speed with the AE bias
+        if (_cameraMode.value == CameraMode.VIDEO || _cameraMode.value == CameraMode.CINEMA) {
+            _manualIso.value = null
+            _manualShutterSpeedNs.value = null
+            engine.manualIso = null
+            engine.manualExposureTimeNs = null
+        }
+
+        if (_cameraMode.value == CameraMode.CINEMA) {
+            updateCinemaConfig(engine.cinemaConfig.value.copy(
+                exposureCompensation = value,
+                manualIso = null,
+                manualShutterSpeedNs = null
+            ))
+        }
+        engine.updatePreviewSettings()
+    }
+
+    fun resetExposureCompensation() {
+        setExposureCompensation(0)
+    }
+
+    fun setManualIso(iso: Int?) {
+        _manualIso.value = iso
+        preferences.manualIso = iso
+        preferences.setModeIso(_cameraMode.value, iso)
+        engine.manualIso = iso
+        engine.updatePreviewSettings()
+    }
+
+    fun setManualShutterSpeedNs(ns: Long?) {
+        _manualShutterSpeedNs.value = ns
+        preferences.manualShutterSpeedNs = ns
+        preferences.setModeShutter(_cameraMode.value, ns)
+        engine.manualExposureTimeNs = ns
+        engine.updatePreviewSettings()
+    }
+
+    fun setWhiteBalance(wb: WhiteBalanceMode) {
+        _whiteBalance.value = wb
+        preferences.whiteBalance = wb
+        preferences.setModeWhiteBalance(_cameraMode.value, wb)
+        engine.whiteBalanceMode = wb
+        engine.updatePreviewSettings()
+        showToast("WB: ${wb.title}")
+    }
+
+    fun setFocusMode(mode: FocusMode) {
+        _focusMode.value = mode
+        preferences.focusMode = mode
+        preferences.setModeFocusMode(_cameraMode.value, mode)
+        engine.focusMode = mode
+        engine.updatePreviewSettings()
+        showToast("Focus: ${mode.title}")
+    }
+
+    fun setManualFocusDistance(distance: Float) {
+        _manualFocusDistance.value = distance
+        preferences.manualFocusDistance = distance
+        preferences.setModeFocusDistance(_cameraMode.value, distance)
+        engine.manualFocusDistance = distance
+        engine.updatePreviewSettings()
+    }
+
+    // Pro Advanced Image Adjustments (Saturation, Contrast, Highlights, Shadows, Sharpness, Noise Reduction)
+    val proSaturation: StateFlow<Float> = engine.proSaturation
+    val proContrast: StateFlow<Float> = engine.proContrast
+    val proHighlights: StateFlow<Float> = engine.proHighlights
+    val proShadows: StateFlow<Float> = engine.proShadows
+    val proSharpness: StateFlow<Float> = engine.proSharpness
+    val proNoiseReduction: StateFlow<Float> = engine.proNoiseReduction
+
+    fun setProSaturation(value: Float) {
+        val clamped = value.coerceIn(-100f, 100f)
+        engine.proSaturation.value = clamped
+        preferences.proSaturation = clamped
+    }
+
+    fun setProContrast(value: Float) {
+        val clamped = value.coerceIn(0.5f, 2.0f)
+        engine.proContrast.value = clamped
+        preferences.proContrast = clamped
+    }
+
+    fun setProHighlights(value: Float) {
+        val clamped = value.coerceIn(-100f, 100f)
+        engine.proHighlights.value = clamped
+        preferences.proHighlights = clamped
+    }
+
+    fun setProShadows(value: Float) {
+        val clamped = value.coerceIn(-100f, 100f)
+        engine.proShadows.value = clamped
+        preferences.proShadows = clamped
+    }
+
+    fun setProSharpness(value: Float) {
+        val clamped = value.coerceIn(0f, 100f)
+        engine.proSharpness.value = clamped
+        preferences.proSharpness = clamped
+    }
+
+    fun setProNoiseReduction(value: Float) {
+        val clamped = value.coerceIn(0f, 100f)
+        engine.proNoiseReduction.value = clamped
+        preferences.proNoiseReduction = clamped
+    }
+
+    fun resetProAdjustments() {
+        setProSaturation(0f)
+        setProContrast(1.0f)
+        setProHighlights(0f)
+        setProShadows(0f)
+        setProSharpness(15f)
+        setProNoiseReduction(12f)
+        showToast("Reset Pro Adjustments")
+    }
+
+    fun toggleAeLock() {
+        val next = !engine.isAeLockedFlow.value
+        engine.isAeLocked = next
+        engine.updatePreviewSettings()
+        showToast(if (next) "Exposure Locked" else "Exposure Unlocked")
+    }
+
+    fun toggleAfLock() {
+        val next = !engine.isAfLockedFlow.value
+        engine.isAfLocked = next
+        engine.updatePreviewSettings()
+        showToast(if (next) "Focus Locked" else "Focus Unlocked")
+    }
+
+    /**
+     * Unified continuous zoom transition and interpolation system.
+     * Transitions between any two zoom values over exactly 300ms (0.30s) using continuous
+     * sub-step interpolation with sinusoidal ease-in, faster middle, and smooth ease-out:
+     * - Total transition duration of exactly 300ms for every animated zoom transition.
+     * - Every intermediate 0.01x zoom value is visited in strict order without skipping or sudden jumps.
+     * - Eliminates redundant camera engine calls using delta/time pacing.
+     * - Synchronizes an iPhone-style overlapping preview animation on the actual preview layers
+     *   for both Ultra-Wide -> 1x and 1x -> Ultra-Wide switches lasting exactly 100ms in both directions.
+     * - Preserves instant lens readiness, standby-camera operation, and responsive preset taps.
+     */
+    fun startContinuousZoomTransition(
+        fromZoom: Float,
+        targetZoom: Float,
+        targetLens: LensInfo? = null,
+        durationMs: Long = com.example.camera.engine.ZoomTransitionController.TOTAL_TRANSITION_DURATION_MS,
+        skipHoldAtSwitchPoint: Boolean = false
+    ) {
+        val currentFacing = engine.selectedLens.value?.facing
+        val lensesForFacing = engine.availableLenses.value.filter { currentFacing == null || it.facing == currentFacing }
+        val ultraWideLens = lensesForFacing.firstOrNull { it.lensType == LensType.ULTRAWIDE && it.isPhysical }
+            ?: lensesForFacing.firstOrNull { it.lensType == LensType.ULTRAWIDE }
+        val minZoom = if (ultraWideLens != null) 0.5f else 1.0f
+        val maxLensZoom = lensesForFacing.maxOfOrNull { it.maxZoomRatio } ?: 20.0f
+        val maxZoom = maxOf(engine.capabilities.value.maxZoom, maxLensZoom, 20.0f)
+
+        val clampedFrom = fromZoom.coerceIn(minZoom, maxZoom)
+        val clampedTarget = targetZoom.coerceIn(minZoom, maxZoom)
+
+        val switchPoint = CameraOpticalCalibration.DEFAULT_SWITCH_POINT_MM
+        val switchZoom = 1.0f
+
+        val resolvedTargetLens = targetLens ?: if (clampedTarget >= switchZoom && clampedFrom < switchZoom) {
+            lensesForFacing.firstOrNull { it.isPrimaryMain }
+                ?: lensesForFacing.firstOrNull { it.lensType == LensType.WIDE && !it.isZoomPreset }
+                ?: lensesForFacing.firstOrNull { it.lensType == LensType.WIDE }
+        } else if (clampedTarget < switchZoom && clampedFrom >= switchZoom) {
+            ultraWideLens
+        } else {
+            null
+        }
+
+        val activeMode = _cameraMode.value
+        val isVideoMode = activeMode == CameraMode.VIDEO || activeMode == CameraMode.CINEMA
+        val recordingResolution = if (activeMode == CameraMode.CINEMA) {
+            engine.cinemaConfig.value.selectedResolution ?: engine.selectedVideoResolution.value
+        } else {
+            engine.selectedVideoResolution.value
+        }
+        val is4KVideoMode = isVideoMode &&
+            recordingResolution?.let { maxOf(it.width, it.height) >= 3840 } == true
+        val recordingFps = if (activeMode == CameraMode.CINEMA) {
+            engine.cinemaConfig.value.videoFps
+        } else {
+            engine.videoFps
+        }
+        val zoomFrameIntervalMs = if (is4KVideoMode) {
+            com.example.camera.engine.ZoomTransitionController.frameIntervalMsForFps(recordingFps)
+        } else {
+            16L
+        }
+        val zoomTransitionDurationMs = if (is4KVideoMode) {
+            com.example.camera.engine.ZoomTransitionController.framePacedTransitionDurationMs(
+                durationMs,
+                recordingFps
+            )
+        } else {
+            durationMs
+        }
+
+        engine.isContinuousZoomTransitionActive = true
+        engine.ensureUltraWideSimultaneousReady()
+        engine.zoomTransitionController.startTransition(
+            fromZoom = clampedFrom,
+            targetZoom = clampedTarget,
+            targetLens = resolvedTargetLens,
+            availableLenses = engine.availableLenses.value,
+            currentLens = engine.selectedLens.value,
+            switchPointMm = CameraOpticalCalibration.DEFAULT_SWITCH_POINT_MM,
+            scope = viewModelScope,
+            durationMs = zoomTransitionDurationMs,
+            skipHoldAtSwitchPoint = skipHoldAtSwitchPoint,
+            frameIntervalMs = zoomFrameIntervalMs,
+            onZoomUpdate = { interpolatedZoom ->
+                _currentZoom.value = interpolatedZoom
+            },
+            onComplete = { finalZoom, finalLens ->
+                _currentZoom.value = finalZoom
+                preferences.currentZoom = finalZoom
+                preferences.setModeZoom(_cameraMode.value, finalZoom)
+                engine.isContinuousZoomTransitionActive = false
+                val resolvedLens = engine.selectedLens.value ?: finalLens
+                if (resolvedLens != null) {
+                    preferences.lastFacing = resolvedLens.facing
+                    preferences.saveLastLens(resolvedLens)
+                    preferences.setModeLens(_cameraMode.value, resolvedLens)
+                }
+            }
+        )
+    }
+
+    fun startSmoothHalfXToOneXTransition(fromZoom: Float = _currentZoom.value) {
+        startContinuousZoomTransition(
+            fromZoom = fromZoom,
+            targetZoom = 1.0f,
+            durationMs = com.example.camera.engine.ZoomTransitionController.TOTAL_TRANSITION_DURATION_MS
+        )
+    }
+
+    fun startSmoothOneXToHalfXTransition(fromZoom: Float = _currentZoom.value, targetZoom: Float = 0.5f) {
+        startContinuousZoomTransition(
+            fromZoom = fromZoom,
+            targetZoom = targetZoom,
+            durationMs = com.example.camera.engine.ZoomTransitionController.TOTAL_TRANSITION_DURATION_MS
+        )
+    }
+
+    fun startSmoothLensTransition(fromZoom: Float, targetZoom: Float, targetLens: LensInfo? = null) {
+        startContinuousZoomTransition(
+            fromZoom = fromZoom,
+            targetZoom = targetZoom,
+            targetLens = targetLens,
+            durationMs = com.example.camera.engine.ZoomTransitionController.TOTAL_TRANSITION_DURATION_MS
+        )
+    }
+
+    fun setZoom(zoom: Float, isPresetTap: Boolean = false) {
+        val currentFacing = engine.selectedLens.value?.facing
+        val isFrontCamera = currentFacing == CameraCharacteristics.LENS_FACING_FRONT
+        val lensesForFacing = engine.availableLenses.value.filter { currentFacing == null || it.facing == currentFacing }
+        val ultraWideLens = lensesForFacing.firstOrNull { it.lensType == LensType.ULTRAWIDE && it.isPhysical }
+            ?: lensesForFacing.firstOrNull { it.lensType == LensType.ULTRAWIDE }
+            ?: engine.availableLenses.value.firstOrNull { it.lensType == LensType.ULTRAWIDE }
+
+        val minZoom = if (isFrontCamera) 1.0f else if (ultraWideLens != null) 0.5f else 1.0f
+        val maxLensZoom = lensesForFacing.maxOfOrNull { it.maxZoomRatio } ?: (if (isFrontCamera) 1.0f else 20.0f)
+        val maxZoom = if (isFrontCamera) 1.0f else maxOf(engine.capabilities.value.maxZoom, maxLensZoom, 20.0f)
+        val clamped = zoom.coerceIn(minZoom, maxZoom)
+
+        // Cancel running transition if user initiates a new manual zoom action or slider gesture
+        if (!isPresetTap) {
+            engine.zoomTransitionController.cancelTransition()
+            engine.isContinuousZoomTransitionActive = false
+            _currentZoom.value = clamped
+            preferences.setModeZoom(_cameraMode.value, clamped)
+            engine.setZoom(clamped, isPresetTap = false, isContinuousTransition = true)
+            return
+        }
+
+        val currentZ = _currentZoom.value
+        val currentLensType = engine.selectedLens.value?.lensType
+        val switchPoint = CameraOpticalCalibration.DEFAULT_SWITCH_POINT_MM
+        val switchZoom = 1.0f
+        val isCrossingSwitch = !isFrontCamera && (
+            (currentLensType == LensType.ULTRAWIDE && (clamped >= 0.95f || clamped >= switchZoom - 0.05f)) ||
+            (currentLensType == LensType.WIDE && clamped < switchZoom) ||
+            (currentZ < switchZoom && clamped >= switchZoom) ||
+            (currentZ >= switchZoom && clamped < switchZoom)
+        )
+
+        if (kotlin.math.abs(clamped - currentZ) >= 0.05f || isCrossingSwitch) {
+            val targetLens = if (isFrontCamera) {
+                engine.selectedLens.value
+            } else {
+                val hasTele2x = lensesForFacing.any { it.lensType == LensType.TELEPHOTO && it.isPhysical }
+                val hasTele3x = lensesForFacing.any { it.lensType == LensType.TELEPHOTO_3X && it.isPhysical }
+                val targetType = CameraOpticalCalibration.resolveTargetLensType(
+                    currentLensType = engine.selectedLens.value?.lensType ?: LensType.WIDE,
+                    targetZoom = clamped,
+                    hasUltraWide = ultraWideLens != null,
+                    hasTelephoto2x = hasTele2x,
+                    hasTelephoto3x = hasTele3x,
+                    isPresetTap = true,
+                    switchPointMm = switchPoint,
+                    isContinuousTransition = false
+                )
+                val mainWideLens = lensesForFacing.firstOrNull { it.isPrimaryMain }
+                    ?: lensesForFacing.firstOrNull { it.lensType == LensType.WIDE }
+                when (targetType) {
+                    LensType.ULTRAWIDE -> ultraWideLens
+                    LensType.TELEPHOTO_3X -> lensesForFacing.firstOrNull { it.lensType == LensType.TELEPHOTO_3X && it.isPhysical } ?: mainWideLens
+                    LensType.TELEPHOTO -> lensesForFacing.firstOrNull { it.lensType == LensType.TELEPHOTO && it.isPhysical } ?: mainWideLens
+                    else -> mainWideLens
+                }
+            }
+            // Skip the switch-point hold only for direct 2x/3x preset taps from the zoom controls.
+            // A 1x tap deliberately keeps the user's configured hold duration.
+            val skipHoldForTelephotoPreset = isPresetTap &&
+                (kotlin.math.abs(clamped - 2.0f) < 0.05f || kotlin.math.abs(clamped - 3.0f) < 0.05f)
+            startContinuousZoomTransition(
+                fromZoom = currentZ,
+                targetZoom = clamped,
+                targetLens = targetLens,
+                durationMs = com.example.camera.engine.ZoomTransitionController.TOTAL_TRANSITION_DURATION_MS,
+                skipHoldAtSwitchPoint = skipHoldForTelephotoPreset
+            )
+            return
+        }
+
+        _currentZoom.value = clamped
+        preferences.setModeZoom(_cameraMode.value, clamped)
+        engine.setZoom(clamped, isPresetTap = true)
+    }
+
+    // Compatibility shims: EIS has been removed and cannot be re-enabled by a legacy caller.
+    fun setVideoStabilization(@Suppress("UNUSED_PARAMETER") enabled: Boolean) {
+        _isVideoStabilizationEnabled.value = false
+        _videoStabilizationMode.value = VideoStabilizationMode.OFF
+        preferences.isVideoStabilizationEnabled = false
+        preferences.videoStabilizationMode = VideoStabilizationMode.OFF
+        preferences.setModeVideoStabilization(_cameraMode.value, false)
+        preferences.setModeVideoStabilizationMode(_cameraMode.value, VideoStabilizationMode.OFF)
+        engine.isVideoStabilizationEnabled = false
+        engine.videoStabilizationMode = VideoStabilizationMode.OFF
+        engine.updatePreviewSettings()
+    }
+
+    fun toggleVideoStabilization() = setVideoStabilization(false)
+
+    fun setVideoStabilizationMode(@Suppress("UNUSED_PARAMETER") mode: VideoStabilizationMode) =
+        setVideoStabilization(false)
+
+    fun setVideoBitrate(bitrate: VideoBitrateOption) {
+        _videoBitrateOption.value = bitrate
+        preferences.videoBitrate = bitrate
+        preferences.setModeVideoBitrate(_cameraMode.value, bitrate)
+        engine.videoBitrateOption = bitrate
+        showToast("Bitrate: ${bitrate.title}")
+    }
+
+    fun setVideoFps(fps: Int) {
+        _videoFps.value = fps
+        preferences.videoFps = fps
+        preferences.setModeVideoFps(_cameraMode.value, fps)
+        engine.videoFps = fps
+        showToast("Frame Rate: ${fps} FPS")
+    }
+
+    fun setColorProfile(profile: ColorProfile) {
+        _colorProfile.value = profile
+        preferences.colorProfile = profile
+        preferences.setModeColorProfile(_cameraMode.value, profile)
+        engine.colorProfile = profile
+        engine.updatePreviewSettings()
+        showToast("Profile: ${profile.title}")
+    }
+
+    fun toggleAudio() {
+        val next = !_isAudioEnabled.value
+        _isAudioEnabled.value = next
+        preferences.isAudioEnabled = next
+        preferences.setModeAudioEnabled(_cameraMode.value, next)
+        engine.isAudioEnabled = next
+        showToast(if (next) "Audio Recording On" else "Audio Muted")
+    }
+
+    
+    fun selectVideoResolution(res: CameraResolution) {
+        val supportedFps = getSupportedFpsForResolution(res)
+        if (!supportedFps.contains(_videoFps.value)) {
+            val fallbackFps = supportedFps.firstOrNull() ?: 30
+            _videoFps.value = fallbackFps
+            preferences.videoFps = fallbackFps
+            engine.videoFps = fallbackFps
+        }
+        engine.selectVideoResolution(res)
+        preferences.videoWidth = res.width
+        preferences.videoHeight = res.height
+        val label = when {
+            res.width >= 3840 || res.height >= 3840 -> "4K"
+            res.width >= 2560 || res.height >= 2560 -> "2K"
+            res.width >= 1920 || res.height >= 1920 -> "1080p"
+            else -> "720p"
+        }
+        showToast("Video Resolution: $label")
+    }
+
+    fun getSupportedFpsForResolution(res: CameraResolution): List<Int> {
+        val isCinema = _cameraMode.value == CameraMode.CINEMA
+        val baseFps = engine.getSupportedFpsForResolution(res)
+        return if (isCinema) {
+            val cinemaCaps = cinemaCapabilities.value.supportedFpsList
+            val result = mutableListOf<Int>()
+            if (baseFps.contains(60) && cinemaCaps.contains(60)) result.add(60)
+            if (baseFps.contains(30) || cinemaCaps.contains(30)) result.add(30)
+            if (cinemaCaps.contains(24)) result.add(24)
+            result.ifEmpty { listOf(30) }
+        } else {
+            baseFps
+        }
+    }
+
+    fun setViewfinderResolution(res: ViewfinderResolution) {
+        _viewfinderResolution.value = res
+        preferences.viewfinderResolution = res
+        engine.applyViewfinderResolution(res)
+        showToast("Viewfinder: ${res.label}")
+    }
+
+    fun setSettingsOpen(open: Boolean) {
+        _isSettingsOpen.value = open
+    }
+
+    fun setVideoSettingsPanelOpen(open: Boolean) {
+        _isVideoSettingsPanelOpen.value = open
+    }
+
+    fun toggleVideoSettingsPanel() {
+        _isVideoSettingsPanelOpen.value = !_isVideoSettingsPanelOpen.value
+    }
+
+    fun setPreferredGalleryPackage(packageName: String?) {
+        _preferredGalleryPackage.value = packageName
+        preferences.preferredGalleryPackage = packageName
+    }
+
+    fun setGallerySelectionDialogOpen(open: Boolean) {
+        _isGallerySelectionDialogOpen.value = open
+    }
+
+    fun openGallery(context: Context) {
+        val media = lastCapturedMedia.value
+        if (media != null) {
+            if (!preferences.hasPromptedGallerySelection && preferences.preferredGalleryPackage == null) {
+                preferences.hasPromptedGallerySelection = true
+                _isGallerySelectionDialogOpen.value = true
+            } else {
+                com.example.camera.gallery.GalleryLauncher.openMedia(
+                    context = context,
+                    uri = media.uri,
+                    isVideo = media.isVideo,
+                    preferredPackage = _preferredGalleryPackage.value
+                )
+            }
+        } else {
+            showToast("No recent photos yet")
+        }
+    }
+
+    fun onTapToFocus(point: Offset, normX: Float, normY: Float, isLock: Boolean = false) {
+        _focusRingPoint.value = point
+        engine.triggerFocusAndMeter(normX, normY, isLock)
+
+        if (!isLock) {
+            focusDismissJob?.cancel()
+            focusDismissJob = viewModelScope.launch {
+                delay(2400)
+                _focusRingPoint.value = null
+            }
+        }
+    }
+
+    fun toggleAeAfLock() {
+        engine.toggleAeAfLock()
+        val locked = engine.isAeLockedFlow.value
+        showToast(if (locked) "AE/AF LOCKED" else "AE/AF UNLOCKED")
+    }
+
+    fun setHybridStabilizationConfig(config: HybridStabilizationConfig) {
+        // Sanitize saved/legacy configs: preserve OIS, remove every hybrid/EIS mode.
+        // The standalone OIS preference is the single source of truth. Do not let a
+        // stale per-mode hybrid/EIS config override the user's OIS switch.
+        val oisEnabled = preferences.isOisEnabled
+        val oisOnlyConfig = config.copy(
+            isHybridEnabled = false,
+            isOisPreferred = oisEnabled,
+            isOisEnabled = oisEnabled,
+            isEisPreferred = false,
+            isAdaptiveFpsLens = false,
+            isUltraStabilizationEnabled = false,
+            isEisOnly = false
+        )
+        preferences.isUltraStabilizationEnabled = false
+        engine.updateHybridStabilizationConfig(oisOnlyConfig)
+        preferences.hybridStabilizationConfig = oisOnlyConfig
+        preferences.setModeHybridStabilizationConfig(_cameraMode.value, oisOnlyConfig)
+
+        _isVideoStabilizationEnabled.value = false
+        _videoStabilizationMode.value = VideoStabilizationMode.OFF
+        preferences.isVideoStabilizationEnabled = false
+        preferences.setModeVideoStabilization(_cameraMode.value, false)
+        preferences.videoStabilizationMode = VideoStabilizationMode.OFF
+        preferences.setModeVideoStabilizationMode(_cameraMode.value, VideoStabilizationMode.OFF)
+        engine.isVideoStabilizationEnabled = false
+        engine.videoStabilizationMode = VideoStabilizationMode.OFF
+    }
+
+    fun setMainCameraStabilizationMode(mode: MainCameraStabilizationMode) {
+        // Legacy mode selector now maps only to OIS ON/OFF. EIS modes never start stabilization.
+        val enableOis = mode == MainCameraStabilizationMode.OIS_ONLY ||
+            mode == MainCameraStabilizationMode.HYBRID_OIS_EIS ||
+            mode == MainCameraStabilizationMode.ULTRA
+        _isOisEnabled.value = enableOis
+        preferences.isOisEnabled = enableOis
+        preferences.isOisPreferred = enableOis
+        engine.isOisEnabled = enableOis
+        setHybridStabilizationConfig(
+            hybridStabilizationConfig.value.copy(
+                isHybridEnabled = false,
+                isOisPreferred = enableOis,
+                isOisEnabled = enableOis,
+                isEisPreferred = false,
+                isAdaptiveFpsLens = false,
+                isUltraStabilizationEnabled = false,
+                isEisOnly = false
+            )
+        )
+        showToast(if (enableOis) "Optical Stabilization (OIS): ON" else "Optical Stabilization (OIS): OFF")
+    }
+
+    fun cycleStabilizationMode() {
+        val currentOis = _isOisEnabled.value
+        setOisEnabled(!currentOis)
+    }
+
+    fun toggleUltraStabilization() {
+        // Legacy EIS+ entry point is intentionally a no-op; OIS remains independently configurable.
+        setHybridStabilizationConfig(hybridStabilizationConfig.value)
+    }
+
+    fun setOisEnabled(enabled: Boolean) {
+        _isOisEnabled.value = enabled
+        preferences.isOisEnabled = enabled
+        preferences.isOisPreferred = enabled
+        engine.isOisEnabled = enabled
+
+        val updated = hybridStabilizationConfig.value.copy(
+            isHybridEnabled = false,
+            isOisPreferred = enabled,
+            isOisEnabled = enabled,
+            isEisPreferred = false,
+            isAdaptiveFpsLens = false,
+            isUltraStabilizationEnabled = false,
+            isEisOnly = false
+        )
+        setHybridStabilizationConfig(updated)
+        engine.updatePreviewSettings()
+        showToast(if (enabled) "Optical Image Stabilization (OIS): ON" else "Optical Image Stabilization (OIS): OFF")
+    }
+
+    fun setOisPreferred(enabled: Boolean) {
+        setOisEnabled(enabled)
+    }
+
+    fun setTapFocusConfig(config: TapFocusConfig) {
+        _tapFocusConfig.value = config
+        preferences.tapFocusConfig = config
+        preferences.setModeTapFocusConfig(_cameraMode.value, config)
+    }
+
+    fun onMainActionButtonClick() {
+        triggerVideoCapture()
+    }
+
+    private fun triggerVideoCapture() {
+        if (engine.isRecordingVideo.value) {
+            val isCinema = _cameraMode.value == CameraMode.CINEMA
+            com.example.camera.sound.CameraSoundManager.playStopVideo()
+            engine.stopVideoRecording { savedUri ->
+                viewModelScope.launch(Dispatchers.Main) {
+                    if (savedUri != null) {
+                        val message = if (isCinema) "Cinema video saved to DCIM/Camera" else "Video saved to DCIM/Camera"
+                        showToast(message)
+                    } else {
+                        val errorMessage = if (isCinema) "Failed to save cinema video" else "Failed to save video"
+                        showToast(errorMessage)
+                    }
+                }
+            }
+        } else {
+            com.example.camera.sound.CameraSoundManager.playStartVideo()
+            engine.startVideoRecording { error ->
+                showToast("Recording error: $error")
+            }
+        }
+    }
+
+    fun pauseVideoRecording() {
+        if (engine.isRecordingVideo.value && !engine.isRecordingPaused.value) {
+            engine.pauseVideoRecording()
+            showToast("Recording paused")
+        }
+    }
+
+    fun resumeVideoRecording() {
+        if (engine.isRecordingVideo.value && engine.isRecordingPaused.value) {
+            engine.resumeVideoRecording()
+            showToast("Recording resumed")
+        }
+    }
+
+    fun toggleVideoRecordingPause() {
+        if (!engine.isRecordingVideo.value) return
+        if (engine.isRecordingPaused.value) {
+            resumeVideoRecording()
+        } else {
+            pauseVideoRecording()
+        }
+    }
+
+    // --- Camera UI Customization & Templates ---
+
+    fun selectUiTemplate(template: UiTemplateType) {
+        val templateConfig = CameraUiTemplates.getTemplateConfig(template)
+        val updated = _uiCustomizationState.value.copy(
+            selectedTemplate = template,
+            globalConfig = templateConfig
+        )
+        _uiCustomizationState.value = updated
+        preferences.uiCustomizationState = updated
+        showToast("Switched to ${template.title}")
+    }
+
+    fun updateGlobalLayoutConfig(config: ModeLayoutConfig) {
+        val updated = _uiCustomizationState.value.copy(
+            selectedTemplate = UiTemplateType.CUSTOM,
+            globalConfig = config
+        )
+        _uiCustomizationState.value = updated
+        preferences.uiCustomizationState = updated
+    }
+
+    fun updateModeLayoutConfig(mode: CameraMode, config: ModeLayoutConfig) {
+        val currentModes = _uiCustomizationState.value.modeSpecificConfigs.toMutableMap()
+        currentModes[mode] = config
+        val updated = _uiCustomizationState.value.copy(
+            selectedTemplate = UiTemplateType.CUSTOM,
+            modeSpecificConfigs = currentModes
+        )
+        _uiCustomizationState.value = updated
+        preferences.uiCustomizationState = updated
+    }
+
+    fun resetModeLayoutToGlobal(mode: CameraMode) {
+        val currentModes = _uiCustomizationState.value.modeSpecificConfigs.toMutableMap()
+        currentModes.remove(mode)
+        val updated = _uiCustomizationState.value.copy(
+            modeSpecificConfigs = currentModes
+        )
+        _uiCustomizationState.value = updated
+        preferences.uiCustomizationState = updated
+        showToast("Reset ${mode.name} layout to default")
+    }
+
+    fun saveCustomPreset(name: String, config: ModeLayoutConfig) {
+        val preset = CustomUiPreset(
+            id = "preset_${System.currentTimeMillis()}",
+            name = name.ifBlank { "Preset ${_uiCustomizationState.value.customPresets.size + 1}" },
+            templateType = UiTemplateType.CUSTOM,
+            config = config
+        )
+        val currentPresets = _uiCustomizationState.value.customPresets.toMutableList()
+        currentPresets.add(preset)
+        val updated = _uiCustomizationState.value.copy(customPresets = currentPresets)
+        _uiCustomizationState.value = updated
+        preferences.uiCustomizationState = updated
+        showToast("Saved preset: ${preset.name}")
+    }
+
+    fun loadCustomPreset(preset: CustomUiPreset) {
+        val updated = _uiCustomizationState.value.copy(
+            selectedTemplate = preset.templateType,
+            globalConfig = preset.config
+        )
+        _uiCustomizationState.value = updated
+        preferences.uiCustomizationState = updated
+        showToast("Loaded preset: ${preset.name}")
+    }
+
+    fun deleteCustomPreset(presetId: String) {
+        val currentPresets = _uiCustomizationState.value.customPresets.filterNot { it.id == presetId }
+        val updated = _uiCustomizationState.value.copy(customPresets = currentPresets)
+        _uiCustomizationState.value = updated
+        preferences.uiCustomizationState = updated
+        showToast("Preset removed")
+    }
+
+    fun resetLayoutToTemplate(template: UiTemplateType) {
+        val templateConfig = CameraUiTemplates.getTemplateConfig(template)
+        val updated = _uiCustomizationState.value.copy(
+            selectedTemplate = template,
+            globalConfig = templateConfig,
+            modeSpecificConfigs = emptyMap()
+        )
+        _uiCustomizationState.value = updated
+        preferences.uiCustomizationState = updated
+        showToast("Reset all layouts to ${template.title}")
+    }
+
+    // Extended Settings & Features State
+    private val _videoCodec = MutableStateFlow(preferences.videoCodec)
+    val videoCodec: StateFlow<String> = _videoCodec.asStateFlow()
+
+    fun setVideoCodec(codec: String) {
+        _videoCodec.value = codec
+        preferences.videoCodec = codec
+        showToast("Video Codec: $codec")
+    }
+
+    private val _jpegQuality = MutableStateFlow(preferences.jpegQuality)
+    val jpegQuality: StateFlow<Int> = _jpegQuality.asStateFlow()
+
+    fun setJpegQuality(quality: Int) {
+        _jpegQuality.value = quality
+        preferences.jpegQuality = quality
+        showToast("JPEG Quality: $quality%")
+    }
+
+    private val _volumeKeyAction = MutableStateFlow(preferences.volumeKeyAction)
+    val volumeKeyAction: StateFlow<String> = _volumeKeyAction.asStateFlow()
+
+    private var volumeHoldJob: Job? = null
+    private val isHoldZooming = AtomicBoolean(false)
+    private var activeZoomKeyCode: Int? = null
+
+    fun getMinSupportedZoom(): Float {
+        val currentFacing = engine.selectedLens.value?.facing
+        val lensesForFacing = engine.availableLenses.value.filter { currentFacing == null || it.facing == currentFacing }
+        val ultraWideLens = lensesForFacing.firstOrNull { it.lensType == LensType.ULTRAWIDE && it.isPhysical }
+            ?: lensesForFacing.firstOrNull { it.lensType == LensType.ULTRAWIDE }
+            ?: engine.availableLenses.value.firstOrNull { it.lensType == LensType.ULTRAWIDE }
+        return if (ultraWideLens != null) 0.5f else 1.0f
+    }
+
+    fun getMaxSupportedZoom(): Float {
+        val currentFacing = engine.selectedLens.value?.facing
+        val lensesForFacing = engine.availableLenses.value.filter { currentFacing == null || it.facing == currentFacing }
+        val maxLensZoom = lensesForFacing.maxOfOrNull { it.maxZoomRatio } ?: 20.0f
+        return maxOf(engine.capabilities.value.maxZoom, maxLensZoom, 20.0f)
+    }
+
+    fun handleVolumeKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode != KeyEvent.KEYCODE_VOLUME_UP && keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) {
+            return false
+        }
+        return when (_volumeKeyAction.value) {
+            "VOLUME" -> false
+            "SHUTTER" -> {
+                if (event.repeatCount == 0) {
+                    onMainActionButtonClick()
+                }
+                true
+            }
+            "ZOOM" -> {
+                if (event.repeatCount == 0) {
+                    val wasHolding = isHoldZooming.get()
+                    volumeHoldJob?.cancel()
+                    volumeHoldJob = null
+
+                    activeZoomKeyCode = keyCode
+                    isHoldZooming.set(false)
+
+                    val direction = if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) 1.0f else -1.0f
+
+                    volumeHoldJob = viewModelScope.launch(Dispatchers.Main) {
+                        if (!wasHolding) {
+                            delay(280L)
+                        }
+                        isHoldZooming.set(true)
+
+                        var lastTime = SystemClock.uptimeMillis()
+                        while (isActive) {
+                            delay(16L)
+                            val now = SystemClock.uptimeMillis()
+                            val dtSeconds = (now - lastTime) / 1000.0f
+                            lastTime = now
+
+                            val currentZ = _currentZoom.value
+                            // Continuous rate: 1.0x zoom change per 2.0 seconds = 0.5x / sec
+                            val delta = direction * 0.5f * dtSeconds
+                            val minZ = getMinSupportedZoom()
+                            val maxZ = getMaxSupportedZoom()
+                            val nextZ = (currentZ + delta).coerceIn(minZ, maxZ)
+
+                            if (kotlin.math.abs(nextZ - currentZ) > 0.001f) {
+                                setZoom(nextZ, isPresetTap = false)
+                            }
+                        }
+                    }
+                    true
+                } else {
+                    true
+                }
+            }
+            else -> false
+        }
+    }
+
+    fun handleVolumeKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode != KeyEvent.KEYCODE_VOLUME_UP && keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) {
+            return false
+        }
+        return when (_volumeKeyAction.value) {
+            "VOLUME" -> false
+            "SHUTTER" -> true
+            "ZOOM" -> {
+                if (activeZoomKeyCode == keyCode) {
+                    volumeHoldJob?.cancel()
+                    volumeHoldJob = null
+
+                    val wasHolding = isHoldZooming.getAndSet(false)
+                    activeZoomKeyCode = null
+
+                    if (!wasHolding) {
+                        // Discrete 1.0x change on single press from current zoom
+                        val currentZ = _currentZoom.value
+                        val step = if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) 1.0f else -1.0f
+                        val minZ = getMinSupportedZoom()
+                        val maxZ = getMaxSupportedZoom()
+                        val targetZ = (currentZ + step).coerceIn(minZ, maxZ)
+                        setZoom(targetZ, isPresetTap = false)
+                    }
+                    true
+                } else {
+                    true
+                }
+            }
+            else -> false
+        }
+    }
+
+    fun setVolumeKeyAction(action: String) {
+        volumeHoldJob?.cancel()
+        volumeHoldJob = null
+        isHoldZooming.set(false)
+        activeZoomKeyCode = null
+        _volumeKeyAction.value = action
+        preferences.volumeKeyAction = action
+        showToast("Volume key set to: ${when(action) {
+            "SHUTTER" -> "Shutter"
+            "ZOOM" -> "Zoom"
+            "VOLUME" -> "System Vol"
+            else -> action
+        }}")
+    }
+
+    private val _doubleTapAction = MutableStateFlow(preferences.doubleTapAction)
+    val doubleTapAction: StateFlow<String> = _doubleTapAction.asStateFlow()
+
+    fun setDoubleTapAction(action: String) {
+        _doubleTapAction.value = action
+        preferences.doubleTapAction = action
+        showToast("Double-tap set to: ${when(action) {
+            "FLIP" -> "Flip Camera"
+            "LOCK" -> "Lock Focus"
+            "NONE" -> "None"
+            else -> action
+        }}")
+    }
+
+    private val _showHorizonLevel = MutableStateFlow(preferences.showHorizonLevel)
+    val showHorizonLevel: StateFlow<Boolean> = _showHorizonLevel.asStateFlow()
+
+    fun setShowHorizonLevel(show: Boolean) {
+        _showHorizonLevel.value = show
+        preferences.showHorizonLevel = show
+    }
+
+    private val _antiBanding = MutableStateFlow(preferences.antiBanding)
+    val antiBanding: StateFlow<String> = _antiBanding.asStateFlow()
+
+    fun setAntiBanding(mode: String) {
+        _antiBanding.value = mode
+        preferences.antiBanding = mode
+        engine.antiBandingMode = mode
+        showToast("Anti-banding: ${when(mode.uppercase()) {
+            "AUTO" -> "Auto"
+            "50HZ" -> "50 Hz"
+            "60HZ" -> "60 Hz"
+            "OFF" -> "Off"
+            else -> mode
+        }}")
+    }
+
+    private val _zoomSpeed = MutableStateFlow(preferences.zoomSpeed)
+    val zoomSpeed: StateFlow<String> = _zoomSpeed.asStateFlow()
+
+    fun setZoomSpeed(speed: String) {
+        _zoomSpeed.value = speed
+        preferences.zoomSpeed = speed
+    }
+
+    private val _audioSource = MutableStateFlow(preferences.audioSource)
+    val audioSource: StateFlow<String> = _audioSource.asStateFlow()
+
+    fun setAudioSource(source: String) {
+        _audioSource.value = source
+        preferences.audioSource = source
+        showToast("Audio source: $source")
+    }
+
+    private val _previewQuality = MutableStateFlow(preferences.previewQuality)
+    val previewQuality: StateFlow<String> = _previewQuality.asStateFlow()
+
+    fun setPreviewQuality(quality: String) {
+        _previewQuality.value = quality
+        preferences.previewQuality = quality
+        showToast("Preview Quality: $quality")
+    }
+
+    private val _shutterFeedback = MutableStateFlow(preferences.shutterFeedback)
+    val shutterFeedback: StateFlow<String> = _shutterFeedback.asStateFlow()
+
+    fun setShutterFeedback(feedback: String) {
+        _shutterFeedback.value = feedback
+        preferences.shutterFeedback = feedback
+        com.example.camera.sound.CameraSoundManager.setFeedbackMode(feedback)
+        showToast("Shutter feedback: ${when(feedback) {
+            "SOUND_AND_HAPTIC" -> "All"
+            "HAPTIC_ONLY" -> "Haptic"
+            "SOUND_ONLY" -> "Sound"
+            "MUTE" -> "Mute"
+            else -> feedback
+        }}")
+    }
+
+    val antibandingMode: StateFlow<String> = _antiBanding.asStateFlow()
+    fun setAntibandingMode(mode: String) = setAntiBanding(mode)
+
+    private val _windNoiseReduction = MutableStateFlow(preferences.windNoiseReduction)
+    val windNoiseReduction: StateFlow<Boolean> = _windNoiseReduction.asStateFlow()
+    fun setWindNoiseReduction(enabled: Boolean) {
+        _windNoiseReduction.value = enabled
+        preferences.windNoiseReduction = enabled
+        preferences.setModeWindNoiseReduction(_cameraMode.value, enabled)
+        showToast("Wind Noise Reduction: " + if (enabled) "On" else "Off")
+    }
+
+    val horizonLeveler: StateFlow<Boolean> = _showHorizonLevel.asStateFlow()
+    fun setHorizonLeveler(show: Boolean) = setShowHorizonLevel(show)
+
+    private val _viewfinderFps = MutableStateFlow(preferences.viewfinderFps)
+    val viewfinderFps: StateFlow<Int> = _viewfinderFps.asStateFlow()
+    fun setViewfinderFps(fps: Int) {
+        _viewfinderFps.value = fps
+        preferences.viewfinderFps = fps
+        showToast("Viewfinder: $fps FPS")
+    }
+
+    private val _thermalProtection = MutableStateFlow(preferences.thermalProtection)
+    val thermalProtection: StateFlow<Boolean> = _thermalProtection.asStateFlow()
+    fun setThermalProtection(enabled: Boolean) {
+        _thermalProtection.value = enabled
+        preferences.thermalProtection = enabled
+        showToast("Thermal Protection: " + if (enabled) "Adaptive" else "Off")
+    }
+
+    private val _autoHdrEnabled = MutableStateFlow(preferences.getModeAutoHdr(preferences.cameraMode))
+    val autoHdrEnabled: StateFlow<Boolean> = _autoHdrEnabled.asStateFlow()
+    val isAutoHdrEnabled: StateFlow<Boolean> = _autoHdrEnabled.asStateFlow()
+
+    fun setAutoHdrEnabled(enabled: Boolean) {
+        _autoHdrEnabled.value = enabled
+        preferences.autoHdrEnabled = enabled
+        preferences.setModeAutoHdr(_cameraMode.value, enabled)
+        showToast(if (enabled) "Auto HDR Enabled" else "Auto HDR Disabled")
+    }
+
+    private val _autoFramingEnabled = MutableStateFlow(preferences.getModeAutoFraming(preferences.cameraMode))
+    val autoFramingEnabled: StateFlow<Boolean> = _autoFramingEnabled.asStateFlow()
+    val isAiAutoFramingEnabled: StateFlow<Boolean> = _autoFramingEnabled.asStateFlow()
+
+    fun setAutoFramingEnabled(enabled: Boolean) {
+        _autoFramingEnabled.value = enabled
+        preferences.autoFramingEnabled = enabled
+        preferences.setModeAutoFraming(_cameraMode.value, enabled)
+        showToast(if (enabled) "AI Auto-Framing On" else "AI Auto-Framing Off")
+    }
+
+    fun setAiAutoFramingEnabled(enabled: Boolean) = setAutoFramingEnabled(enabled)
+
+    
+    fun setManualShutterSpeed(ns: Long?) {
+        setManualShutterSpeedNs(ns)
+    }
+
+    fun setFlashMode(mode: FlashMode) {
+        _flashMode.value = mode
+        preferences.flashMode = mode
+        preferences.setModeFlashMode(_cameraMode.value, mode)
+        engine.flashMode = mode
+        engine.updatePreviewSettings()
+    }
+
+    fun setTimerMode(mode: TimerMode) {
+        _timerMode.value = mode
+        preferences.timerMode = mode
+        preferences.setModeTimerMode(_cameraMode.value, mode)
+    }
+
+    fun resetAllSettings() {
+        resetAllSettingsToDefaults()
+    }
+
+    fun resetAllSettingsToDefaults() {
+        preferences.resetAllSettingsToDefaults()
+        selectUiTemplate(UiTemplateType.SAMSUNG)
+        setCameraMode(CameraMode.VIDEO)
+        setGridType(GridType.NONE)
+        setFlashMode(FlashMode.OFF)
+        setTimerMode(TimerMode.OFF)
+        _videoCodec.value = "HEVC"
+        _jpegQuality.value = 100
+        _showHorizonLevel.value = true
+        _autoHdrEnabled.value = true
+        _autoFramingEnabled.value = true
+        _windNoiseReduction.value = true
+        _thermalProtection.value = true
+        _viewfinderFps.value = 60
+        resetFloatingWindowAppearance()
+        showToast("All settings reset to defaults")
+    }
+
+    fun showToast(message: String) {
+        // Disabled: do not display feature toggle pop-up toasts in any camera mode
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        engine.release()
+    }
+}
