@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -41,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.camera.model.*
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 // Vibrant yellow accent matching the reference screenshots
@@ -718,7 +720,11 @@ fun SliderCard(
                 }
 
                 Text(
-                    text = valueString,
+                    text = if (max > min) {
+                        formatPhotonAdjustmentValue(value, min, max, isDecimal)
+                    } else {
+                        valueString
+                    },
                     color = if (isActive) AccentYellow else Color.White,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Black
@@ -744,6 +750,19 @@ fun SliderCard(
 /**
  * Ruler with evenly-spaced tick marks and draggable/tappable yellow needle indicator.
  */
+private val PhotonExposureRulerValues = listOf(
+    -2.0f, -1.7f, -1.3f, -1.0f, -0.7f, -0.3f,
+    0.0f,
+    0.3f, 0.7f, 1.0f, 1.3f, 1.7f, 2.0f
+)
+
+/**
+ * PhotonCamera-style discrete adjustment ruler.
+ *
+ * Signed controls use a balanced -10..+10 display scale, non-negative controls use 0..10,
+ * and exposure uses PhotonCamera's 1/3 EV detents from -2 EV to +2 EV. Values passed to
+ * the callback remain in VCamera's existing processing range.
+ */
 @Composable
 fun RulerTickSlider(
     value: Float,
@@ -753,111 +772,185 @@ fun RulerTickSlider(
     isActive: Boolean,
     sliderKey: Any? = null,
     onValueChange: (Float) -> Unit,
+    resetValue: Float = 0f,
     modifier: Modifier = Modifier
 ) {
     val haptic = LocalHapticFeedback.current
+    val density = LocalDensity.current
+    val paddingPx = with(density) { 16.dp.toPx() }
+    val currentValueState by rememberUpdatedState(value)
     val currentOnValueChange by rememberUpdatedState(onValueChange)
-    val currentMin by rememberUpdatedState(min)
-    val currentMax by rememberUpdatedState(max)
-    val currentIsDecimal by rememberUpdatedState(isDecimal)
-    var lastHapticValue by remember(sliderKey) { mutableStateOf(value) }
+    val currentOnReset by rememberUpdatedState(resetValue)
 
-    BoxWithConstraints(
+    // Match PhotonCamera's discrete ruler: 21 signed ticks, 11 positive ticks,
+    // and the familiar 1/3 EV exposure stops.
+    val rulerValues = remember(min, max, isDecimal, sliderKey) {
+        when {
+            isDecimal -> PhotonExposureRulerValues.filter { it in min..max }
+            min < 0f && max > 0f -> (-10..10).map { displayStep ->
+                if (displayStep >= 0) {
+                    max * displayStep / 10f
+                } else {
+                    -min * displayStep / 10f
+                }
+            }
+            else -> (0..10).map { displayStep ->
+                min + (max - min) * displayStep / 10f
+            }
+        }
+    }
+    val safeValues = remember(rulerValues, min, max) {
+        rulerValues.ifEmpty { listOf(min, max).distinct() }
+    }
+
+    fun findClosest(x: Float, width: Float): Float {
+        val count = safeValues.size
+        if (count <= 1) return safeValues.firstOrNull() ?: min
+        val innerWidth = (width - 2f * paddingPx).coerceAtLeast(1f)
+        val clampedX = (x - paddingPx).coerceIn(0f, innerWidth)
+        val fraction = clampedX / innerWidth
+        val index = (fraction * (count - 1)).roundToInt().coerceIn(0, count - 1)
+        return safeValues[index]
+    }
+
+    Box(
         modifier = modifier
             .fillMaxWidth()
             .height(34.dp)
-            .pointerInput(sliderKey, min, max, isDecimal) {
-                detectTapGestures { offset ->
-                    val norm = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
-                    val rawVal = currentMin + norm * (currentMax - currentMin)
-                    val rounded = if (currentIsDecimal) {
-                        (rawVal * 10f).roundToInt() / 10f
-                    } else {
-                        rawVal.roundToInt().toFloat()
-                    }
-                    currentOnValueChange(rounded)
-                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                }
-            }
-            .pointerInput(sliderKey, min, max, isDecimal) {
-                detectDragGestures { change, _ ->
-                    change.consume()
-                    val norm = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-                    val rawVal = currentMin + norm * (currentMax - currentMin)
-                    val rounded = if (currentIsDecimal) {
-                        (rawVal * 10f).roundToInt() / 10f
-                    } else {
-                        rawVal.roundToInt().toFloat()
-                    }
-                    if (rounded != lastHapticValue) {
-                        lastHapticValue = rounded
-                        if (rounded == 0f || Math.abs(rounded % 10f) < 0.1f) {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        } else {
+            .pointerInput(safeValues, sliderKey) {
+                detectTapGestures(
+                    onDoubleTap = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        currentOnValueChange(currentOnReset.coerceIn(min, max))
+                    },
+                    onTap = { offset ->
+                        val target = findClosest(offset.x, size.width.toFloat())
+                        if (abs(target - currentValueState) > 0.001f) {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            currentOnValueChange(target)
                         }
                     }
-                    currentOnValueChange(rounded)
+                )
+            }
+            .pointerInput(safeValues, sliderKey) {
+                detectDragGestures { change, _ ->
+                    change.consume()
+                    val target = findClosest(change.position.x, size.width.toFloat())
+                    if (abs(target - currentValueState) > 0.001f) {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        currentOnValueChange(target)
+                    }
                 }
             }
     ) {
-        val totalWidth = constraints.maxWidth.toFloat()
-        val totalHeight = constraints.maxHeight.toFloat()
-        val normPos = ((value - min) / (max - min)).coerceIn(0f, 1f)
-
         Canvas(modifier = Modifier.fillMaxSize()) {
-            val centerY = totalHeight / 2f
-            val numTicks = 21
-            val tickStep = totalWidth / (numTicks - 1).toFloat()
+            val count = safeValues.size
+            if (count <= 1) return@Canvas
 
-            // 1. Baseline subtle track
+            val innerWidth = size.width - 2f * paddingPx
+            val stepWidth = innerWidth / (count - 1)
+            val centerY = size.height / 2f
+            val clampedValue = value.coerceIn(min, max)
+
+            val currentIndex = safeValues.indices.minByOrNull {
+                abs(safeValues[it] - clampedValue)
+            } ?: 0
+            val zeroIndex = safeValues.indices.minByOrNull { abs(safeValues[it]) } ?: 0
+            val currentX = paddingPx + currentIndex * stepWidth
+            val zeroX = paddingPx + zeroIndex * stepWidth
+
+            // Neutral baseline and the active segment from zero to the selected value.
             drawLine(
                 color = Color.White.copy(alpha = 0.12f),
-                start = Offset(0f, centerY),
-                end = Offset(totalWidth, centerY),
-                strokeWidth = 1.dp.toPx()
+                start = Offset(paddingPx, centerY),
+                end = Offset(size.width - paddingPx, centerY),
+                strokeWidth = 1.dp.toPx(),
+                cap = StrokeCap.Round
             )
-
-            // 2. Vertical Tick Marks
-            for (i in 0 until numTicks) {
-                val tickX = i * tickStep
-                val isCenter = (i == numTicks / 2)
-                val isMajor = (i % 5 == 0)
-
-                val tickHeight = when {
-                    isCenter -> 16.dp.toPx()
-                    isMajor -> 11.dp.toPx()
-                    else -> 6.dp.toPx()
-                }
-
-                val tickColor = when {
-                    isCenter -> Color(0xFFA0A6B8)
-                    isMajor -> Color(0xFF6B7285)
-                    else -> Color(0xFF383D4C)
-                }
-
+            if (currentIndex != zeroIndex) {
                 drawLine(
-                    color = tickColor,
-                    start = Offset(tickX, centerY - tickHeight / 2f),
-                    end = Offset(tickX, centerY + tickHeight / 2f),
-                    strokeWidth = (if (isCenter) 2.dp else 1.2.dp).toPx(),
+                    color = AccentYellow.copy(alpha = 0.8f),
+                    start = Offset(zeroX, centerY),
+                    end = Offset(currentX, centerY),
+                    strokeWidth = 2.dp.toPx(),
                     cap = StrokeCap.Round
                 )
             }
 
-            // 3. Active Yellow Needle
-            val needleX = (normPos * totalWidth).coerceIn(4f, totalWidth - 4f)
-            val needleHeight = 22.dp.toPx()
-            val needleWidth = 3.dp.toPx()
+            safeValues.forEachIndexed { index, tickValue ->
+                if (index != currentIndex) {
+                    val x = paddingPx + index * stepWidth
+                    val isZero = index == zeroIndex
+                    val isMajor = if (isDecimal) {
+                        abs(tickValue - tickValue.roundToInt()) < 0.05f
+                    } else {
+                        index % 5 == 0
+                    }
+                    val tickHeight = when {
+                        isZero -> 11.dp.toPx()
+                        isMajor -> 8.dp.toPx()
+                        else -> 4.5.dp.toPx()
+                    }
+                    val tickWidth = when {
+                        isZero -> 1.5.dp.toPx()
+                        isMajor -> 1.2.dp.toPx()
+                        else -> 1.dp.toPx()
+                    }
+                    val tickColor = when {
+                        isZero -> Color.White.copy(alpha = 0.75f)
+                        isMajor -> Color.White.copy(alpha = 0.42f)
+                        else -> Color.White.copy(alpha = 0.2f)
+                    }
+                    drawLine(
+                        color = tickColor,
+                        start = Offset(x, centerY - tickHeight / 2f),
+                        end = Offset(x, centerY + tickHeight / 2f),
+                        strokeWidth = tickWidth,
+                        cap = StrokeCap.Round
+                    )
+                }
+            }
 
-            drawRoundRect(
-                color = AccentYellow,
-                topLeft = Offset(needleX - needleWidth / 2f, centerY - needleHeight / 2f),
-                size = Size(needleWidth, needleHeight),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(1.5.dp.toPx(), 1.5.dp.toPx())
+            val cursorHeight = 16.dp.toPx()
+            drawLine(
+                color = if (isActive) AccentYellow else AccentYellow.copy(alpha = 0.55f),
+                start = Offset(currentX, centerY - cursorHeight / 2f),
+                end = Offset(currentX, centerY + cursorHeight / 2f),
+                strokeWidth = 2.5.dp.toPx(),
+                cap = StrokeCap.Round
             )
         }
     }
+}
+
+/** Maps VCamera's processing value to PhotonCamera's compact 0..10 / -10..10 readout. */
+private fun formatPhotonAdjustmentValue(
+    value: Float,
+    min: Float,
+    max: Float,
+    isDecimal: Boolean
+): String {
+    val safeValue = value.coerceIn(min, max)
+    if (isDecimal) {
+        return if (safeValue in -0.04f..0.04f) {
+            "0.0"
+        } else {
+            String.format(Locale.US, "%+.1f", safeValue)
+        }
+    }
+
+    val isSigned = min < 0f && max > 0f
+    val displayValue = if (isSigned) {
+        if (safeValue >= 0f) {
+            safeValue / max.coerceAtLeast(0.0001f) * 10f
+        } else {
+            safeValue / (-min).coerceAtLeast(0.0001f) * 10f
+        }
+    } else {
+        (safeValue - min) / (max - min).coerceAtLeast(0.0001f) * 10f
+    }
+    val rounded = displayValue.roundToInt()
+    return if (isSigned && rounded > 0) "+$rounded" else rounded.toString()
 }
 
 /**

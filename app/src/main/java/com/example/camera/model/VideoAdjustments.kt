@@ -11,7 +11,7 @@ data class VideoAdjustments(
     val tonality: Float = 0f,       // -100 to +100
     val saturation: Float = 0f,     // -100 to +100
     val contrast: Float = 0f,       // -100 to +100
-    val exposure: Float = 0.0f,     // -3.0 to +3.0 EV
+    val exposure: Float = 0.0f,     // -2.0 to +2.0 EV
     val temperature: Float = 0f,    // -100 to +100 (Temp)
     val tint: Float = 0f,           // -100 to +100 (Tint)
     val highlights: Float = 0f,     // -100 to +100
@@ -114,7 +114,7 @@ enum class BasicAdjustmentControl(
     TONALITY("Tonality", -100f, 100f, 0f),
     SATURATION("Saturation", -100f, 100f, 0f),
     CONTRAST("Contrast", -100f, 100f, 0f),
-    EXPOSURE("Exposure", -3.0f, 3.0f, 0.0f, isDecimal = true),
+    EXPOSURE("Exposure", -2.0f, 2.0f, 0.0f, isDecimal = true),
     TEMP("Temp", -100f, 100f, 0f),
     TINT("Tint", -100f, 100f, 0f),
     HIGHLIGHTS("Highlights", -100f, 100f, 0f),
@@ -125,15 +125,13 @@ enum class BasicAdjustmentControl(
     SHARPNESS("Sharpness", 0f, 100f, 0f);
 
     fun formatValue(value: Float): String {
+        val safeValue = value.coerceIn(min, max)
         return if (isDecimal) {
-            String.format(Locale.US, "%.1f", value)
+            if (safeValue in -0.04f..0.04f) "0.0"
+            else String.format(Locale.US, "%+.1f", safeValue)
         } else {
-            val intVal = Math.round(value)
-            if (intVal > 0 && this != VIGNETTE && this != GRAIN && this != SHARPNESS) {
-                "+$intVal"
-            } else {
-                "$intVal"
-            }
+            val displayValue = (safeValue / 10f).roundToInt()
+            if (min < 0f && displayValue > 0) "+$displayValue" else "$displayValue"
         }
     }
 }
