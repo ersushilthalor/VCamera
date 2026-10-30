@@ -17,6 +17,8 @@ data class GalleryAppInfo(
 
 object GalleryLauncher {
 
+    const val GOOGLE_PHOTOS_PACKAGE = "com.google.android.apps.photos"
+
     private const val TAG = "GalleryLauncher"
 
     /**
@@ -78,7 +80,8 @@ object GalleryLauncher {
     }
 
     /**
-     * Opens the captured media in the user's preferred gallery or falls back to system chooser.
+     * Opens the captured media in the selected gallery. Google Photos is the default;
+     * if it is unavailable, Android resolves the ACTION_VIEW intent using the system default.
      * Guaranteed never to crash if no compatible app is found or permissions change.
      */
     fun openMedia(
@@ -101,21 +104,18 @@ object GalleryLauncher {
                 context.startActivity(directIntent)
                 return true
             } catch (e: Exception) {
-                Log.w(TAG, "Preferred gallery app ($preferredPackage) failed to launch, falling back to chooser", e)
+                Log.w(TAG, "Preferred gallery app ($preferredPackage) failed to launch, falling back to Android default", e)
             }
         }
 
-        // 2. Fall back to standard Android system chooser
+        // 2. Let Android use the user's default app; show its resolver only when needed.
         return try {
             val viewIntent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, mimeType)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            val chooser = Intent.createChooser(viewIntent, "Open with").apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(chooser)
+            context.startActivity(viewIntent)
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch system chooser for media: $uri", e)
