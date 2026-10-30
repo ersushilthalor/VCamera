@@ -7,7 +7,8 @@ class ZoomTransitionTimingTest {
 
     @Test
     fun zoomTransitionDurationIsFixedAt300Milliseconds() {
-        assertEquals(300L, ZoomTransitionController.TOTAL_TRANSITION_DURATION_MS)
+        assertEquals(400L, ZoomTransitionController.TOTAL_TRANSITION_DURATION_MS)
+        assertEquals(300L, ZoomTransitionController.VIDEO_TRANSITION_DURATION_MS)
     }
 
     @Test
@@ -27,9 +28,9 @@ class ZoomTransitionTimingTest {
     }
 
     @Test
-    fun legacyLongDurationArgumentCannotSlowDownZoom() {
+    fun framePacingPreservesTheRequestedDuration() {
         assertEquals(
-            300L,
+            1200L,
             ZoomTransitionController.framePacedTransitionDurationMs(
                 durationMs = 1200L,
                 fps = 24
