@@ -55,7 +55,8 @@ fun FrostedGlassBox(
     val appearance = LocalFloatingWindowAppearance.current
     val frameTick = BackdropBlurManager.frameTickState.longValue
     val baseDensity = androidx.compose.ui.platform.LocalDensity.current
-    val effectiveScale = if (applyWindowScale) appearance.windowScale.coerceIn(0.75f, 1.25f) else 1.0f
+    // All floating windows use a fixed 100% layout scale; only blur and transparency remain user-adjustable.
+    val effectiveScale = 1.0f
     val scaledDensity = remember(baseDensity, effectiveScale) {
         androidx.compose.ui.unit.Density(
             density = baseDensity.density * effectiveScale,
