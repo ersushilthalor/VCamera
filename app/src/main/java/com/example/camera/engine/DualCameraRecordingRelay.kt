@@ -340,9 +340,11 @@ class DualCameraRecordingRelay(
             activeSource = source
             pendingClockSyncOnSwitch = true
             switchCount.incrementAndGet()
-            cinemaRecorder?.setActiveStreamSource(source)
+            if (isDelegatingToNativeGlRecorder) {
+                cinemaRecorder?.setActiveStreamSource(source)
+            }
             Log.i(TAG, "[RECORDING_RELAY] Switched active recording stream to $source (switches=${switchCount.get()})")
-        } else {
+        } else if (isDelegatingToNativeGlRecorder) {
             cinemaRecorder?.setActiveStreamSource(source)
         }
     }
@@ -353,8 +355,10 @@ class DualCameraRecordingRelay(
      */
     fun beginFrameBasedHandoff(fromSource: PreviewStreamSource, targetSource: PreviewStreamSource) {
         if (fromSource == targetSource) return
-        cinemaRecorder?.beginFrameBasedRecordingHandoff(fromSource, targetSource)
-        if (isDelegatingToNativeGlRecorder) return
+        if (isDelegatingToNativeGlRecorder) {
+            cinemaRecorder?.beginFrameBasedRecordingHandoff(fromSource, targetSource)
+            return
+        }
         recordingHandoffFromSource = fromSource
         recordingHandoffTargetSource = targetSource
         recordingHandoffFrameCount = 0
