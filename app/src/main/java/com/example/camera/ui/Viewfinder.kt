@@ -133,12 +133,15 @@ fun Viewfinder(
 
     var textureViewInstance by remember { mutableStateOf<TextureView?>(null) }
     var ultraWideTextureViewInstance by remember { mutableStateOf<TextureView?>(null) }
+    var mainTransformPendingFirstFrame by remember { mutableStateOf(true) }
+    var ultraWideTransformPendingFirstFrame by remember { mutableStateOf(true) }
     val currentIsUsingUltraWideSurface by rememberUpdatedState(isUsingUltraWideSurface)
     val currentPreviewOverlapState by rememberUpdatedState(previewOverlapState)
     val currentCameraMode by rememberUpdatedState(cameraMode)
     val currentCinemaConfig by rememberUpdatedState(cinemaConfig)
     val currentOnFrameLuminanceStats by rememberUpdatedState(onFrameLuminanceStats)
     val currentFloatingWindowBlurStrength by rememberUpdatedState(floatingWindowBlurStrength)
+    val currentIsSettingsOpen by rememberUpdatedState(isSettingsOpen)
     val ultraWideFramingCalib = remember {
         com.example.camera.engine.CameraOpticalCalibration.getUltraWideFramingCalibration()
     }
@@ -205,9 +208,11 @@ fun Viewfinder(
         sensorOrientation,
         isUsingUltraWideSurface
     ) {
+        mainTransformPendingFirstFrame = true
+        ultraWideTransformPendingFirstFrame = true
         if (!isSettingsOpen) {
-            // Apply after Compose has committed the restored layout. This also refreshes
-            // matrices when Camera2 changes a stream's buffer size without resizing the view.
+            // Apply after Compose has committed the restored layout. The first rendered frame
+            // after a resume/stream reconfiguration will then confirm the current buffer geometry.
             withFrameNanos { }
             listOfNotNull(textureViewInstance, ultraWideTextureViewInstance).forEach { tv ->
                 val isUw = (tv === ultraWideTextureViewInstance)
@@ -379,6 +384,7 @@ fun Viewfinder(
                             }
                             surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                                 override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+                                    mainTransformPendingFirstFrame = true
                                     val effectiveW = if (this@apply.width > 0) this@apply.width else w
                                     val effectiveH = if (this@apply.height > 0) this@apply.height else h
                                     onSurfaceTextureAvailable(st, effectiveW, effectiveH)
@@ -389,6 +395,7 @@ fun Viewfinder(
                                     com.example.camera.ui.components.BackdropBlurManager.registerViewfinder(this@apply)
                                 }
                                 override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {
+                                    mainTransformPendingFirstFrame = true
                                     val effectiveW = if (this@apply.width > 0) this@apply.width else w
                                     val effectiveH = if (this@apply.height > 0) this@apply.height else h
                                     onSurfaceTextureSizeChanged?.invoke(st, effectiveW, effectiveH)
@@ -405,6 +412,12 @@ fun Viewfinder(
                                     return true
                                 }
                                 override fun onSurfaceTextureUpdated(st: SurfaceTexture) {
+                                    if (mainTransformPendingFirstFrame && !currentIsSettingsOpen &&
+                                        this@apply.width > 0 && this@apply.height > 0
+                                    ) {
+                                        applyTransformToView.value(this@apply, false, this@apply.width, this@apply.height)
+                                        mainTransformPendingFirstFrame = false
+                                    }
                                     onPreviewFrameAvailable?.invoke(com.example.camera.engine.PreviewStreamSource.MAIN)
                                     if (currentIsUsingUltraWideSurface) return
 
@@ -521,6 +534,7 @@ fun Viewfinder(
                                 }
                                 surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                                     override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+                                        ultraWideTransformPendingFirstFrame = true
                                         val effectiveW = if (this@apply.width > 0) this@apply.width else w
                                         val effectiveH = if (this@apply.height > 0) this@apply.height else h
                                         onUltraWideSurfaceTextureAvailable.invoke(st, effectiveW, effectiveH)
@@ -534,6 +548,7 @@ fun Viewfinder(
                                     }
 
                                     override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {
+                                        ultraWideTransformPendingFirstFrame = true
                                         val effectiveW = if (this@apply.width > 0) this@apply.width else w
                                         val effectiveH = if (this@apply.height > 0) this@apply.height else h
                                         onUltraWideSurfaceTextureSizeChanged?.invoke(st, effectiveW, effectiveH)
@@ -552,6 +567,12 @@ fun Viewfinder(
                                     }
 
                                     override fun onSurfaceTextureUpdated(st: SurfaceTexture) {
+                                        if (ultraWideTransformPendingFirstFrame && !currentIsSettingsOpen &&
+                                            this@apply.width > 0 && this@apply.height > 0
+                                        ) {
+                                            applyTransformToView.value(this@apply, true, this@apply.width, this@apply.height)
+                                            ultraWideTransformPendingFirstFrame = false
+                                        }
                                         onPreviewFrameAvailable?.invoke(com.example.camera.engine.PreviewStreamSource.ULTRAWIDE)
                                         if (!currentIsUsingUltraWideSurface) return
 
