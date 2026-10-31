@@ -53,7 +53,8 @@ data class PreviewOverlapState(
  */
 class ZoomTransitionController(
     private val onApplyZoomToEngine: (zoom: Float, isContinuous: Boolean) -> Unit = { _, _ -> },
-    private val onSelectLensOnEngine: (lens: LensInfo, targetZoom: Float, isContinuous: Boolean) -> Unit = { _, _, _ -> }
+    private val onSelectLensOnEngine: (lens: LensInfo, targetZoom: Float, isContinuous: Boolean) -> Unit = { _, _, _ -> },
+    private val onFrameBasedHandoffStarted: (fromSource: PreviewStreamSource, targetSource: PreviewStreamSource) -> Unit = { _, _ -> }
 ) {
     companion object {
         private const val TAG = "ZoomTransitionCtrl"
@@ -67,8 +68,8 @@ class ZoomTransitionController(
         const val PREVIEW_OVERLAP_DURATION_MS = 100L
         const val MIN_OVERLAP_DURATION_MS = 100L
         const val MAX_OVERLAP_DURATION_MS = 1000L
-        private const val FRAME_HANDOFF_WARMUP_FRAMES = 2
-        private const val FRAME_HANDOFF_REQUIRED_FRAMES = 16
+        const val FRAME_HANDOFF_WARMUP_FRAMES = 2
+        const val FRAME_HANDOFF_REQUIRED_FRAMES = 16
         private const val FRAME_HANDOFF_TIMEOUT_MS = 900L
         // Once the incoming lens moves away from the shared ~1x field of view, shorten the
         // overlap so differently cropped frames do not remain visibly doubled.
@@ -143,6 +144,17 @@ class ZoomTransitionController(
             val desired = maxOf(frameEased, zoomEased)
             // Cap per-frame opacity changes to keep the fade smooth even if zoom/FOV jumps a tick.
             return minOf(desired, previous + MAX_HANDOFF_ALPHA_STEP).coerceIn(previous, 1f)
+        }
+
+        /**
+         * Frame-count based progress shared by preview and encoded recording output.
+         * The first two incoming frames are warm-up; the next sixteen are blended.
+         */
+        fun calculateRecordingFrameHandoffProgress(incomingFrameCount: Int): Float {
+            val blendFrameCount = (incomingFrameCount - FRAME_HANDOFF_WARMUP_FRAMES)
+                .coerceIn(0, FRAME_HANDOFF_REQUIRED_FRAMES)
+            val progress = blendFrameCount.toFloat() / FRAME_HANDOFF_REQUIRED_FRAMES.toFloat()
+            return (0.5 * (1.0 - cos(PI * progress.toDouble()))).toFloat()
         }
 
         /**
@@ -336,6 +348,9 @@ class ZoomTransitionController(
 
         frameHandoffFromSource = fromSource
         pendingFrameHandoffTarget = targetSource
+        // Start the encoder-side composite in parallel with the preview handoff. The
+        // recording renderer counts its own incoming camera buffers, not UI callbacks.
+        onFrameBasedHandoffStarted(fromSource, targetSource)
         // Fresh pre-warmed buffers already satisfied camera/crop warm-up. If not, use the
         // normal two-frame warm-up path after switching; never blend stale target frames.
         frameHandoffFrameCount = if (hasFreshPreparedTargetFrames) FRAME_HANDOFF_WARMUP_FRAMES else 0

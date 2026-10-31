@@ -117,6 +117,18 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
     private var activeFps: Int = 30
     @Volatile
     private var currentVideoAdjustments: com.example.camera.model.VideoAdjustments = com.example.camera.model.VideoAdjustments()
+    @Volatile
+    private var recordingHandoffFromSource: PreviewStreamSource? = null
+    @Volatile
+    private var recordingHandoffTargetSource: PreviewStreamSource? = null
+    @Volatile
+    private var recordingHandoffFrameCount: Int = 0
+    @Volatile
+    private var recordingHandoffTargetFrameReceived: Boolean = false
+    @Volatile
+    private var hasMainRecordingInputFrame: Boolean = false
+    @Volatile
+    private var hasUltraWideRecordingInputFrame: Boolean = false
 
     fun updateVideoAdjustments(adjustments: com.example.camera.model.VideoAdjustments) {
         currentVideoAdjustments = adjustments
@@ -131,6 +143,16 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
 
     fun getActiveStreamSource(): PreviewStreamSource = activeStreamSource
 
+    /** Starts the encoder-side frame blend in parallel with the preview transition. */
+    fun beginFrameBasedRecordingHandoff(fromSource: PreviewStreamSource, targetSource: PreviewStreamSource) {
+        if (fromSource == targetSource) return
+        recordingHandoffFromSource = fromSource
+        recordingHandoffTargetSource = targetSource
+        recordingHandoffFrameCount = 0
+        recordingHandoffTargetFrameReceived = false
+        Log.i(TAG, "[CINEMA_RECORDING] Started encoded frame handoff: $fromSource -> $targetSource")
+    }
+
     fun getMainInputSurface(): Surface? = cameraInputSurface ?: encoderInputSurface
 
     fun getUltraWideInputSurface(): Surface? = ultraWideCameraInputSurface
@@ -138,11 +160,15 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
     fun updateUltraWideBufferSize(width: Int, height: Int) {
         val w = maxOf(width, height).coerceAtLeast(320)
         val h = minOf(width, height).coerceAtLeast(240)
+        ultraWideCameraBufferWidth = w
+        ultraWideCameraBufferHeight = h
         try { ultraWideCameraSurfaceTexture?.setDefaultBufferSize(w, h) } catch (_: Throwable) {}
     }
 
     private var uMVPMatrixHandle: Int = -1
     private var uSTMatrixHandle: Int = -1
+    private var uSTMatrix2Handle: Int = -1
+    private var uBlendProgressHandle: Int = -1
     private var uColorMatrixHandle: Int = -1
     private var uColorOffsetHandle: Int = -1
     private var uShadowsHandle: Int = -1
@@ -171,6 +197,7 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
     private var aPositionHandle: Int = -1
     private var aTextureCoordHandle: Int = -1
     private var sTextureHandle: Int = -1
+    private var sTexture2Handle: Int = -1
     private var sLutTextureHandle: Int = -1
     private var uUse3DLutHandle: Int = -1
     private var uLutSizeHandle: Int = -1
@@ -184,6 +211,9 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
 
     private val mvpMatrix = FloatArray(16)
     private val stMatrix = FloatArray(16)
+    private val mainInputStMatrix = FloatArray(16)
+    private val ultraWideInputStMatrix = FloatArray(16)
+    private val finalTexMatrix2 = FloatArray(16)
     private val glColorMat = FloatArray(16)
     private val glColorOffset = FloatArray(4)
 
@@ -1338,6 +1368,8 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
     private var activeDeviceRotation: Int = 0
     private var cameraBufferWidth: Int = 1920
     private var cameraBufferHeight: Int = 1080
+    private var ultraWideCameraBufferWidth: Int = 1920
+    private var ultraWideCameraBufferHeight: Int = 1080
 
     @Volatile
     var stabilizationOffsetX: Float = 0f
@@ -1446,6 +1478,9 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
                 programId = createGlProgram()
                 uMVPMatrixHandle = GLES20.glGetUniformLocation(programId, "uMVPMatrix")
                 uSTMatrixHandle = GLES20.glGetUniformLocation(programId, "uSTMatrix")
+                uSTMatrix2Handle = GLES20.glGetUniformLocation(programId, "uSTMatrix2")
+                uBlendProgressHandle = GLES20.glGetUniformLocation(programId, "uBlendProgress")
+                sTexture2Handle = GLES20.glGetUniformLocation(programId, "sTexture2")
                 uColorMatrixHandle = GLES20.glGetUniformLocation(programId, "uColorMatrix")
                 uColorOffsetHandle = GLES20.glGetUniformLocation(programId, "uColorOffset")
                 uShadowsHandle = GLES20.glGetUniformLocation(programId, "uShadows")
@@ -1544,6 +1579,8 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
                 }
                 cameraBufferWidth = camBufW
                 cameraBufferHeight = camBufH
+                ultraWideCameraBufferWidth = camBufW
+                ultraWideCameraBufferHeight = camBufH
 
                 val st = SurfaceTexture(oesTextureId).apply {
                     setDefaultBufferSize(camBufW, camBufH)
@@ -1726,17 +1763,57 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
 
     private fun onCameraFrameAvailable(isUltraWide: Boolean = false) {
         val st = (if (isUltraWide) ultraWideCameraSurfaceTexture else cameraSurfaceTexture) ?: return
+        val expectedSource = if (isUltraWide) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
         try {
             st.updateTexImage()
+            if (isUltraWide) {
+                st.getTransformMatrix(ultraWideInputStMatrix)
+                hasUltraWideRecordingInputFrame = true
+            } else {
+                st.getTransformMatrix(mainInputStMatrix)
+                hasMainRecordingInputFrame = true
+            }
         } catch (_: Throwable) {
             return
         }
         if (!isRecording.get() || isStopping.get() || isPaused.get()) return
-        val expectedSource = if (isUltraWide) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
-        if (activeStreamSource != expectedSource) return
+
+        val handoffFrom = recordingHandoffFromSource
+        val handoffTarget = recordingHandoffTargetSource
+        val isHandoffActive = handoffFrom != null && handoffTarget != null && activeStreamSource == handoffTarget
+        val isWaitingForTargetFrame = isHandoffActive &&
+            expectedSource == handoffFrom && !recordingHandoffTargetFrameReceived
+        if (isHandoffActive) {
+            if (expectedSource == handoffTarget) {
+                recordingHandoffTargetFrameReceived = true
+            } else if (!isWaitingForTargetFrame) {
+                return
+            }
+        } else if (activeStreamSource != expectedSource) {
+            return
+        }
+
+        val bothSourcesReady = hasMainRecordingInputFrame && hasUltraWideRecordingInputFrame
+        val isIncomingHandoffFrame = isHandoffActive && expectedSource == handoffTarget
+        val frameCount = if (isIncomingHandoffFrame && bothSourcesReady) {
+            (recordingHandoffFrameCount + 1).coerceAtMost(
+                ZoomTransitionController.FRAME_HANDOFF_WARMUP_FRAMES +
+                    ZoomTransitionController.FRAME_HANDOFF_REQUIRED_FRAMES
+            ).also { recordingHandoffFrameCount = it }
+        } else {
+            0
+        }
+        val shouldBlend = isIncomingHandoffFrame && bothSourcesReady
+        // Continue writing the outgoing live camera while the target lens warms up.
+        val compositeFrom = if (shouldBlend) handoffFrom!! else expectedSource
+        val compositeTo = if (shouldBlend) handoffTarget!! else expectedSource
+        val blendProgress = if (shouldBlend) {
+            ZoomTransitionController.calculateRecordingFrameHandoffProgress(frameCount)
+        } else {
+            0f
+        }
 
         try {
-            st.getTransformMatrix(stMatrix)
             val rawTimestampNs = st.timestamp.takeIf { it > 0L } ?: System.nanoTime()
             if (firstFramePtsNs < 0L) {
                 firstFramePtsNs = rawTimestampNs
@@ -1765,25 +1842,70 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
 
             GLES20.glUseProgram(programId)
 
+            val firstStMatrix = if (compositeFrom == PreviewStreamSource.ULTRAWIDE) {
+                ultraWideInputStMatrix
+            } else {
+                mainInputStMatrix
+            }
+            val secondStMatrix = if (compositeTo == PreviewStreamSource.ULTRAWIDE) {
+                ultraWideInputStMatrix
+            } else {
+                mainInputStMatrix
+            }
+            val firstBufferWidth = if (compositeFrom == PreviewStreamSource.ULTRAWIDE) {
+                ultraWideCameraBufferWidth
+            } else {
+                cameraBufferWidth
+            }
+            val firstBufferHeight = if (compositeFrom == PreviewStreamSource.ULTRAWIDE) {
+                ultraWideCameraBufferHeight
+            } else {
+                cameraBufferHeight
+            }
+            val secondBufferWidth = if (compositeTo == PreviewStreamSource.ULTRAWIDE) {
+                ultraWideCameraBufferWidth
+            } else {
+                cameraBufferWidth
+            }
+            val secondBufferHeight = if (compositeTo == PreviewStreamSource.ULTRAWIDE) {
+                ultraWideCameraBufferHeight
+            } else {
+                cameraBufferHeight
+            }
+
             computeCameraTexMatrix(
-                stMatrix = stMatrix,
+                stMatrix = firstStMatrix,
                 isFront = isFrontFacing,
                 sensorOrientation = cameraSensorOrientation,
                 deviceRotation = activeDeviceRotation,
                 viewportWidth = currentNormWidth,
                 viewportHeight = currentNormHeight,
-                camBufferWidth = cameraBufferWidth,
-                camBufferHeight = cameraBufferHeight,
+                camBufferWidth = firstBufferWidth,
+                camBufferHeight = firstBufferHeight,
                 outMatrix = finalTexMatrix
+            )
+            computeCameraTexMatrix(
+                stMatrix = secondStMatrix,
+                isFront = isFrontFacing,
+                sensorOrientation = cameraSensorOrientation,
+                deviceRotation = activeDeviceRotation,
+                viewportWidth = currentNormWidth,
+                viewportHeight = currentNormHeight,
+                camBufferWidth = secondBufferWidth,
+                camBufferHeight = secondBufferHeight,
+                outMatrix = finalTexMatrix2
             )
 
             GLES20.glUniformMatrix4fv(uMVPMatrixHandle, 1, false, mvpMatrix, 0)
             GLES20.glUniformMatrix4fv(uSTMatrixHandle, 1, false, finalTexMatrix, 0)
+            GLES20.glUniformMatrix4fv(uSTMatrix2Handle, 1, false, finalTexMatrix2, 0)
+            GLES20.glUniform1f(uBlendProgressHandle, blendProgress.coerceIn(0f, 1f))
             GLES20.glUniformMatrix4fv(uColorMatrixHandle, 1, false, glColorMat, 0)
             GLES20.glUniform4fv(uColorOffsetHandle, 1, glColorOffset, 0)
 
             GLES20.glUniform1i(sTextureHandle, 0)
             GLES20.glUniform1i(sLutTextureHandle, 1)
+            GLES20.glUniform1i(sTexture2Handle, 2)
 
             val cfg = currentCinemaConfig ?: CinemaConfig()
             val vadj = currentVideoAdjustments
@@ -1840,11 +1962,24 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
             GLES20.glUniform1f(uMicroContrastHandle, cfg.microContrast.coerceIn(-1f, 1f))
             GLES20.glUniform1f(uOutputGammaHandle, cfg.outputGamma.coerceIn(0.5f, 1.5f))
 
+            val firstTextureId = if (compositeFrom == PreviewStreamSource.ULTRAWIDE) {
+                ultraWideOesTextureId
+            } else {
+                oesTextureId
+            }
+            val secondTextureId = if (compositeTo == PreviewStreamSource.ULTRAWIDE) {
+                ultraWideOesTextureId
+            } else {
+                oesTextureId
+            }
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, if (isUltraWide) ultraWideOesTextureId else oesTextureId)
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, firstTextureId)
 
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lutTextureId)
+
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, secondTextureId)
 
             val vb = vertexBuffer
             val tb = texCoordBuffer
@@ -1871,6 +2006,16 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
                 if (swapped) {
                     encodedVideoFramesCount.incrementAndGet()
                     CameraPerformanceMonitor.onRecordingFrame()
+                    if (isIncomingHandoffFrame && frameCount >=
+                        ZoomTransitionController.FRAME_HANDOFF_WARMUP_FRAMES +
+                            ZoomTransitionController.FRAME_HANDOFF_REQUIRED_FRAMES
+                    ) {
+                        recordingHandoffFromSource = null
+                        recordingHandoffTargetSource = null
+                        recordingHandoffFrameCount = 0
+                        recordingHandoffTargetFrameReceived = false
+                        Log.i(TAG, "[CINEMA_RECORDING] Encoded 16-frame camera handoff completed")
+                    }
                 }
             }
         } catch (t: Throwable) {
@@ -1944,12 +2089,15 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
         val vertexShaderCode = """
             uniform mat4 uMVPMatrix;
             uniform mat4 uSTMatrix;
+            uniform mat4 uSTMatrix2;
             attribute vec4 aPosition;
             attribute vec4 aTextureCoord;
             varying vec2 vTextureCoord;
+            varying vec2 vTextureCoord2;
             void main() {
                 gl_Position = uMVPMatrix * aPosition;
                 vTextureCoord = (uSTMatrix * aTextureCoord).xy;
+                vTextureCoord2 = (uSTMatrix2 * aTextureCoord).xy;
             }
         """.trimIndent()
 
@@ -1957,7 +2105,10 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
             #extension GL_OES_EGL_image_external : require
             precision highp float;
             varying vec2 vTextureCoord;
+            varying vec2 vTextureCoord2;
             uniform samplerExternalOES sTexture;
+            uniform samplerExternalOES sTexture2;
+            uniform float uBlendProgress;
             uniform sampler2D sLutTexture;
             uniform mat4 uColorMatrix;
             uniform vec4 uColorOffset;
@@ -2017,6 +2168,9 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
 
             void main() {
                 vec4 src = texture2D(sTexture, vTextureCoord);
+                if (uBlendProgress > 0.0) {
+                    src = mix(src, texture2D(sTexture2, vTextureCoord2), uBlendProgress);
+                }
                 vec3 inColor = src.rgb;
                 vec3 cUp = texture2D(sTexture, vTextureCoord + vec2(0.0, -uTexelSize.y)).rgb;
                 vec3 cDown = texture2D(sTexture, vTextureCoord + vec2(0.0, uTexelSize.y)).rgb;

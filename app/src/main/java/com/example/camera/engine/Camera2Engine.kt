@@ -190,6 +190,9 @@ class Camera2Engine(private val context: Context) {
         },
         onSelectLensOnEngine = { lens, targetZoom, isContinuous ->
             selectLens(lens, preserveZoom = true, targetZoom = targetZoom, isContinuousTransition = isContinuous)
+        },
+        onFrameBasedHandoffStarted = { fromSource, targetSource ->
+            dualCameraRecordingRelay?.beginFrameBasedHandoff(fromSource, targetSource)
         }
     )
     val previewOverlapState: StateFlow<PreviewOverlapState> = zoomTransitionController.previewOverlapState
