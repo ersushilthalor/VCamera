@@ -343,11 +343,11 @@ class CameraPreferences(context: Context) {
         set(value) = prefs.edit().putFloat("pref_pro_shadows", value).apply()
 
     var proSharpness: Float
-        get() = prefs.getFloat("pref_pro_sharpness", 15f)
+        get() = prefs.getFloat("pref_pro_sharpness", 0f)
         set(value) = prefs.edit().putFloat("pref_pro_sharpness", value).apply()
 
     var proNoiseReduction: Float
-        get() = prefs.getFloat("pref_pro_noise_reduction", 12f)
+        get() = prefs.getFloat("pref_pro_noise_reduction", 0f)
         set(value) = prefs.edit().putFloat("pref_pro_noise_reduction", value).apply()
 
     var colorProfile: ColorProfile
