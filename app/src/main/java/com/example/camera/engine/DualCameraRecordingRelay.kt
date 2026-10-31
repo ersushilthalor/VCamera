@@ -546,7 +546,7 @@ class DualCameraRecordingRelay(
                 "uniform samplerExternalOES sTexture;\nuniform samplerExternalOES sTexture2;\nuniform float uBlendProgress;"
             )
             .replace(
-                "vec4 color = texture2D(sTexture, vTextureCoord);\\nif (uBlendProgress > 0.0) { color = mix(color, texture2D(sTexture2, vTextureCoord2), uBlendProgress); }",
+                "vec4 color = texture2D(sTexture, vTextureCoord); if (uBlendProgress > 0.0) { color = mix(color, texture2D(sTexture2, vTextureCoord2), uBlendProgress); }",
                 "vec4 color = mix(texture2D(sTexture, vTextureCoord), texture2D(sTexture2, vTextureCoord2), uBlendProgress);"
             )
 
