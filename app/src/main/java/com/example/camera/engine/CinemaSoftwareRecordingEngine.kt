@@ -2155,9 +2155,10 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
             }
 
             void main() {
-                vec4 outgoingColor = texture2D(sTexture, vTextureCoord);
-                vec4 incomingColor = texture2D(sTexture2, vTextureCoord2);
-                vec4 src = mix(outgoingColor, incomingColor, uBlendProgress);
+                vec4 src = texture2D(sTexture, vTextureCoord);
+                if (uBlendProgress > 0.0) {
+                    src = mix(src, texture2D(sTexture2, vTextureCoord2), uBlendProgress);
+                }
                 vec3 inColor = src.rgb;
                 vec3 cUp = texture2D(sTexture, vTextureCoord + vec2(0.0, -uTexelSize.y)).rgb;
                 vec3 cDown = texture2D(sTexture, vTextureCoord + vec2(0.0, uTexelSize.y)).rgb;
