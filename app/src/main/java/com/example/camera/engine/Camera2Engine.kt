@@ -456,6 +456,11 @@ class Camera2Engine(private val context: Context) {
             max(selectedSize.width, selectedSize.height),
             min(selectedSize.width, selectedSize.height)
         )
+        Log.i(
+            TAG,
+            "[PREVIEW_STREAM_SIZE] lens=${lens.lensType} lensId=${lens.cameraId} " +
+                "streamCameraId=$streamCameraId buffer=${bufferSize.width}x${bufferSize.height} active=$publishAsActive"
+        )
 
         if (lens.lensType == LensType.ULTRAWIDE) {
             _ultraWidePreviewBufferSize.value = bufferSize
