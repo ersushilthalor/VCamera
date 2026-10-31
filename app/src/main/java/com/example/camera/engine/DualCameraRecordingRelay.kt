@@ -520,9 +520,11 @@ class DualCameraRecordingRelay(
             uniform samplerExternalOES sTexture2;
             uniform float uBlendProgress;
             void main() {
-                vec4 outgoingColor = texture2D(sTexture, vTextureCoord);
-                vec4 incomingColor = texture2D(sTexture2, vTextureCoord2);
-                gl_FragColor = mix(outgoingColor, incomingColor, uBlendProgress);
+                vec4 color = texture2D(sTexture, vTextureCoord);
+                if (uBlendProgress > 0.0) {
+                    color = mix(color, texture2D(sTexture2, vTextureCoord2), uBlendProgress);
+                }
+                gl_FragColor = color;
             }
         """.trimIndent()
 
