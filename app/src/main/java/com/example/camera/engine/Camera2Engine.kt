@@ -3374,7 +3374,18 @@ class Camera2Engine(private val context: Context) {
                                     synchronized(cameraLifecycleLock) {
                                         cameraDevice = recoveredCam
                                         val recSurf = activeRecordingSurface
-                                        val pSurf = getActivePreviewSurface()
+                                        // Recovery creates a logical-output recording session, so resolve
+                                        // and size the fallback lens against the logical camera stream.
+                                        configurePreviewSurfaceBufferSize(fallbackLens, recoveredCam.id)
+                                        val pSurf = if (fallbackLens.lensType == LensType.ULTRAWIDE) {
+                                            getOrCreateUltraWidePreviewSurface(fallbackLens.cameraId, usePhysicalStream = false)
+                                        } else {
+                                            getOrCreateMainPreviewSurface(
+                                                cameraId = fallbackLens.cameraId,
+                                                surfaceLens = fallbackLens,
+                                                usePhysicalStream = false
+                                            )
+                                        }
                                         if (_isRecordingVideo.value && recSurf != null && recSurf.isValid && pSurf != null) {
                                             val configGen = sessionConfigGeneration.incrementAndGet()
                                             val builder = recoveredCam.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
@@ -3444,17 +3455,42 @@ class Camera2Engine(private val context: Context) {
                                     return
                                 }
                                 cameraDevice = camera
-                                val texture = previewSurfaceTexture ?: run {
+                                // This recording switch may bind either a logical or a physical
+                                // output. Resolve that choice before sizing the matching TextureView.
+                                val useLogicalZoom = canUseLogicalZoomForLens(lens.cameraId, lens, currentZoom)
+                                val targetPhysId = if (useLogicalZoom) null else lens.physicalCameraId
+                                val previewStreamCameraId = targetPhysId ?: camera.id
+                                configurePreviewSurfaceBufferSize(lens, previewStreamCameraId)
+                                val optimalSize = getOptimalPreviewSize(
+                                    previewStreamCameraId,
+                                    getTargetAspectRatioForMode(currentMode),
+                                    lens.lensType
+                                )
+                                val cameraW = max(optimalSize.width, optimalSize.height)
+                                val cameraH = min(optimalSize.width, optimalSize.height)
+                                val texture = if (lens.lensType == LensType.ULTRAWIDE) {
+                                    ultraWideViewfinderSurfaceTexture ?: ultraWideStandbySurfaceTexture
+                                } else {
+                                    previewSurfaceTexture ?: fallbackMainSurfaceTexture
+                                } ?: run {
                                     completeLensSwitch(lens)
                                     return
                                 }
-                                val optimalSize = _previewBufferSize.value ?: Size(1920, 1080)
-                                val cameraW = max(optimalSize.width, optimalSize.height)
-                                val cameraH = min(optimalSize.width, optimalSize.height)
-                                texture.setDefaultBufferSize(cameraW, cameraH)
-                                if (previewSurface == null || !previewSurface!!.isValid) {
-                                    try { previewSurface?.release() } catch (ignored: Throwable) {}
-                                    previewSurface = Surface(texture)
+                                try { texture.setDefaultBufferSize(cameraW, cameraH) } catch (_: Throwable) {}
+                                val lensPreviewSurface = if (lens.lensType == LensType.ULTRAWIDE) {
+                                    getOrCreateUltraWidePreviewSurface(
+                                        lens.cameraId,
+                                        usePhysicalStream = targetPhysId != null
+                                    )
+                                } else {
+                                    getOrCreateMainPreviewSurface(
+                                        cameraId = lens.cameraId,
+                                        surfaceLens = lens,
+                                        usePhysicalStream = targetPhysId != null
+                                    )
+                                } ?: run {
+                                    completeLensSwitch(lens)
+                                    return
                                 }
 
                                 val relay = dualCameraRecordingRelay
@@ -3490,12 +3526,10 @@ class Camera2Engine(private val context: Context) {
                                     try {
                                         val configGen = sessionConfigGeneration.incrementAndGet()
                                         val recConfig = activeRecordingStreamConfig
-                                        val useLogicalZoom = canUseLogicalZoomForLens(lens.cameraId, lens, currentZoom)
-                                        val targetPhysId = if (useLogicalZoom) null else lens.physicalCameraId
                                         activeSessionPhysicalCameraId = targetPhysId
                                         activeSessionLens = lens
 
-                                        val previewSurf = getEffectiveMainPreviewSurface() ?: previewSurface!!
+                                        val previewSurf = lensPreviewSurface
                                         val template = CameraDevice.TEMPLATE_RECORD
                                         val recordBuilder = camera.createCaptureRequest(template).apply {
                                             addTarget(previewSurf)
