@@ -81,6 +81,17 @@ class DualCameraRecordingRelay(
     val relayedFrameCount = AtomicLong(0L)
 
     @Volatile
+    private var recordingHandoffFromSource: PreviewStreamSource? = null
+    @Volatile
+    private var recordingHandoffTargetSource: PreviewStreamSource? = null
+    @Volatile
+    private var recordingHandoffFrameCount: Int = 0
+    @Volatile
+    private var hasMainRecordingFrame: Boolean = false
+    @Volatile
+    private var hasUltraWideRecordingFrame: Boolean = false
+
+    @Volatile
     var cameraSensorOrientation: Int = sensorOrientation
         private set
     private val activeDeviceRotation: Int = deviceRotation
@@ -138,21 +149,31 @@ class DualCameraRecordingRelay(
 
     private var uMVPMatrixHandle: Int = -1
     private var uSTMatrixHandle: Int = -1
+    private var uSTMatrix2Handle: Int = -1
+    private var uBlendProgressHandle: Int = -1
     private var aPositionHandle: Int = -1
     private var aTextureCoordHandle: Int = -1
     private var sTextureHandle: Int = -1
+    private var sTexture2Handle: Int = -1
 
     private var ptUMVPMatrixHandle: Int = -1
     private var ptUSTMatrixHandle: Int = -1
+    private var ptUSTMatrix2Handle: Int = -1
+    private var ptBlendProgressHandle: Int = -1
     private var ptAPositionHandle: Int = -1
     private var ptATextureCoordHandle: Int = -1
     private var ptSTextureHandle: Int = -1
+    private var ptSTexture2Handle: Int = -1
 
     private val mvpMatrix = FloatArray(16)
     private val stMatrix = FloatArray(16)
+    private val mainStMatrix = FloatArray(16)
+    private val ultraWideStMatrix = FloatArray(16)
     private val relayTexMatrix = FloatArray(16)
     private val renderTexMatrix = FloatArray(16)
+    private val renderTexMatrix2 = FloatArray(16)
     private val renderPreviewTexMatrix = FloatArray(16)
+    private val renderPreviewTexMatrix2 = FloatArray(16)
     private var vertexBuffer: FloatBuffer? = null
     private var texCoordBuffer: FloatBuffer? = null
 
@@ -324,6 +345,20 @@ class DualCameraRecordingRelay(
         }
     }
 
+    /**
+     * Starts a recording-side crossfade. Both camera SurfaceTextures continue updating;
+     * the target stream's own buffers drive the 2-frame warm-up + 16-frame blend.
+     */
+    fun beginFrameBasedHandoff(fromSource: PreviewStreamSource, targetSource: PreviewStreamSource) {
+        if (fromSource == targetSource) return
+        cinemaRecorder?.beginFrameBasedRecordingHandoff(fromSource, targetSource)
+        if (isDelegatingToNativeGlRecorder) return
+        recordingHandoffFromSource = fromSource
+        recordingHandoffTargetSource = targetSource
+        recordingHandoffFrameCount = 0
+        Log.i(TAG, "[RECORDING_RELAY] Started encoded frame handoff: $fromSource -> $targetSource")
+    }
+
     fun getRecorderSurfaceForLens(lens: LensInfo?): Surface {
         val isUw = lens?.lensType == LensType.ULTRAWIDE
         return if (isUw) {
@@ -464,12 +499,15 @@ class DualCameraRecordingRelay(
         val vertexShader = """
             uniform mat4 uMVPMatrix;
             uniform mat4 uSTMatrix;
+            uniform mat4 uSTMatrix2;
             attribute vec4 aPosition;
             attribute vec4 aTextureCoord;
             varying vec2 vTextureCoord;
+            varying vec2 vTextureCoord2;
             void main() {
                 gl_Position = uMVPMatrix * aPosition;
                 vTextureCoord = (uSTMatrix * aTextureCoord).xy;
+                vTextureCoord2 = (uSTMatrix2 * aTextureCoord).xy;
             }
         """.trimIndent()
 
@@ -477,25 +515,48 @@ class DualCameraRecordingRelay(
             #extension GL_OES_EGL_image_external : require
             precision mediump float;
             varying vec2 vTextureCoord;
+            varying vec2 vTextureCoord2;
             uniform samplerExternalOES sTexture;
+            uniform samplerExternalOES sTexture2;
+            uniform float uBlendProgress;
             void main() {
-                gl_FragColor = texture2D(sTexture, vTextureCoord);
+                vec4 outgoingColor = texture2D(sTexture, vTextureCoord);
+                vec4 incomingColor = texture2D(sTexture2, vTextureCoord2);
+                gl_FragColor = mix(outgoingColor, incomingColor, uBlendProgress);
             }
         """.trimIndent()
 
         passthroughProgramId = createProgram(vertexShader, passthroughFragmentShader)
         ptUMVPMatrixHandle = GLES20.glGetUniformLocation(passthroughProgramId, "uMVPMatrix")
         ptUSTMatrixHandle = GLES20.glGetUniformLocation(passthroughProgramId, "uSTMatrix")
+        ptUSTMatrix2Handle = GLES20.glGetUniformLocation(passthroughProgramId, "uSTMatrix2")
+        ptBlendProgressHandle = GLES20.glGetUniformLocation(passthroughProgramId, "uBlendProgress")
+        ptSTexture2Handle = GLES20.glGetUniformLocation(passthroughProgramId, "sTexture2")
         ptAPositionHandle = GLES20.glGetAttribLocation(passthroughProgramId, "aPosition")
         ptATextureCoordHandle = GLES20.glGetAttribLocation(passthroughProgramId, "aTextureCoord")
         ptSTextureHandle = GLES20.glGetUniformLocation(passthroughProgramId, "sTexture")
 
         val fragmentShader = VideoAdjustmentsPipeline.GLES_VIDEO_ADJUSTMENTS_FRAGMENT_SHADER
+            .replace(
+                "varying vec2 vTextureCoord;",
+                "varying vec2 vTextureCoord;\\nvarying vec2 vTextureCoord2;"
+            )
+            .replace(
+                "uniform samplerExternalOES sTexture;",
+                "uniform samplerExternalOES sTexture;\\nuniform samplerExternalOES sTexture2;\\nuniform float uBlendProgress;"
+            )
+            .replace(
+                "vec4 color = texture2D(sTexture, vTextureCoord);",
+                "vec4 color = mix(texture2D(sTexture, vTextureCoord), texture2D(sTexture2, vTextureCoord2), uBlendProgress);"
+            )
 
         programId = createProgram(vertexShader, fragmentShader)
         vadjHandles = VideoAdjustmentsPipeline.VideoAdjustmentsShaderHandles(programId)
         uMVPMatrixHandle = GLES20.glGetUniformLocation(programId, "uMVPMatrix")
         uSTMatrixHandle = GLES20.glGetUniformLocation(programId, "uSTMatrix")
+        uSTMatrix2Handle = GLES20.glGetUniformLocation(programId, "uSTMatrix2")
+        uBlendProgressHandle = GLES20.glGetUniformLocation(programId, "uBlendProgress")
+        sTexture2Handle = GLES20.glGetUniformLocation(programId, "sTexture2")
         aPositionHandle = GLES20.glGetAttribLocation(programId, "aPosition")
         aTextureCoordHandle = GLES20.glGetAttribLocation(programId, "aTextureCoord")
         sTextureHandle = GLES20.glGetUniformLocation(programId, "sTexture")
@@ -583,33 +644,65 @@ class DualCameraRecordingRelay(
 
     private fun onFrameAvailable(isUltraWide: Boolean) {
         if (isReleased.get()) return
+        val source = if (isUltraWide) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
         val st = if (isUltraWide) ultraWideSurfaceTexture else mainSurfaceTexture
         if (st == null) return
 
         try {
-            // Always drain the incoming buffer so both Main and Ultra-Wide Camera2 pipelines stay warm at full FPS
+            // Drain both streams even when they are not currently selected. The outgoing
+            // texture must remain live underneath the incoming camera during the blend.
             st.updateTexImage()
+            if (isUltraWide) {
+                st.getTransformMatrix(ultraWideStMatrix)
+                hasUltraWideRecordingFrame = true
+            } else {
+                st.getTransformMatrix(mainStMatrix)
+                hasMainRecordingFrame = true
+            }
         } catch (_: Throwable) {
             return
         }
 
         if (isPaused.get() || !isStreamingActive.get()) return
 
-        val expectedSource = if (isUltraWide) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
-        if (activeSource != expectedSource) {
+        val handoffFrom = recordingHandoffFromSource
+        val handoffTarget = recordingHandoffTargetSource
+        val isHandoffActive = handoffFrom != null && handoffTarget != null && activeSource == handoffTarget
+        if (isHandoffActive) {
+            // Only target-camera buffers advance the encoded crossfade. Outgoing buffers
+            // continue updating the texture but never generate duplicate encoder frames.
+            if (source != handoffTarget) return
+        } else if (activeSource != source) {
             return
         }
 
         if (!encoderTargetSurface.isValid) return
 
         try {
-            st.getTransformMatrix(stMatrix)
+            val frameCount = if (isHandoffActive) {
+                (recordingHandoffFrameCount + 1).coerceAtMost(
+                    ZoomTransitionController.FRAME_HANDOFF_WARMUP_FRAMES +
+                        ZoomTransitionController.FRAME_HANDOFF_REQUIRED_FRAMES
+                ).also { recordingHandoffFrameCount = it }
+            } else {
+                0
+            }
+
+            val bothSourcesReady = hasMainRecordingFrame && hasUltraWideRecordingFrame
+            val compositeFrom = if (isHandoffActive && bothSourcesReady) handoffFrom!! else source
+            val compositeTo = if (isHandoffActive && bothSourcesReady) handoffTarget!! else source
+            val blendProgress = if (isHandoffActive && bothSourcesReady) {
+                ZoomTransitionController.calculateRecordingFrameHandoffProgress(frameCount)
+            } else {
+                0f
+            }
+
             val rawTimestampNs = st.timestamp.takeIf { it > 0L } ?: System.nanoTime()
             if (recordingStartMonotonicNs <= 0L) {
                 recordingStartMonotonicNs = rawTimestampNs
             }
 
-            // Monotonic hardware-aligned presentation timestamp pacing
+            // Monotonic hardware-aligned presentation timestamp pacing.
             val frameIntervalNs = 1_000_000_000L / fps.coerceAtLeast(1)
             var candidatePtsNs = rawTimestampNs - recordingStartMonotonicNs - totalPausedDurationNs
             if (pendingClockSyncOnSwitch) {
@@ -624,7 +717,6 @@ class DualCameraRecordingRelay(
             }
             candidatePtsNs += streamClockOffsetNs
             if (candidatePtsNs < 0L) candidatePtsNs = 0L
-
             if (lastOutputPtsNs >= 0L && candidatePtsNs <= lastOutputPtsNs) {
                 candidatePtsNs = lastOutputPtsNs + 1_000_000L.coerceAtLeast(frameIntervalNs / 4)
             }
@@ -633,162 +725,179 @@ class DualCameraRecordingRelay(
             val display = eglDisplay
             val surface = eglSurface
             val context = eglContext
-            if (display != null && surface != null && context != null &&
-                display != EGL14.EGL_NO_DISPLAY && surface != EGL14.EGL_NO_SURFACE && context != EGL14.EGL_NO_CONTEXT) {
-                if (EGL14.eglGetCurrentContext() != context || EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW) != surface) {
-                    EGL14.eglMakeCurrent(display, surface, surface, context)
-                }
+            if (display == null || surface == null || context == null ||
+                display == EGL14.EGL_NO_DISPLAY || surface == EGL14.EGL_NO_SURFACE ||
+                context == EGL14.EGL_NO_CONTEXT) return
 
-                val outW = bufferWidth
-                val outH = bufferHeight
-                GLES20.glViewport(0, 0, outW, outH)
+            val encoded = drawCompositedFrame(
+                display = display,
+                surface = surface,
+                context = context,
+                viewWidth = bufferWidth,
+                viewHeight = bufferHeight,
+                presentationTimeNs = candidatePtsNs,
+                firstSource = compositeFrom,
+                secondSource = compositeTo,
+                blendProgress = blendProgress,
+                frameTimeSec = candidatePtsNs.toFloat() / 1_000_000_000f
+            )
+            if (!encoded) {
+                Log.w(TAG, "Encoded handoff frame was not accepted by EGL")
+                return
+            }
 
-                val isDefaultAdjustments = currentVideoAdjustments.isDefault
-                val activeProg = if (isDefaultAdjustments && passthroughProgramId != 0) passthroughProgramId else programId
-                GLES20.glUseProgram(activeProg)
+            relayedFrameCount.incrementAndGet()
+            CameraPerformanceMonitor.onRecordingFrame()
 
-                computeCameraTexMatrix(
-                    stMatrix = stMatrix,
-                    isFront = isFrontFacing,
-                    sensorOrientation = cameraSensorOrientation,
-                    deviceRotation = activeDeviceRotation,
-                    viewportWidth = outW,
-                    viewportHeight = outH,
-                    camBufferWidth = if (isUltraWide) ultraWideBufferW else mainBufferW,
-                    camBufferHeight = if (isUltraWide) ultraWideBufferH else mainBufferH,
-                    outMatrix = renderTexMatrix
+            // Mirror the exact same composite into the relay preview surface. This is no
+            // longer the source of the recording transition; it is only a preview of output.
+            val previewSurface = eglPreviewSurface
+            if (previewSurface != null && previewSurface != EGL14.EGL_NO_SURFACE) {
+                val pW = if (previewWidth > 0) previewWidth else bufferWidth
+                val pH = if (previewHeight > 0) previewHeight else bufferHeight
+                drawCompositedFrame(
+                    display = display,
+                    surface = previewSurface,
+                    context = context,
+                    viewWidth = pW,
+                    viewHeight = pH,
+                    presentationTimeNs = candidatePtsNs,
+                    firstSource = compositeFrom,
+                    secondSource = compositeTo,
+                    blendProgress = blendProgress,
+                    frameTimeSec = candidatePtsNs.toFloat() / 1_000_000_000f
                 )
+            }
 
-                val uMvp = if (activeProg == passthroughProgramId) ptUMVPMatrixHandle else uMVPMatrixHandle
-                val uSt = if (activeProg == passthroughProgramId) ptUSTMatrixHandle else uSTMatrixHandle
-                val aPos = if (activeProg == passthroughProgramId) ptAPositionHandle else aPositionHandle
-                val aTex = if (activeProg == passthroughProgramId) ptATextureCoordHandle else aTextureCoordHandle
-                val sTex = if (activeProg == passthroughProgramId) ptSTextureHandle else sTextureHandle
-
-                GLES20.glUniformMatrix4fv(uMvp, 1, false, mvpMatrix, 0)
-                GLES20.glUniformMatrix4fv(uSt, 1, false, renderTexMatrix, 0)
-                GLES20.glUniform1i(sTex, 0)
-
-                val frameTimeSec = (candidatePtsNs.toFloat() / 1_000_000_000f)
-                val handles = vadjHandles
-                if (activeProg == programId && handles != null) {
-                    VideoAdjustmentsPipeline.bindUniforms(
-                        handles = handles,
-                        adjustments = currentVideoAdjustments,
-                        width = outW,
-                        height = outH,
-                        timeSec = frameTimeSec
-                    )
-                }
-
-                val activeTexId = if (isUltraWide) ultraWideOesTexId else mainOesTexId
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, activeTexId)
-
-                val vb = vertexBuffer
-                val tb = texCoordBuffer
-                if (vboVertexBufferId != 0 && vboTexCoordBufferId != 0 && aPos >= 0 && aTex >= 0) {
-                    GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboVertexBufferId)
-                    GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, 0)
-                    GLES20.glEnableVertexAttribArray(aPos)
-
-                    GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboTexCoordBufferId)
-                    GLES20.glVertexAttribPointer(aTex, 2, GLES20.GL_FLOAT, false, 0, 0)
-                    GLES20.glEnableVertexAttribArray(aTex)
-
-                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-
-                    GLES20.glDisableVertexAttribArray(aPos)
-                    GLES20.glDisableVertexAttribArray(aTex)
-                    GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
-                } else if (vb != null && tb != null && aPos >= 0 && aTex >= 0) {
-                    vb.position(0)
-                    GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, vb)
-                    GLES20.glEnableVertexAttribArray(aPos)
-
-                    tb.position(0)
-                    GLES20.glVertexAttribPointer(aTex, 2, GLES20.GL_FLOAT, false, 0, tb)
-                    GLES20.glEnableVertexAttribArray(aTex)
-
-                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-
-                    GLES20.glDisableVertexAttribArray(aPos)
-                    GLES20.glDisableVertexAttribArray(aTex)
-                }
-
-                EGLExt.eglPresentationTimeANDROID(display, surface, candidatePtsNs)
-                val swapped = EGL14.eglSwapBuffers(display, surface)
-                if (swapped) {
-                    relayedFrameCount.incrementAndGet()
-                    CameraPerformanceMonitor.onRecordingFrame()
-                } else {
-                    Log.w(TAG, "eglSwapBuffers returned false")
-                }
-
-                // Split identical GPU processed frame directly to Preview Surface
-                val prevSurf = eglPreviewSurface
-                if (prevSurf != null && prevSurf != EGL14.EGL_NO_SURFACE) {
-                    try {
-                        if (EGL14.eglMakeCurrent(display, prevSurf, prevSurf, context)) {
-                            val pW = if (previewWidth > 0) previewWidth else outW
-                            val pH = if (previewHeight > 0) previewHeight else outH
-                            GLES20.glViewport(0, 0, pW, pH)
-                            GLES20.glUseProgram(activeProg)
-
-                            computeCameraTexMatrix(
-                                stMatrix = stMatrix,
-                                isFront = isFrontFacing,
-                                sensorOrientation = cameraSensorOrientation,
-                                deviceRotation = activeDeviceRotation,
-                                viewportWidth = pW,
-                                viewportHeight = pH,
-                                camBufferWidth = if (isUltraWide) ultraWideBufferW else mainBufferW,
-                                camBufferHeight = if (isUltraWide) ultraWideBufferH else mainBufferH,
-                                outMatrix = renderPreviewTexMatrix
-                            )
-
-                            GLES20.glUniformMatrix4fv(uMvp, 1, false, mvpMatrix, 0)
-                            GLES20.glUniformMatrix4fv(uSt, 1, false, renderPreviewTexMatrix, 0)
-                            GLES20.glUniform1i(sTex, 0)
-
-                            if (activeProg == programId && handles != null) {
-                                VideoAdjustmentsPipeline.bindUniforms(
-                                    handles = handles,
-                                    adjustments = currentVideoAdjustments,
-                                    width = pW,
-                                    height = pH,
-                                    timeSec = frameTimeSec
-                                )
-                            }
-
-                            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-                            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, activeTexId)
-
-                            if (vb != null && tb != null && aPos >= 0 && aTex >= 0) {
-                                vb.position(0)
-                                GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, vb)
-                                GLES20.glEnableVertexAttribArray(aPos)
-
-                                tb.position(0)
-                                GLES20.glVertexAttribPointer(aTex, 2, GLES20.GL_FLOAT, false, 0, tb)
-                                GLES20.glEnableVertexAttribArray(aTex)
-
-                                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-
-                                GLES20.glDisableVertexAttribArray(aPos)
-                                GLES20.glDisableVertexAttribArray(aTex)
-                            }
-
-                            EGL14.eglSwapBuffers(display, prevSurf)
-                        }
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "Error swapping preview EGL surface: ${t.message}")
-                    }
-                }
+            if (isHandoffActive && frameCount >=
+                ZoomTransitionController.FRAME_HANDOFF_WARMUP_FRAMES +
+                    ZoomTransitionController.FRAME_HANDOFF_REQUIRED_FRAMES
+            ) {
+                recordingHandoffFromSource = null
+                recordingHandoffTargetSource = null
+                recordingHandoffFrameCount = 0
+                Log.i(TAG, "[RECORDING_RELAY] Encoded 16-frame camera handoff completed")
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "Error relaying recording frame: ${t.message}")
+            Log.w(TAG, "Error relaying recording frame: ${t.message}", t)
         }
+    }
+
+    private fun drawCompositedFrame(
+        display: EGLDisplay,
+        surface: EGLSurface,
+        context: EGLContext,
+        viewWidth: Int,
+        viewHeight: Int,
+        presentationTimeNs: Long,
+        firstSource: PreviewStreamSource,
+        secondSource: PreviewStreamSource,
+        blendProgress: Float,
+        frameTimeSec: Float
+    ): Boolean {
+        if (!EGL14.eglMakeCurrent(display, surface, surface, context)) return false
+        GLES20.glViewport(0, 0, viewWidth, viewHeight)
+
+        val isDefaultAdjustments = currentVideoAdjustments.isDefault
+        val activeProgram = if (isDefaultAdjustments && passthroughProgramId != 0) {
+            passthroughProgramId
+        } else {
+            programId
+        }
+        GLES20.glUseProgram(activeProgram)
+
+        val firstMatrix = if (firstSource == PreviewStreamSource.ULTRAWIDE) ultraWideStMatrix else mainStMatrix
+        val secondMatrix = if (secondSource == PreviewStreamSource.ULTRAWIDE) ultraWideStMatrix else mainStMatrix
+        val firstWidth = if (firstSource == PreviewStreamSource.ULTRAWIDE) ultraWideBufferW else mainBufferW
+        val firstHeight = if (firstSource == PreviewStreamSource.ULTRAWIDE) ultraWideBufferH else mainBufferH
+        val secondWidth = if (secondSource == PreviewStreamSource.ULTRAWIDE) ultraWideBufferW else mainBufferW
+        val secondHeight = if (secondSource == PreviewStreamSource.ULTRAWIDE) ultraWideBufferH else mainBufferH
+
+        computeCameraTexMatrix(
+            stMatrix = firstMatrix,
+            isFront = isFrontFacing,
+            sensorOrientation = cameraSensorOrientation,
+            deviceRotation = activeDeviceRotation,
+            viewportWidth = viewWidth,
+            viewportHeight = viewHeight,
+            camBufferWidth = firstWidth,
+            camBufferHeight = firstHeight,
+            outMatrix = renderTexMatrix
+        )
+        computeCameraTexMatrix(
+            stMatrix = secondMatrix,
+            isFront = isFrontFacing,
+            sensorOrientation = cameraSensorOrientation,
+            deviceRotation = activeDeviceRotation,
+            viewportWidth = viewWidth,
+            viewportHeight = viewHeight,
+            camBufferWidth = secondWidth,
+            camBufferHeight = secondHeight,
+            outMatrix = renderTexMatrix2
+        )
+
+        val isPassthrough = activeProgram == passthroughProgramId
+        val uMvp = if (isPassthrough) ptUMVPMatrixHandle else uMVPMatrixHandle
+        val uSt = if (isPassthrough) ptUSTMatrixHandle else uSTMatrixHandle
+        val uSt2 = if (isPassthrough) ptUSTMatrix2Handle else uSTMatrix2Handle
+        val uBlend = if (isPassthrough) ptBlendProgressHandle else uBlendProgressHandle
+        val aPos = if (isPassthrough) ptAPositionHandle else aPositionHandle
+        val aTex = if (isPassthrough) ptATextureCoordHandle else aTextureCoordHandle
+        val sTex = if (isPassthrough) ptSTextureHandle else sTextureHandle
+        val sTex2 = if (isPassthrough) ptSTexture2Handle else sTexture2Handle
+
+        GLES20.glUniformMatrix4fv(uMvp, 1, false, mvpMatrix, 0)
+        GLES20.glUniformMatrix4fv(uSt, 1, false, renderTexMatrix, 0)
+        GLES20.glUniformMatrix4fv(uSt2, 1, false, renderTexMatrix2, 0)
+        GLES20.glUniform1i(sTex, 0)
+        GLES20.glUniform1i(sTex2, 1)
+        GLES20.glUniform1f(uBlend, blendProgress.coerceIn(0f, 1f))
+
+        val handles = vadjHandles
+        if (!isPassthrough && handles != null) {
+            VideoAdjustmentsPipeline.bindUniforms(
+                handles = handles,
+                adjustments = currentVideoAdjustments,
+                width = viewWidth,
+                height = viewHeight,
+                timeSec = frameTimeSec
+            )
+        }
+
+        val firstTexture = if (firstSource == PreviewStreamSource.ULTRAWIDE) ultraWideOesTexId else mainOesTexId
+        val secondTexture = if (secondSource == PreviewStreamSource.ULTRAWIDE) ultraWideOesTexId else mainOesTexId
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, firstTexture)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, secondTexture)
+
+        val vb = vertexBuffer
+        val tb = texCoordBuffer
+        if (vboVertexBufferId != 0 && vboTexCoordBufferId != 0 && aPos >= 0 && aTex >= 0) {
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboVertexBufferId)
+            GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, 0)
+            GLES20.glEnableVertexAttribArray(aPos)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboTexCoordBufferId)
+            GLES20.glVertexAttribPointer(aTex, 2, GLES20.GL_FLOAT, false, 0, 0)
+            GLES20.glEnableVertexAttribArray(aTex)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glDisableVertexAttribArray(aPos)
+            GLES20.glDisableVertexAttribArray(aTex)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+        } else if (vb != null && tb != null && aPos >= 0 && aTex >= 0) {
+            vb.position(0)
+            GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, vb)
+            GLES20.glEnableVertexAttribArray(aPos)
+            tb.position(0)
+            GLES20.glVertexAttribPointer(aTex, 2, GLES20.GL_FLOAT, false, 0, tb)
+            GLES20.glEnableVertexAttribArray(aTex)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glDisableVertexAttribArray(aPos)
+            GLES20.glDisableVertexAttribArray(aTex)
+        }
+
+        EGLExt.eglPresentationTimeANDROID(display, surface, presentationTimeNs)
+        return EGL14.eglSwapBuffers(display, surface)
     }
 
     internal fun computeCameraTexMatrix(
