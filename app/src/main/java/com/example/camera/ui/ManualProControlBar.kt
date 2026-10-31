@@ -66,8 +66,8 @@ fun ManualProControlBar(
     proContrast: Float = 1.0f,
     proHighlights: Float = 0f,
     proShadows: Float = 0f,
-    proSharpness: Float = 15f,
-    proNoiseReduction: Float = 12f,
+    proSharpness: Float = 0f,
+    proNoiseReduction: Float = 0f,
     onSliderVisibilityChange: (Boolean) -> Unit = {},
     onTabSelected: (ProControlTab) -> Unit,
     onExposureChange: (Int) -> Unit,
@@ -611,7 +611,7 @@ fun ManualProControlBar(
 
                     // ADJ (Tuning)
                     val isAnyAdjModified = proSaturation != 0f || proContrast != 1.0f || proHighlights != 0f ||
-                            proShadows != 0f || proSharpness != 15f || proNoiseReduction != 12f || colorProfile != ColorProfile.STANDARD
+                            proShadows != 0f || proSharpness != 0f || proNoiseReduction != 0f || colorProfile != ColorProfile.STANDARD
                     val isAdjActive = activeSlider in listOf(
                         ProActiveSlider.SATURATION, ProActiveSlider.CONTRAST, ProActiveSlider.HIGHLIGHTS,
                         ProActiveSlider.SHADOWS, ProActiveSlider.SHARPNESS, ProActiveSlider.NOISE_REDUCTION, ProActiveSlider.TONE
