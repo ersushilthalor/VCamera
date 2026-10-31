@@ -2578,7 +2578,7 @@ class Camera2Engine(private val context: Context) {
                     if (useUw) {
                         getOrCreateUltraWidePreviewSurface(lens.cameraId)
                     } else {
-                        getOrCreateMainPreviewSurface(lens.cameraId)
+                        getOrCreateMainPreviewSurface(lens.cameraId, lens)
                     }
                     _isUsingUltraWideSurface.value = useUw
                     _displayedPreviewSource.value = if (useUw) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
@@ -3207,6 +3207,7 @@ class Camera2Engine(private val context: Context) {
                     val cameraH = min(optimalSize.width, optimalSize.height)
                     syncPreviewBufferSizes(cameraW, cameraH, targetLens)
                     configurePreviewSurfaceBufferSize(targetLens, streamCameraId)
+                    try { texture.setDefaultBufferSize(cameraW, cameraH) } catch (_: Throwable) {}
 
                     val previewSurf = if (targetLens.lensType == LensType.ULTRAWIDE) {
                         getOrCreateUltraWidePreviewSurface(targetLens.cameraId)
@@ -6252,7 +6253,10 @@ class Camera2Engine(private val context: Context) {
             val uwSurf = ultraWideViewfinderSurface ?: ultraWideStandbySurface
             if (uwSurf != null && uwSurf.isValid) return uwSurf
         }
-        return if (previewSurface?.isValid == true) previewSurface else getOrCreateMainPreviewSurface(_selectedLens.value?.cameraId)
+        return if (previewSurface?.isValid == true) previewSurface else getOrCreateMainPreviewSurface(
+            cameraId = _selectedLens.value?.cameraId,
+            surfaceLens = _selectedLens.value
+        )
     }
 
     private fun findBestFpsRange(chars: CameraCharacteristics, targetFps: Int): Range<Int>? {
@@ -6992,14 +6996,28 @@ class Camera2Engine(private val context: Context) {
                             val mainPhysId = mainLensForRec.physicalCameraId?.takeIf {
                                 mainLensForRec.supportsPhysicalStream && physIds.contains(it) && it != camera.id
                             }
-                            val mainPrevSurf = getOrCreateMainPreviewSurface(camera.id) ?: previewSurf
-                            val uwPrevSurf = getOrCreateUltraWidePreviewSurface(camera.id)
+                            val isUwSelected = (lens.lensType == LensType.ULTRAWIDE)
+                            configurePreviewSurfaceBufferSize(
+                                mainLensForRec,
+                                mainPhysId ?: camera.id,
+                                publishAsActive = !isUwSelected
+                            )
+                            configurePreviewSurfaceBufferSize(
+                                uwLensForRec,
+                                uwPhysId,
+                                publishAsActive = isUwSelected
+                            )
+                            val mainPrevSurf = getOrCreateMainPreviewSurface(
+                                cameraId = mainLensForRec.cameraId,
+                                surfaceLens = mainLensForRec,
+                                usePhysicalStream = mainPhysId != null
+                            ) ?: previewSurf
+                            val uwPrevSurf = getOrCreateUltraWidePreviewSurface(uwLensForRec.cameraId)
                             val relay = dualCameraRecordingRelay
                             val mainRecSurf = relay?.mainRecorderSurface ?: activeLensRecorderSurface
                             val uwRecSurf = relay?.ultraWideRecorderSurface
 
                             if (physIds.contains(uwPhysId) && uwPrevSurf != null && uwPrevSurf.isValid && uwPrevSurf !== mainPrevSurf) {
-                                val isUwSelected = (lens.lensType == LensType.ULTRAWIDE)
                                 activeSessionPhysicalCameraId = if (isUwSelected) uwPhysId else mainPhysId
                                 _isUsingUltraWideSurface.value = isUwSelected
                                 _displayedPreviewSource.value = if (isUwSelected) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
