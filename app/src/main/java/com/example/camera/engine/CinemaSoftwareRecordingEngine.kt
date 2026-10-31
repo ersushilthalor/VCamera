@@ -124,6 +124,8 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
     @Volatile
     private var recordingHandoffFrameCount: Int = 0
     @Volatile
+    private var recordingHandoffTargetFrameReceived: Boolean = false
+    @Volatile
     private var hasMainRecordingInputFrame: Boolean = false
     @Volatile
     private var hasUltraWideRecordingInputFrame: Boolean = false
@@ -147,6 +149,7 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
         recordingHandoffFromSource = fromSource
         recordingHandoffTargetSource = targetSource
         recordingHandoffFrameCount = 0
+        recordingHandoffTargetFrameReceived = false
         Log.i(TAG, "[CINEMA_RECORDING] Started encoded frame handoff: $fromSource -> $targetSource")
     }
 
@@ -1778,13 +1781,21 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
         val handoffFrom = recordingHandoffFromSource
         val handoffTarget = recordingHandoffTargetSource
         val isHandoffActive = handoffFrom != null && handoffTarget != null && activeStreamSource == handoffTarget
+        val isWaitingForTargetFrame = isHandoffActive &&
+            expectedSource == handoffFrom && !recordingHandoffTargetFrameReceived
         if (isHandoffActive) {
-            if (expectedSource != handoffTarget) return
+            if (expectedSource == handoffTarget) {
+                recordingHandoffTargetFrameReceived = true
+            } else if (!isWaitingForTargetFrame) {
+                return
+            }
         } else if (activeStreamSource != expectedSource) {
             return
         }
 
-        val frameCount = if (isHandoffActive) {
+        val bothSourcesReady = hasMainRecordingInputFrame && hasUltraWideRecordingInputFrame
+        val isIncomingHandoffFrame = isHandoffActive && expectedSource == handoffTarget
+        val frameCount = if (isIncomingHandoffFrame && bothSourcesReady) {
             (recordingHandoffFrameCount + 1).coerceAtMost(
                 ZoomTransitionController.FRAME_HANDOFF_WARMUP_FRAMES +
                     ZoomTransitionController.FRAME_HANDOFF_REQUIRED_FRAMES
@@ -1792,10 +1803,11 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
         } else {
             0
         }
-        val bothSourcesReady = hasMainRecordingInputFrame && hasUltraWideRecordingInputFrame
-        val compositeFrom = if (isHandoffActive && bothSourcesReady) handoffFrom!! else expectedSource
-        val compositeTo = if (isHandoffActive && bothSourcesReady) handoffTarget!! else expectedSource
-        val blendProgress = if (isHandoffActive && bothSourcesReady) {
+        val shouldBlend = isIncomingHandoffFrame && bothSourcesReady
+        // Continue writing the outgoing live camera while the target lens warms up.
+        val compositeFrom = if (shouldBlend) handoffFrom!! else expectedSource
+        val compositeTo = if (shouldBlend) handoffTarget!! else expectedSource
+        val blendProgress = if (shouldBlend) {
             ZoomTransitionController.calculateRecordingFrameHandoffProgress(frameCount)
         } else {
             0f
@@ -1994,13 +2006,14 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
                 if (swapped) {
                     encodedVideoFramesCount.incrementAndGet()
                     CameraPerformanceMonitor.onRecordingFrame()
-                    if (isHandoffActive && frameCount >=
+                    if (isIncomingHandoffFrame && frameCount >=
                         ZoomTransitionController.FRAME_HANDOFF_WARMUP_FRAMES +
                             ZoomTransitionController.FRAME_HANDOFF_REQUIRED_FRAMES
                     ) {
                         recordingHandoffFromSource = null
                         recordingHandoffTargetSource = null
                         recordingHandoffFrameCount = 0
+                        recordingHandoffTargetFrameReceived = false
                         Log.i(TAG, "[CINEMA_RECORDING] Encoded 16-frame camera handoff completed")
                     }
                 }
