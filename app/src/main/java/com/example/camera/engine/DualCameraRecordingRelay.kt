@@ -539,11 +539,11 @@ class DualCameraRecordingRelay(
         val fragmentShader = VideoAdjustmentsPipeline.GLES_VIDEO_ADJUSTMENTS_FRAGMENT_SHADER
             .replace(
                 "varying vec2 vTextureCoord;",
-                "varying vec2 vTextureCoord;\\nvarying vec2 vTextureCoord2;"
+                "varying vec2 vTextureCoord;\nvarying vec2 vTextureCoord2;"
             )
             .replace(
                 "uniform samplerExternalOES sTexture;",
-                "uniform samplerExternalOES sTexture;\\nuniform samplerExternalOES sTexture2;\\nuniform float uBlendProgress;"
+                "uniform samplerExternalOES sTexture;\nuniform samplerExternalOES sTexture2;\nuniform float uBlendProgress;"
             )
             .replace(
                 "vec4 color = texture2D(sTexture, vTextureCoord);",
