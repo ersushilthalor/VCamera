@@ -109,6 +109,25 @@ class Camera2Engine(private val context: Context) {
         }
     }
 
+    /**
+     * Returns the ID whose StreamConfigurationMap describes the SurfaceTexture output
+     * actually bound to the capture session. Physical outputs must use their physical ID;
+     * logical fallback sessions must continue using the logical CameraDevice ID.
+     */
+    private fun resolvePreviewStreamCameraId(
+        lens: LensInfo?,
+        usePhysicalStream: Boolean = true
+    ): String? {
+        if (lens == null) return null
+        val physicalId = lens.physicalCameraId
+        val usePhysical = usePhysicalStream &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            lens.supportsPhysicalStream &&
+            !physicalId.isNullOrBlank() &&
+            physicalId != lens.cameraId
+        return if (usePhysical) physicalId else lens.cameraId
+    }
+
     private val preferences by lazy { com.example.camera.data.CameraPreferences(context) }
     var antiBandingMode: String = preferences.antiBanding
         get() = preferences.antiBanding
@@ -388,14 +407,15 @@ class Camera2Engine(private val context: Context) {
                 ?: surfaceLens
         }
 
-        // Main/front and ultra-wide previews are persistent parallel outputs. Never set the
-        // main SurfaceTexture to the active ultra-wide camera's dimensions.
-        val mainSize = if (mainLens != null) {
-            getOptimalPreviewSize(
-                mainLens.physicalCameraId ?: mainLens.cameraId,
-                targetRatio,
-                mainLens.lensType
-            )
+        // Main TextureView carries the active stream for all non-ultra-wide lenses.
+        // Keep the exact active dimensions (including tele/front outputs) instead of
+        // replacing them with the primary-main lens' estimated dimensions.
+        val activeIsUltraWide = surfaceLens?.lensType == LensType.ULTRAWIDE
+        val mainSize = if (surfaceLens != null && !activeIsUltraWide) {
+            Size(cameraW, cameraH)
+        } else if (mainLens != null) {
+            val mainId = resolvePreviewStreamCameraId(mainLens, usePhysicalStream = true)
+            getOptimalPreviewSize(mainId, targetRatio, mainLens.lensType)
         } else {
             Size(cameraW, cameraH)
         }
@@ -405,12 +425,13 @@ class Camera2Engine(private val context: Context) {
         try { previewSurfaceTexture?.setDefaultBufferSize(mainW, mainH) } catch (_: Throwable) {}
         try { fallbackMainSurfaceTexture?.setDefaultBufferSize(mainW, mainH) } catch (_: Throwable) {}
 
-        // Size the dedicated ultra-wide output from a size actually supported by that lens.
-        val uwId = ultraWideLens?.physicalCameraId ?: ultraWideLens?.cameraId
-        val uwSize = if (uwId != null) {
-            getOptimalPreviewSize(uwId, targetRatio, LensType.ULTRAWIDE)
-        } else {
+        // Ultra-wide has its own TextureView and must keep its own supported stream size.
+        val uwSize = if (activeIsUltraWide) {
             Size(cameraW, cameraH)
+        } else {
+            val uwId = ultraWideLens?.let { resolvePreviewStreamCameraId(it, usePhysicalStream = true) }
+            if (uwId != null) getOptimalPreviewSize(uwId, targetRatio, LensType.ULTRAWIDE)
+            else Size(cameraW, cameraH)
         }
         val uwW = max(uwSize.width, uwSize.height)
         val uwH = min(uwSize.width, uwSize.height)
@@ -420,13 +441,57 @@ class Camera2Engine(private val context: Context) {
     }
 
     /**
+     * Resolve and apply the exact Camera2 preview output dimensions for one SurfaceTexture.
+     * Called when attaching/reconfiguring a lens and immediately before session creation.
+     */
+    private fun configurePreviewSurfaceBufferSize(
+        lens: LensInfo?,
+        streamCameraId: String?,
+        publishAsActive: Boolean = true
+    ): Size? {
+        if (lens == null || streamCameraId.isNullOrBlank()) return null
+        val targetRatio = getTargetAspectRatioForMode(currentMode)
+        val selectedSize = getOptimalPreviewSize(streamCameraId, targetRatio, lens.lensType)
+        val bufferSize = Size(
+            max(selectedSize.width, selectedSize.height),
+            min(selectedSize.width, selectedSize.height)
+        )
+
+        if (lens.lensType == LensType.ULTRAWIDE) {
+            _ultraWidePreviewBufferSize.value = bufferSize
+            try { ultraWideViewfinderSurfaceTexture?.setDefaultBufferSize(bufferSize.width, bufferSize.height) } catch (_: Throwable) {}
+            try { ultraWideStandbySurfaceTexture?.setDefaultBufferSize(bufferSize.width, bufferSize.height) } catch (_: Throwable) {}
+        } else {
+            _mainPreviewBufferSize.value = bufferSize
+            try { previewSurfaceTexture?.setDefaultBufferSize(bufferSize.width, bufferSize.height) } catch (_: Throwable) {}
+            try { fallbackMainSurfaceTexture?.setDefaultBufferSize(bufferSize.width, bufferSize.height) } catch (_: Throwable) {}
+        }
+
+        if (publishAsActive) {
+            _previewBufferSize.value = selectedSize
+            _previewAspectRatio.value = targetRatio
+        }
+        return selectedSize
+    }
+
+    /**
      * Returns the Ultra-Wide preview Surface configured at the exact resolution and aspect ratio
      * of the active viewfinder. Uses the UI TextureView SurfaceTexture when attached, or an
      * internal SurfaceTexture at the exact viewfinder dimensions when running headless/before UI attach.
      */
-    fun getOrCreateUltraWidePreviewSurface(cameraId: String? = null): Surface? {
+    fun getOrCreateUltraWidePreviewSurface(
+        cameraId: String? = null,
+        usePhysicalStream: Boolean = true
+    ): Surface? {
         val targetRatio = getTargetAspectRatioForMode(currentMode)
-        val lensId = cameraId ?: _availableLenses.value.firstOrNull { it.lensType == LensType.ULTRAWIDE }?.cameraId ?: _selectedLens.value?.cameraId
+        val lens = _availableLenses.value.firstOrNull {
+            it.lensType == LensType.ULTRAWIDE &&
+                (cameraId == null || it.cameraId == cameraId || it.physicalCameraId == cameraId)
+        } ?: _selectedLens.value?.takeIf { it.lensType == LensType.ULTRAWIDE }
+        val lensId = resolvePreviewStreamCameraId(lens, usePhysicalStream)
+            ?: cameraId
+            ?: _availableLenses.value.firstOrNull { it.lensType == LensType.ULTRAWIDE }?.cameraId
+            ?: _selectedLens.value?.cameraId
         val optimalSize = getOptimalPreviewSize(lensId, targetRatio, LensType.ULTRAWIDE)
         val cameraW = max(optimalSize.width, optimalSize.height)
         val cameraH = min(optimalSize.width, optimalSize.height)
@@ -461,16 +526,30 @@ class Camera2Engine(private val context: Context) {
     }
 
     /**
-     * Returns the Main (1x) preview Surface configured at the exact resolution and aspect ratio
-     * of the active viewfinder.
+     * Returns the main preview Surface using dimensions from the camera stream which
+     * will actually be attached to it (rather than assuming the primary main camera).
      */
-    fun getOrCreateMainPreviewSurface(cameraId: String? = null): Surface? {
+    fun getOrCreateMainPreviewSurface(
+        cameraId: String? = null,
+        surfaceLens: LensInfo? = null,
+        usePhysicalStream: Boolean = true
+    ): Surface? {
         val targetRatio = getTargetAspectRatioForMode(currentMode)
-        val lensId = cameraId ?: _availableLenses.value.firstOrNull { it.isPrimaryMain || it.lensType == LensType.WIDE }?.cameraId ?: _selectedLens.value?.cameraId
-        val mainTypeHint = _availableLenses.value.firstOrNull {
-            it.cameraId == lensId && (it.isPrimaryMain || it.lensType == LensType.WIDE || it.lensType == LensType.FRONT)
-        }?.lensType
-        val optimalSize = getOptimalPreviewSize(lensId, targetRatio, mainTypeHint)
+        val lens = surfaceLens
+            ?: _selectedLens.value?.takeIf {
+                it.lensType != LensType.ULTRAWIDE &&
+                    (cameraId == null || it.cameraId == cameraId || it.physicalCameraId == cameraId)
+            }
+            ?: _availableLenses.value.firstOrNull {
+                it.lensType != LensType.ULTRAWIDE &&
+                    (cameraId == null || it.cameraId == cameraId || it.physicalCameraId == cameraId)
+            }
+            ?: _availableLenses.value.firstOrNull { it.isPrimaryMain || it.lensType == LensType.WIDE }
+        val lensId = resolvePreviewStreamCameraId(lens, usePhysicalStream)
+            ?: cameraId
+            ?: _availableLenses.value.firstOrNull { it.isPrimaryMain || it.lensType == LensType.WIDE }?.cameraId
+            ?: _selectedLens.value?.cameraId
+        val optimalSize = getOptimalPreviewSize(lensId, targetRatio, lens?.lensType)
         val cameraW = max(optimalSize.width, optimalSize.height)
         val cameraH = min(optimalSize.width, optimalSize.height)
         _mainPreviewBufferSize.value = Size(cameraW, cameraH)
@@ -841,7 +920,7 @@ class Camera2Engine(private val context: Context) {
             val standbyPreviewSurf = if (standbyLens.lensType == LensType.ULTRAWIDE) {
                 getOrCreateUltraWidePreviewSurface(standbyLens.cameraId)
             } else {
-                getOrCreateMainPreviewSurface(standbyLens.cameraId)
+                getOrCreateMainPreviewSurface(standbyLens.cameraId, standbyLens)
             } ?: run {
                 isPreparingUltraWideStandby.set(false)
                 return
@@ -854,7 +933,7 @@ class Camera2Engine(private val context: Context) {
             val isRecordingActive = (_isRecordingVideo.value || isStartingRecording.get()) && dualCameraRecordingRelay != null
             val isVideo = (currentMode == CameraMode.VIDEO || currentMode == CameraMode.CINEMA || isRecordingActive)
             val targetRatio = getTargetAspectRatioForMode(currentMode)
-            val expectedPreviewSize = getOptimalPreviewSize(standbyLens.cameraId, targetRatio)
+            val expectedPreviewSize = getOptimalPreviewSize(resolvePreviewStreamCameraId(standbyLens), targetRatio, standbyLens.lensType)
             standbyConfiguredPreviewSize = expectedPreviewSize
             standbyConfiguredIsVideoMode = isVideo
 
@@ -1187,7 +1266,7 @@ class Camera2Engine(private val context: Context) {
         if (dualMode == DualStreamingMode.LOGICAL_MULTI_CAMERA_PHYSICAL && mainLens.cameraId == ultraWideLens.cameraId) {
             val camera = cameraDevice ?: return
             getOrCreateUltraWidePreviewSurface(ultraWideLens.cameraId)
-            getOrCreateMainPreviewSurface(mainLens.cameraId)
+            getOrCreateMainPreviewSurface(mainLens.cameraId, mainLens)
             if (!activeLogicalMultiCamUltraWideConfigured && captureSession != null && !isConfiguringSession && !_isRecordingVideo.value && !isContinuousZoomTransitionActive) {
                 createCameraCaptureSession()
                 return
@@ -1207,7 +1286,7 @@ class Camera2Engine(private val context: Context) {
         if (existingStandbyCam != null) {
             if (existingStandbyCam.id == standbyLens.cameraId) {
                 val targetRatio = getTargetAspectRatioForMode(currentMode)
-                val optimalStandbySize = getOptimalPreviewSize(standbyLens.cameraId, targetRatio)
+                val optimalStandbySize = getOptimalPreviewSize(resolvePreviewStreamCameraId(standbyLens), targetRatio, standbyLens.lensType)
                 val isVideo = (currentMode == CameraMode.VIDEO || currentMode == CameraMode.CINEMA || isRecordingNow)
                 val sizeMatches = standbyConfiguredPreviewSize != null &&
                     max(standbyConfiguredPreviewSize!!.width, standbyConfiguredPreviewSize!!.height) == max(optimalStandbySize.width, optimalStandbySize.height) &&
@@ -1247,7 +1326,7 @@ class Camera2Engine(private val context: Context) {
             if (standbyLens.lensType == LensType.ULTRAWIDE) {
                 getOrCreateUltraWidePreviewSurface(standbyLens.cameraId)
             } else {
-                getOrCreateMainPreviewSurface(standbyLens.cameraId)
+                getOrCreateMainPreviewSurface(standbyLens.cameraId, standbyLens)
             }
 
             val openToken = standbyCameraDeviceGeneration.incrementAndGet()
@@ -2625,12 +2704,12 @@ class Camera2Engine(private val context: Context) {
 
             // Ensure both preview surfaces are sized to the active viewfinder resolution & aspect ratio
             val targetRatio = getTargetAspectRatioForMode(currentMode)
-            val optimalPreviewSize = getOptimalPreviewSize(targetLens.cameraId, targetRatio, targetLens.lensType)
+            val optimalPreviewSize = getOptimalPreviewSize(resolvePreviewStreamCameraId(targetLens), targetRatio, targetLens.lensType)
             _previewAspectRatio.value = targetRatio
             _previewBufferSize.value = optimalPreviewSize
             val cameraW = max(optimalPreviewSize.width, optimalPreviewSize.height)
             val cameraH = min(optimalPreviewSize.width, optimalPreviewSize.height)
-            syncPreviewBufferSizes(cameraW, cameraH)
+            syncPreviewBufferSizes(cameraW, cameraH, targetLens)
 
             if (standbySession != null) {
                 // True 0ms persistent dual-session swap:
@@ -2735,11 +2814,11 @@ class Camera2Engine(private val context: Context) {
         if (targetLens.lensType == LensType.ULTRAWIDE) {
             getOrCreateUltraWidePreviewSurface(targetLens.cameraId)
         } else {
-            getOrCreateMainPreviewSurface(targetLens.cameraId)
+            getOrCreateMainPreviewSurface(targetLens.cameraId, targetLens)
         }
 
         val targetRatio = getTargetAspectRatioForMode(currentMode)
-        val optimalPreviewSize = getOptimalPreviewSize(targetLens.cameraId, targetRatio, targetLens.lensType)
+        val optimalPreviewSize = getOptimalPreviewSize(resolvePreviewStreamCameraId(targetLens), targetRatio, targetLens.lensType)
         _previewAspectRatio.value = targetRatio
         _previewBufferSize.value = optimalPreviewSize
         val cameraW = max(optimalPreviewSize.width, optimalPreviewSize.height)
@@ -3093,7 +3172,11 @@ class Camera2Engine(private val context: Context) {
             restartCamera()
             return
         }
-        val texture = previewSurfaceTexture ?: run {
+        val texture = if (targetLens.lensType == LensType.ULTRAWIDE) {
+            ultraWideViewfinderSurfaceTexture ?: ultraWideStandbySurfaceTexture
+        } else {
+            previewSurfaceTexture ?: fallbackMainSurfaceTexture
+        } ?: run {
             completeLensSwitch(targetLens)
             return
         }
@@ -3116,18 +3199,23 @@ class Camera2Engine(private val context: Context) {
                     _isCameraReady.value = false
 
                     val targetRatio = getTargetAspectRatioForMode(currentMode)
-                    val optimalSize = getOptimalPreviewSize(targetLens.cameraId, targetRatio)
+                    val streamCameraId = resolvePreviewStreamCameraId(targetLens)
+                    val optimalSize = getOptimalPreviewSize(streamCameraId, targetRatio, targetLens.lensType)
                     _previewAspectRatio.value = targetRatio
                     _previewBufferSize.value = optimalSize
                     val cameraW = max(optimalSize.width, optimalSize.height)
                     val cameraH = min(optimalSize.width, optimalSize.height)
-                    texture.setDefaultBufferSize(cameraW, cameraH)
+                    syncPreviewBufferSizes(cameraW, cameraH, targetLens)
+                    configurePreviewSurfaceBufferSize(targetLens, streamCameraId)
 
-                    if (previewSurface == null || !previewSurface!!.isValid) {
-                        try { previewSurface?.release() } catch (ignored: Throwable) {}
-                        previewSurface = Surface(texture)
+                    val previewSurf = if (targetLens.lensType == LensType.ULTRAWIDE) {
+                        getOrCreateUltraWidePreviewSurface(targetLens.cameraId)
+                    } else {
+                        getOrCreateMainPreviewSurface(targetLens.cameraId, targetLens)
+                    } ?: run {
+                        completeLensSwitch(targetLens)
+                        return@synchronized
                     }
-                    val previewSurf = getEffectiveMainPreviewSurface() ?: previewSurface!!
 
                     // Setup ImageReaders for target physical lens
                     setupImageReaders(targetLens.cameraId)
@@ -3646,11 +3734,12 @@ class Camera2Engine(private val context: Context) {
         val previousBufferSize = _previewBufferSize.value
         // Immediately synchronize aspect ratio and optimal buffer dimensions on mode switch
         _previewAspectRatio.value = newRatio
-        val optimalSize = getOptimalPreviewSize(_selectedLens.value?.cameraId, newRatio)
+        val activeLens = _selectedLens.value
+        val optimalSize = getOptimalPreviewSize(resolvePreviewStreamCameraId(activeLens), newRatio, activeLens?.lensType)
         _previewBufferSize.value = optimalSize
         val cameraW = max(optimalSize.width, optimalSize.height)
         val cameraH = min(optimalSize.width, optimalSize.height)
-        syncPreviewBufferSizes(cameraW, cameraH)
+        syncPreviewBufferSizes(cameraW, cameraH, activeLens)
 
 
 
@@ -3709,13 +3798,13 @@ class Camera2Engine(private val context: Context) {
                     }
 
                     val targetRatio = getTargetAspectRatioForMode(currentMode)
-                    val optimalPreviewSize = getOptimalPreviewSize(lens.cameraId, targetRatio, lens.lensType)
+                    val optimalPreviewSize = getOptimalPreviewSize(resolvePreviewStreamCameraId(lens), targetRatio, lens.lensType)
 
                     _previewAspectRatio.value = targetRatio
                     _previewBufferSize.value = optimalPreviewSize
                     val cameraW = max(optimalPreviewSize.width, optimalPreviewSize.height)
                     val cameraH = min(optimalPreviewSize.width, optimalPreviewSize.height)
-                    syncPreviewBufferSizes(cameraW, cameraH)
+                    syncPreviewBufferSizes(cameraW, cameraH, lens)
 
                     // Safely close previous session before reconfiguring
                     try {
@@ -3821,7 +3910,8 @@ class Camera2Engine(private val context: Context) {
             viewfinderHeight = height
         }
         val targetRatio = getTargetAspectRatioForMode(currentMode)
-        val selectedCamId = _selectedLens.value?.cameraId
+        val activeLens = _selectedLens.value
+        val selectedCamId = resolvePreviewStreamCameraId(activeLens)
         val isVideoOrCinema = (currentMode == CameraMode.VIDEO || currentMode == CameraMode.CINEMA)
         val currentBuf = _previewBufferSize.value
         val isBufValidForLens = !isVideoOrCinema && currentBuf != null && isSizeSupportedForLens(selectedCamId, currentBuf) && run {
@@ -3833,7 +3923,7 @@ class Camera2Engine(private val context: Context) {
         _previewAspectRatio.value = targetRatio
         val cameraW = max(optimalSize.width, optimalSize.height)
         val cameraH = min(optimalSize.width, optimalSize.height)
-        syncPreviewBufferSizes(cameraW, cameraH)
+        syncPreviewBufferSizes(cameraW, cameraH, activeLens)
 
         var curSurf = previewSurface
         if (curSurf == null || !curSurf.isValid) {
@@ -3855,19 +3945,20 @@ class Camera2Engine(private val context: Context) {
         }
         if (texture != null) {
             val targetRatio = getTargetAspectRatioForMode(currentMode)
-            val selectedCamId = _selectedLens.value?.cameraId
+            val activeLens = _selectedLens.value
+            val selectedCamId = resolvePreviewStreamCameraId(activeLens)
             val isVideoOrCinema = (currentMode == CameraMode.VIDEO || currentMode == CameraMode.CINEMA)
             val currentBuf = _previewBufferSize.value
             val isBufValidForLens = !isVideoOrCinema && currentBuf != null && isSizeSupportedForLens(selectedCamId, currentBuf) && run {
                 val r = max(currentBuf.width, currentBuf.height).toFloat() / min(currentBuf.width, currentBuf.height).toFloat()
                 kotlin.math.abs(r - targetRatio) < 0.08f
             }
-            val optimalSize = if (isBufValidForLens && currentBuf != null) currentBuf else getOptimalPreviewSize(selectedCamId, targetRatio)
+            val optimalSize = if (isBufValidForLens && currentBuf != null) currentBuf else getOptimalPreviewSize(selectedCamId, targetRatio, activeLens?.lensType)
             _previewBufferSize.value = optimalSize
             _previewAspectRatio.value = targetRatio
             val cameraW = max(optimalSize.width, optimalSize.height)
             val cameraH = min(optimalSize.width, optimalSize.height)
-            syncPreviewBufferSizes(cameraW, cameraH)
+            syncPreviewBufferSizes(cameraW, cameraH, activeLens)
 
             if (previewSurface == null || !previewSurface!!.isValid) {
                 try { previewSurface?.release() } catch (ignored: Throwable) {}
@@ -3949,7 +4040,8 @@ class Camera2Engine(private val context: Context) {
 
             // Pick optimal preview size matching selected aspect ratio and viewfinderResolution level
             val targetRatio = getTargetAspectRatioForMode(currentMode)
-            val optimalPreviewSize = getOptimalPreviewSize(lens.cameraId, targetRatio, lens.lensType)
+            val previewStreamCameraId = resolvePreviewStreamCameraId(lens)
+            val optimalPreviewSize = getOptimalPreviewSize(previewStreamCameraId, targetRatio, lens.lensType)
 
             _previewAspectRatio.value = targetRatio
             val sensorOrient = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
@@ -3957,7 +4049,7 @@ class Camera2Engine(private val context: Context) {
             _previewBufferSize.value = optimalPreviewSize
             val cameraW = max(optimalPreviewSize.width, optimalPreviewSize.height)
             val cameraH = min(optimalPreviewSize.width, optimalPreviewSize.height)
-            syncPreviewBufferSizes(cameraW, cameraH)
+            syncPreviewBufferSizes(cameraW, cameraH, lens)
 
             if (previewSurface == null || !previewSurface!!.isValid) {
                 try {
@@ -4266,18 +4358,32 @@ class Camera2Engine(private val context: Context) {
         }
     }
 
-    private fun getEffectiveMainPreviewSurface(): Surface? {
+    private fun getEffectiveMainPreviewSurface(
+        forceLogicalStream: Boolean = false,
+        surfaceLens: LensInfo? = _selectedLens.value
+    ): Surface? {
+        val usePhysicalStream = !forceLogicalStream
+        val streamCameraId = if (forceLogicalStream) {
+            surfaceLens?.cameraId ?: cameraDevice?.id
+        } else {
+            resolvePreviewStreamCameraId(surfaceLens, usePhysicalStream = true)
+        }
+        configurePreviewSurfaceBufferSize(surfaceLens, streamCameraId)
+
         if (_isUsingUltraWideSurface.value && !activeLogicalMultiCamUltraWideConfigured) {
-            val uwSurf = getOrCreateUltraWidePreviewSurface(_selectedLens.value?.cameraId)
-            if (uwSurf != null && uwSurf.isValid) {
-                return uwSurf
-            }
+            val uwSurf = getOrCreateUltraWidePreviewSurface(
+                cameraId = surfaceLens?.cameraId,
+                usePhysicalStream = usePhysicalStream
+            )
+            if (uwSurf != null && uwSurf.isValid) return uwSurf
         }
-        val surf = previewSurface ?: getOrCreateMainPreviewSurface(_selectedLens.value?.cameraId)
-        if (surf != null && surf.isValid) {
-            return surf
-        }
-        return null
+
+        val surf = previewSurface ?: getOrCreateMainPreviewSurface(
+            cameraId = surfaceLens?.cameraId,
+            surfaceLens = surfaceLens,
+            usePhysicalStream = usePhysicalStream
+        )
+        return surf?.takeIf { it.isValid }
     }
 
     private fun createCameraCaptureSession(forceLogicalStream: Boolean = false) {
@@ -4286,7 +4392,10 @@ class Camera2Engine(private val context: Context) {
             return
         }
         val activeLens = _selectedLens.value
-        val previewSurf = getEffectiveMainPreviewSurface() ?: run {
+        val previewSurf = getEffectiveMainPreviewSurface(
+            forceLogicalStream = forceLogicalStream,
+            surfaceLens = activeLens
+        ) ?: run {
             completeLensSwitch()
             return
         }
@@ -4317,6 +4426,9 @@ class Camera2Engine(private val context: Context) {
                         (activeLens != null && canUseLogicalZoomForLens(camera.id, activeLens, currentZoom))
                 val targetPhysId = if (useLogicalZoom) null else activeLens?.physicalCameraId
                 activeSessionPhysicalCameraId = targetPhysId
+                // Recording may deliberately use a logical zoom stream. Reapply the matching
+                // buffer size after that decision and immediately before session configuration.
+                configurePreviewSurfaceBufferSize(activeLens, targetPhysId ?: camera.id)
 
                 val template = CameraDevice.TEMPLATE_RECORD
                 val recBuilder = camera.createCaptureRequest(template).apply {
@@ -4403,18 +4515,36 @@ class Camera2Engine(private val context: Context) {
                 val physIds = chars?.physicalCameraIds ?: emptySet()
                 val uwPhysId = ultraWideLens.physicalCameraId!!
                 if (physIds.contains(uwPhysId)) {
-                    val mainSurf = getOrCreateMainPreviewSurface(mainLens?.physicalCameraId ?: camera.id) ?: previewSurf
-                    val uwSurf = getOrCreateUltraWidePreviewSurface(uwPhysId)
+                    val dualMainLens = mainLens ?: return
+                    val mainPhysicalId = dualMainLens.physicalCameraId?.takeIf {
+                        dualMainLens.supportsPhysicalStream && physIds.contains(it) && it != camera.id
+                    }
+                    val isUwSelected = (activeLens?.lensType == LensType.ULTRAWIDE)
+                    configurePreviewSurfaceBufferSize(
+                        dualMainLens,
+                        mainPhysicalId ?: camera.id,
+                        publishAsActive = !isUwSelected
+                    )
+                    configurePreviewSurfaceBufferSize(
+                        ultraWideLens,
+                        uwPhysId,
+                        publishAsActive = isUwSelected
+                    )
+                    val mainSurf = getOrCreateMainPreviewSurface(
+                        cameraId = dualMainLens.cameraId,
+                        surfaceLens = dualMainLens,
+                        usePhysicalStream = mainPhysicalId != null
+                    ) ?: previewSurf
+                    val uwSurf = getOrCreateUltraWidePreviewSurface(ultraWideLens.cameraId)
                     if (uwSurf != null && uwSurf.isValid && uwSurf !== mainSurf) {
-                        val isUwSelected = (activeLens?.lensType == LensType.ULTRAWIDE)
-                        activeSessionPhysicalCameraId = if (isUwSelected) uwPhysId else mainLens?.physicalCameraId
+                        activeSessionPhysicalCameraId = if (isUwSelected) uwPhysId else mainPhysicalId
                         _isUsingUltraWideSurface.value = isUwSelected
                         _displayedPreviewSource.value = if (isUwSelected) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
 
                         val outputConfigs = mutableListOf<android.hardware.camera2.params.OutputConfiguration>()
                         val mainPreviewConfig = android.hardware.camera2.params.OutputConfiguration(mainSurf)
-                        if (mainLens?.physicalCameraId != null && mainLens.supportsPhysicalStream && physIds.contains(mainLens.physicalCameraId)) {
-                            mainPreviewConfig.setPhysicalCameraId(mainLens.physicalCameraId)
+                        if (mainPhysicalId != null) {
+                            mainPreviewConfig.setPhysicalCameraId(mainPhysicalId)
                         }
                         outputConfigs.add(mainPreviewConfig)
 
@@ -4592,6 +4722,7 @@ class Camera2Engine(private val context: Context) {
                         }
                     }
                 )
+                configurePreviewSurfaceBufferSize(activeLens, activeLens.physicalCameraId)
                 camera.createCaptureSession(sessionConfig)
                 return
             } catch (e: Exception) {
@@ -4705,10 +4836,12 @@ class Camera2Engine(private val context: Context) {
                         }
                     }
                 )
+                configurePreviewSurfaceBufferSize(activeLens, camera.id)
                 camera.createCaptureSession(sessionConfig)
                 return
             }
 
+            configurePreviewSurfaceBufferSize(activeLens, camera.id)
             camera.createCaptureSession(
                 surfaces,
                 object : CameraCaptureSession.StateCallback() {
