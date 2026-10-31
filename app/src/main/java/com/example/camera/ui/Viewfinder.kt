@@ -379,6 +379,7 @@ fun Viewfinder(
                                 val newW = right - left
                                 val newH = bottom - top
                                 if (newW > 0 && newH > 0 && (newW != (oldRight - oldLeft) || newH != (oldBottom - oldTop))) {
+                                    mainTransformPendingFirstFrame = true
                                     applyTransformToView.value(this, false, newW, newH)
                                 }
                             }
@@ -529,6 +530,7 @@ fun Viewfinder(
                                     val newW = right - left
                                     val newH = bottom - top
                                     if (newW > 0 && newH > 0 && (newW != (oldRight - oldLeft) || newH != (oldBottom - oldTop))) {
+                                        ultraWideTransformPendingFirstFrame = true
                                         applyTransformToView.value(this, true, newW, newH)
                                     }
                                 }
