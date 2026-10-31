@@ -87,6 +87,8 @@ class DualCameraRecordingRelay(
     @Volatile
     private var recordingHandoffFrameCount: Int = 0
     @Volatile
+    private var recordingHandoffTargetFrameReceived: Boolean = false
+    @Volatile
     private var hasMainRecordingFrame: Boolean = false
     @Volatile
     private var hasUltraWideRecordingFrame: Boolean = false
@@ -356,6 +358,7 @@ class DualCameraRecordingRelay(
         recordingHandoffFromSource = fromSource
         recordingHandoffTargetSource = targetSource
         recordingHandoffFrameCount = 0
+        recordingHandoffTargetFrameReceived = false
         Log.i(TAG, "[RECORDING_RELAY] Started encoded frame handoff: $fromSource -> $targetSource")
     }
 
@@ -670,10 +673,16 @@ class DualCameraRecordingRelay(
         val handoffFrom = recordingHandoffFromSource
         val handoffTarget = recordingHandoffTargetSource
         val isHandoffActive = handoffFrom != null && handoffTarget != null && activeSource == handoffTarget
+        val isWaitingForTargetFrame = isHandoffActive &&
+            source == handoffFrom && !recordingHandoffTargetFrameReceived
         if (isHandoffActive) {
-            // Only target-camera buffers advance the encoded crossfade. Outgoing buffers
-            // continue updating the texture but never generate duplicate encoder frames.
-            if (source != handoffTarget) return
+            if (source == handoffTarget) {
+                recordingHandoffTargetFrameReceived = true
+            } else if (!isWaitingForTargetFrame) {
+                // Once the target has produced a frame, only its buffers drive encoded
+                // timestamps; late outgoing callbacks must not reverse the blend.
+                return
+            }
         } else if (activeSource != source) {
             return
         }
@@ -681,7 +690,9 @@ class DualCameraRecordingRelay(
         if (!encoderTargetSurface.isValid) return
 
         try {
-            val frameCount = if (isHandoffActive) {
+            val bothSourcesReady = hasMainRecordingFrame && hasUltraWideRecordingFrame
+            val isIncomingHandoffFrame = isHandoffActive && source == handoffTarget
+            val frameCount = if (isIncomingHandoffFrame && bothSourcesReady) {
                 (recordingHandoffFrameCount + 1).coerceAtMost(
                     ZoomTransitionController.FRAME_HANDOFF_WARMUP_FRAMES +
                         ZoomTransitionController.FRAME_HANDOFF_REQUIRED_FRAMES
@@ -689,11 +700,12 @@ class DualCameraRecordingRelay(
             } else {
                 0
             }
-
-            val bothSourcesReady = hasMainRecordingFrame && hasUltraWideRecordingFrame
-            val compositeFrom = if (isHandoffActive && bothSourcesReady) handoffFrom!! else source
-            val compositeTo = if (isHandoffActive && bothSourcesReady) handoffTarget!! else source
-            val blendProgress = if (isHandoffActive && bothSourcesReady) {
+            // Until an actual target buffer exists, keep encoding the outgoing camera
+            // so the final file has no frozen-frame gap at the physical lens switch.
+            val shouldBlend = isIncomingHandoffFrame && bothSourcesReady
+            val compositeFrom = if (shouldBlend) handoffFrom!! else source
+            val compositeTo = if (shouldBlend) handoffTarget!! else source
+            val blendProgress = if (shouldBlend) {
                 ZoomTransitionController.calculateRecordingFrameHandoffProgress(frameCount)
             } else {
                 0f
@@ -771,13 +783,14 @@ class DualCameraRecordingRelay(
                 )
             }
 
-            if (isHandoffActive && frameCount >=
+            if (isIncomingHandoffFrame && frameCount >=
                 ZoomTransitionController.FRAME_HANDOFF_WARMUP_FRAMES +
                     ZoomTransitionController.FRAME_HANDOFF_REQUIRED_FRAMES
             ) {
                 recordingHandoffFromSource = null
                 recordingHandoffTargetSource = null
                 recordingHandoffFrameCount = 0
+                recordingHandoffTargetFrameReceived = false
                 Log.i(TAG, "[RECORDING_RELAY] Encoded 16-frame camera handoff completed")
             }
         } catch (t: Throwable) {
