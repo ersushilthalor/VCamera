@@ -210,7 +210,6 @@ class CinemaSoftwareRecordingEngine(private val context: Context) {
     private val stMatrix = FloatArray(16)
     private val mainInputStMatrix = FloatArray(16)
     private val ultraWideInputStMatrix = FloatArray(16)
-    private val finalTexMatrix = FloatArray(16)
     private val finalTexMatrix2 = FloatArray(16)
     private val glColorMat = FloatArray(16)
     private val glColorOffset = FloatArray(4)
