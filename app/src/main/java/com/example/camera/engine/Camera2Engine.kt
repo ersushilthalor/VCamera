@@ -4371,7 +4371,9 @@ class Camera2Engine(private val context: Context) {
         }
         configurePreviewSurfaceBufferSize(surfaceLens, streamCameraId)
 
-        if (_isUsingUltraWideSurface.value && !activeLogicalMultiCamUltraWideConfigured) {
+        if (_isUsingUltraWideSurface.value &&
+            (!activeLogicalMultiCamUltraWideConfigured || forceLogicalStream)
+        ) {
             val uwSurf = getOrCreateUltraWidePreviewSurface(
                 cameraId = surfaceLens?.cameraId,
                 usePhysicalStream = usePhysicalStream
