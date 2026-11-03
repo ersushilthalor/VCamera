@@ -46,6 +46,15 @@ class ZoomTransitionTimingTest {
     }
 
     @Test
+    fun recordingHandoffUsesTwoWarmupAndSixteenBlendFrames() {
+        assertEquals(0f, ZoomTransitionController.calculateRecordingFrameHandoffProgress(0), 0.0001f)
+        assertEquals(0f, ZoomTransitionController.calculateRecordingFrameHandoffProgress(2), 0.0001f)
+        assertEquals(0.5f, ZoomTransitionController.calculateRecordingFrameHandoffProgress(10), 0.0001f)
+        assertEquals(1f, ZoomTransitionController.calculateRecordingFrameHandoffProgress(18), 0.0001f)
+        assertEquals(1f, ZoomTransitionController.calculateRecordingFrameHandoffProgress(24), 0.0001f)
+    }
+
+    @Test
     fun zoomUpdatesUseFixed16MillisecondCadence() {
         assertEquals(16L, ZoomTransitionController.ZOOM_UPDATE_INTERVAL_MS)
     }
