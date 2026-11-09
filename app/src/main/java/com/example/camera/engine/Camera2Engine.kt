@@ -1667,7 +1667,9 @@ class Camera2Engine(private val context: Context) {
     var currentVideoAdjustments: com.example.camera.model.VideoAdjustments = com.example.camera.model.VideoAdjustments()
         set(value) {
             field = value
-            dualCameraRecordingRelay?.updateVideoAdjustments(value)
+            dualCameraRecordingRelay?.updateVideoAdjustments(
+                if (isSoftwareCinemaRecording) value else com.example.camera.model.VideoAdjustments()
+            )
             cinemaSoftwareRecorder.updateVideoAdjustments(value)
         }
 
@@ -1704,7 +1706,6 @@ class Camera2Engine(private val context: Context) {
     var saveSelfieAsPreviewed: Boolean = true
     var viewfinderResolution: ViewfinderResolution = ViewfinderResolution.NORMAL
     private val cinemaSoftwareRecorder by lazy { CinemaSoftwareRecordingEngine(context) }
-    private val normalVideoRecorder by lazy { NormalVideoRecordingEngine(context) }
     private var isSoftwareCinemaRecording: Boolean = false
     private var recordingCinemaConfig: CinemaConfig? = null
 
@@ -6456,10 +6457,6 @@ class Camera2Engine(private val context: Context) {
         } catch (ignored: Throwable) {}
 
         try {
-            normalVideoRecorder.stopRecording()
-        } catch (ignored: Throwable) {}
-
-        try {
             mediaRecorder?.reset()
             mediaRecorder?.release()
         } catch (ignored: Throwable) {}
@@ -6728,6 +6725,15 @@ class Camera2Engine(private val context: Context) {
             }
 
             val isFront = lens.facing == CameraCharacteristics.LENS_FACING_FRONT
+            val backLensesForRec = _availableLenses.value.filter { it.facing == CameraCharacteristics.LENS_FACING_BACK }
+            val uwLensForRec = backLensesForRec.firstOrNull { it.lensType == LensType.ULTRAWIDE && it.isPhysical }
+                ?: backLensesForRec.firstOrNull { it.lensType == LensType.ULTRAWIDE }
+            val mainLensForRec = backLensesForRec.firstOrNull { it.isPrimaryMain }
+                ?: backLensesForRec.firstOrNull { it.lensType == LensType.WIDE && !it.isZoomPreset }
+                ?: backLensesForRec.firstOrNull { it.lensType == LensType.WIDE }
+            val isKeepUwReadyBack = _isKeepUltraWideReady.value &&
+                lens.facing == CameraCharacteristics.LENS_FACING_BACK &&
+                uwLensForRec != null && mainLensForRec != null
             val encoderRotation = if (isPortraitRecording) {
                 if (currentRot == 180) 180 else 0
             } else {
@@ -6844,54 +6850,63 @@ class Camera2Engine(private val context: Context) {
                     encoderRotation = encoderRotation
                 )
             } else {
-                val validatedConfig = DeviceCompatibilityManager.getValidatedVideoConfig(
-                    requestedWidth = finalRecordWidth,
-                    requestedHeight = finalRecordHeight,
-                    requestedFps = targetFps,
-                    requestedBitrate = bitrate,
-                    preferHevc = (cinemaCodec == CinemaCodec.H265),
-                    prefer10Bit = is10BitRequested
-                )
-                val targetCodec = if (validatedConfig.encoder == MediaRecorder.VideoEncoder.HEVC) CinemaCodec.H265 else CinemaCodec.H264
-                val activeOrientHint = if (isPortraitRecording) {
-                    if (currentRot == 180) 180 else 0
-                } else {
-                    encoderRotation
-                }
-
                 val sensorOrient = try {
                     chars?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: (if (isFront) 270 else 90)
                 } catch (_: Exception) {
                     if (isFront) 270 else 90
                 }
+                val usesInstantLensRelay = isKeepUwReadyBack
+                val recorderWidth = if (usesInstantLensRelay) finalRecordWidth else maxOf(videoRes.width, videoRes.height)
+                val recorderHeight = if (usesInstantLensRelay) finalRecordHeight else minOf(videoRes.width, videoRes.height)
+                val validatedConfig = DeviceCompatibilityManager.getValidatedVideoConfig(
+                    requestedWidth = recorderWidth,
+                    requestedHeight = recorderHeight,
+                    requestedFps = targetFps,
+                    requestedBitrate = bitrate,
+                    preferHevc = false,
+                    prefer10Bit = false
+                )
+                val activeOrientHint = if (usesInstantLensRelay) {
+                    if (isPortraitRecording) { if (currentRot == 180) 180 else 0 } else encoderRotation
+                } else {
+                    calculateOrientation(sensorOrient, isFront, currentRot)
+                }
 
+                // Standard Android recording path: Camera2 ISP output -> MediaRecorder Surface.
+                // When instant dual-lens switching is enabled, the pass-through relay below
+                // keeps both camera streams attached to one uninterrupted MediaRecorder input.
+                @Suppress("DEPRECATION")
+                val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(context) else MediaRecorder()
                 recorderSurface = try {
-                    normalVideoRecorder.startRecording(
-                        destFile = tempFile,
-                        width = finalRecordWidth,
-                        height = finalRecordHeight,
-                        fps = validatedConfig.fps,
-                        bitrate = validatedConfig.bitrate,
-                        codec = targetCodec,
-                        isAudioEnabled = isAudioEnabled,
-                        orientationHint = activeOrientHint,
-                        isFront = isFront,
-                        sensorOrientation = sensorOrient,
-                        deviceRotation = currentRot
-                    )
+                    if (isAudioEnabled) recorder.setAudioSource(MediaRecorder.AudioSource.CAMCORDER)
+                    recorder.setVideoSource(MediaRecorder.VideoSource.SURFACE)
+                    recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                    recorder.setVideoSize(validatedConfig.width, validatedConfig.height)
+                    recorder.setVideoFrameRate(validatedConfig.fps)
+                    recorder.setVideoEncodingBitRate(validatedConfig.bitrate)
+                    recorder.setVideoEncoder(validatedConfig.encoder)
+                    if (isAudioEnabled) recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                    recorder.setOutputFile(tempFile.absolutePath)
+                    recorder.setOrientationHint(activeOrientHint)
+                    recorder.prepare()
+                    mediaRecorder = recorder
+                    recorder.surface
                 } catch (t: Throwable) {
-                    Log.e(TAG, "Failed starting normal video recording: ${t.message}", t)
+                    try { recorder.reset() } catch (_: Throwable) {}
+                    try { recorder.release() } catch (_: Throwable) {}
+                    mediaRecorder = null
+                    Log.e(TAG, "Failed preparing stock MediaRecorder video pipeline", t)
                     isStartingRecording.set(false)
                     _isRecordingVideo.value = false
                     try { tempFile.delete() } catch (_: Exception) {}
-                    onError("Failed starting video recording: ${t.localizedMessage ?: t.message}")
+                    onError("Failed preparing video recorder: ${t.localizedMessage ?: t.message}")
                     return
                 }
 
                 preparedVideoGeometry = PreparedVideoGeometry(
-                    width = finalRecordWidth,
-                    height = finalRecordHeight,
-                    fps = targetFps,
+                    width = recorderWidth,
+                    height = recorderHeight,
+                    fps = validatedConfig.fps,
                     orientationHint = activeOrientHint,
                     encoderRotation = encoderRotation
                 )
@@ -6932,12 +6947,6 @@ class Camera2Engine(private val context: Context) {
                 } catch (_: Throwable) {}
                 dualCameraRecordingRelay = null
 
-                val backLensesForRec = _availableLenses.value.filter { it.facing == CameraCharacteristics.LENS_FACING_BACK }
-                val uwLensForRec = backLensesForRec.firstOrNull { it.lensType == LensType.ULTRAWIDE && it.isPhysical }
-                    ?: backLensesForRec.firstOrNull { it.lensType == LensType.ULTRAWIDE }
-                val mainLensForRec = backLensesForRec.firstOrNull { it.isPrimaryMain }
-                    ?: backLensesForRec.firstOrNull { it.lensType == LensType.WIDE && !it.isZoomPreset }
-                    ?: backLensesForRec.firstOrNull { it.lensType == LensType.WIDE }
 
                 val initialStreamSource = if (lens.lensType == LensType.ULTRAWIDE) {
                     PreviewStreamSource.ULTRAWIDE
@@ -6951,54 +6960,54 @@ class Camera2Engine(private val context: Context) {
                     if (isFront) 270 else 90
                 }
 
-                val isKeepUwReadyBack = _isKeepUltraWideReady.value &&
-                    lens.facing == CameraCharacteristics.LENS_FACING_BACK &&
-                    uwLensForRec != null &&
-                    mainLensForRec != null
 
-                // Initialize DualCameraRecordingRelay as the live GPU processing surface:
-                // Camera2 Surface -> GPU/EGL relay -> VideoAdjustments shader -> split to:
-                // 1. Preview surface (viewfinder)
-                // 2. MediaRecorder input surface (encoder)
-                val relay = DualCameraRecordingRelay(
-                    encoderTargetSurface = recorderSurface,
-                    bufferWidth = finalRecordWidth,
-                    bufferHeight = finalRecordHeight,
-                    fps = targetFps,
-                    is10Bit = is10BitSession,
-                    initialSource = initialStreamSource,
-                    cinemaRecorder = if (isSoftwareCinema) cinemaSoftwareRecorder else null,
-                    sensorOrientation = sensorOrient,
-                    deviceRotation = currentRot,
-                    isFront = isFront,
-                    previewTargetSurface = null,
-                    previewWidth = viewfinderWidth,
-                    previewHeight = viewfinderHeight,
-                    initialAdjustments = currentVideoAdjustments
-                )
-                if (relay.isRelayReady) {
-                    if (isKeepUwReadyBack && uwLensForRec != null && mainLensForRec != null) {
-                        val bestUwRes = resolveEffectiveVideoResolutionForLens(uwLensForRec.cameraId, videoRes)
-                        relay.updateInputBufferSize(isUltraWide = true, bestUwRes.width, bestUwRes.height)
-
-                        val bestMainRes = resolveEffectiveVideoResolutionForLens(mainLensForRec.cameraId, videoRes)
-                        relay.updateInputBufferSize(isUltraWide = false, bestMainRes.width, bestMainRes.height)
+                _isGpuRelayPreviewActive.value = false
+                if (isSoftwareCinema || isKeepUwReadyBack) {
+                    // Initialize DualCameraRecordingRelay as the live GPU processing surface:
+                    // Camera2 Surface -> GPU/EGL relay -> VideoAdjustments shader -> split to:
+                    // 1. Preview surface (viewfinder)
+                    // 2. MediaRecorder input surface (encoder)
+                    val relay = DualCameraRecordingRelay(
+                        encoderTargetSurface = recorderSurface,
+                        bufferWidth = finalRecordWidth,
+                        bufferHeight = finalRecordHeight,
+                        fps = targetFps,
+                        is10Bit = is10BitSession,
+                        initialSource = initialStreamSource,
+                        cinemaRecorder = if (isSoftwareCinema) cinemaSoftwareRecorder else null,
+                        sensorOrientation = sensorOrient,
+                        deviceRotation = currentRot,
+                        isFront = isFront,
+                        previewTargetSurface = null,
+                        previewWidth = viewfinderWidth,
+                        previewHeight = viewfinderHeight,
+                        initialAdjustments = if (isSoftwareCinema) currentVideoAdjustments else com.example.camera.model.VideoAdjustments()
+                    )
+                    if (relay.isRelayReady) {
+                        if (isKeepUwReadyBack && uwLensForRec != null && mainLensForRec != null) {
+                            val bestUwRes = resolveEffectiveVideoResolutionForLens(uwLensForRec.cameraId, videoRes)
+                            relay.updateInputBufferSize(isUltraWide = true, bestUwRes.width, bestUwRes.height)
+    
+                            val bestMainRes = resolveEffectiveVideoResolutionForLens(mainLensForRec.cameraId, videoRes)
+                            relay.updateInputBufferSize(isUltraWide = false, bestMainRes.width, bestMainRes.height)
+                        } else {
+                            val activeStreamRes = resolveEffectiveVideoResolutionForLens(lens.cameraId, videoRes)
+                            relay.updateInputBufferSize(
+                                isUltraWide = (lens.lensType == LensType.ULTRAWIDE),
+                                width = activeStreamRes.width,
+                                height = activeStreamRes.height
+                            )
+                        }
+    
+                        dualCameraRecordingRelay = relay
+                        _isGpuRelayPreviewActive.value = relay.isRelayPreviewActive
                     } else {
-                        val activeStreamRes = resolveEffectiveVideoResolutionForLens(lens.cameraId, videoRes)
-                        relay.updateInputBufferSize(
-                            isUltraWide = (lens.lensType == LensType.ULTRAWIDE),
-                            width = activeStreamRes.width,
-                            height = activeStreamRes.height
-                        )
+                        relay.release()
+                        _isGpuRelayPreviewActive.value = false
                     }
-
-                    dualCameraRecordingRelay = relay
-                    _isGpuRelayPreviewActive.value = relay.isRelayPreviewActive
-                } else {
-                    relay.release()
-                    _isGpuRelayPreviewActive.value = false
+    
+    
                 }
-
                 val activeLensRecorderSurface = dualCameraRecordingRelay?.getRecorderSurfaceForLens(lens) ?: recorderSurface
                 activeRecordingSurface = activeLensRecorderSurface
 
@@ -7487,7 +7496,11 @@ class Camera2Engine(private val context: Context) {
         if (isSoftwareCinemaRecording) {
             cinemaSoftwareRecorder.pause()
         } else {
-            normalVideoRecorder.pause()
+            try {
+                mediaRecorder?.pause()
+            } catch (e: Exception) {
+                Log.w(TAG, "MediaRecorder pause failed", e)
+            }
         }
     }
 
@@ -7503,7 +7516,11 @@ class Camera2Engine(private val context: Context) {
         if (isSoftwareCinemaRecording) {
             cinemaSoftwareRecorder.resume()
         } else {
-            normalVideoRecorder.resume()
+            try {
+                mediaRecorder?.resume()
+            } catch (e: Exception) {
+                Log.w(TAG, "MediaRecorder resume failed", e)
+            }
         }
     }
 
@@ -7620,14 +7637,8 @@ class Camera2Engine(private val context: Context) {
                         }
                         try { activePfd?.fileDescriptor?.sync() } catch (_: Throwable) {}
                         try { activePfd?.close() } catch (_: Throwable) {}
-                        val f = try {
-                            normalVideoRecorder.stopRecording()
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Error stopping normal video recorder", e)
-                            null
-                        }
                         restorePreviewSessionImmediate()
-                        f ?: tempFile
+                        tempFile
                     }
                 }
 
