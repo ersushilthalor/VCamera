@@ -250,7 +250,8 @@ fun QuickOptionsFloatingPanel(
                                         eisPlusStatus.startsWith("Unavailable") -> "NO EIS"
                                         else -> "READY"
                                     },
-                                    isActive = isEisPlusEnabled,
+                                    isActive = isEisPlusEnabled &&
+                                        (eisPlusStatus.isEmpty() || eisPlusStatus.startsWith("Active")),
                                     activeColor = accentColor,
                                     onClick = onEisPlusToggle,
                                     testTag = "panel_eis_plus_button",
