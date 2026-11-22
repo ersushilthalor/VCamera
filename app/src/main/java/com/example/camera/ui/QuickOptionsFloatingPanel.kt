@@ -57,6 +57,7 @@ fun QuickOptionsFloatingPanel(
     videoFps: Int,
     isAudioEnabled: Boolean,
     hasActiveVideoAdjustments: Boolean,
+    isSpecialVideoEnabled: Boolean = false,
     // Cinema properties
     cinemaConfig: CinemaConfig = CinemaConfig(),
     isEvOpen: Boolean = false,
@@ -71,6 +72,7 @@ fun QuickOptionsFloatingPanel(
         onVideoSettingsClick: () -> Unit,
     onAudioToggle: () -> Unit,
     onVideoAdjustmentsClick: () -> Unit,
+    onSpecialVideoToggle: () -> Unit = {},
     onCinemaResolutionClick: () -> Unit = {},
     onCinemaAspectRatioClick: () -> Unit = {},
     onCinemaSettingsClick: () -> Unit = {},
@@ -218,6 +220,18 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onGridClick,
                                     testTag = "panel_grid_button",
+                                    compact = isCompactVideoPanel,
+                                    modifier = Modifier.weight(1f)
+                                )
+
+                                QuickOptionCircleButton(
+                                    icon = Icons.Outlined.Videocam,
+                                    label = "Special Video",
+                                    statusText = if (isSpecialVideoEnabled) "ON" else "OFF",
+                                    isActive = isSpecialVideoEnabled,
+                                    activeColor = accentColor,
+                                    onClick = onSpecialVideoToggle,
+                                    testTag = "panel_special_video_button",
                                     compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )

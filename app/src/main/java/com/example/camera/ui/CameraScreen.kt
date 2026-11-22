@@ -394,6 +394,8 @@ fun CameraScreen(
                     viewModel.engine.onViewfinderSurfaceSizeChanged(texture, width, height)
                 },
                 isUsingUltraWideSurface = isUsingUltraWideSurface,
+                isSpecialVideoPreviewEnabled = cameraMode == CameraMode.VIDEO &&
+                    instantSwitchState.isShowUltraWidePreview && isUsingRearMainLens,
                 previewOverlapState = previewOverlapState,
                 onUltraWideSurfaceTextureAvailable = { texture, width, height ->
                     viewModel.engine.setUltraWidePreviewSurfaceTexture(texture, width, height)
@@ -490,8 +492,10 @@ fun CameraScreen(
 
         // 1g. Motorola Instant Camera Switching Picture-in-Picture Little Preview
         LittlePreviewOverlay(
-            showUltraWidePreview = instantSwitchState.isShowUltraWidePreview && isUsingRearMainLens,
-            showFrontPreview = instantSwitchState.isShowFrontCameraPreview && isUsingRearLens,
+            showUltraWidePreview = instantSwitchState.isShowUltraWidePreview &&
+                isUsingRearMainLens && cameraMode != CameraMode.VIDEO,
+            showFrontPreview = instantSwitchState.isShowFrontCameraPreview && isUsingRearLens &&
+                !(cameraMode == CameraMode.VIDEO && instantSwitchState.isShowUltraWidePreview && isUsingRearMainLens),
             ultraWideStatus = instantSwitchState.ultraWideStatus,
             frontStatus = instantSwitchState.frontStatus,
             onUltraWideSurfaceTextureAvailable = { texture ->
@@ -595,6 +599,7 @@ fun CameraScreen(
             videoFps = videoFps,
             isAudioEnabled = isAudioEnabled,
             hasActiveVideoAdjustments = !videoAdjustments.isDefault,
+            isSpecialVideoEnabled = instantSwitchState.isShowUltraWidePreview,
             cinemaConfig = cinemaConfig,
             isEvOpen = false,
             exposureCompensation = exposureCompensation,
@@ -611,6 +616,9 @@ fun CameraScreen(
             onVideoAdjustmentsClick = {
                 isQuickOptionsOpen = false
                 viewModel.setVideoAdjustmentsOpen(true)
+            },
+            onSpecialVideoToggle = {
+                viewModel.setShowUltraWidePreview(!instantSwitchState.isShowUltraWidePreview)
             },
             onCinemaResolutionClick = {
                 isQuickOptionsOpen = false

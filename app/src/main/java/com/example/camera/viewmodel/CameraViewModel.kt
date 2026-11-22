@@ -510,8 +510,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setShowUltraWidePreview(enabled: Boolean) {
-        _instantSwitchState.value = _instantSwitchState.value.copy(isShowUltraWidePreview = enabled)
-        showToast(if (enabled) "Ultra-Wide Little Preview: ON" else "Ultra-Wide Little Preview: OFF")
+        preferences.isShowUltraWidePreview = enabled
+        _instantSwitchState.update { it.copy(isShowUltraWidePreview = enabled) }
+        showToast(if (enabled) "Special Video: ON" else "Special Video: OFF")
     }
 
     fun setKeepFrontCameraReady(enabled: Boolean) {
