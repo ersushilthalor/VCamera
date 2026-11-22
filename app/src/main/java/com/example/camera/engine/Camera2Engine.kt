@@ -6428,7 +6428,7 @@ class Camera2Engine(private val context: Context) {
                 override fun onCaptureFailed(
                     session: CameraCaptureSession,
                     request: CaptureRequest,
-                    failure: CameraCaptureSession.CaptureFailure
+                    failure: CaptureFailure
                 ) {
                     Log.e(TAG, "Still photo capture failed: reason=${failure.reason}")
                     finishCapture(null)
