@@ -376,7 +376,31 @@ class Camera2Engine(private val context: Context) {
             }
             // CameraCaptureSession keeps its original callback after active/standby pointer swaps.
             // Route timestamp metadata by the session's owning CameraDevice before UI-state checks.
-            submitVideoEisPlusCaptureResult(session, request, result)
+            val standbyBinding = submitVideoEisPlusCaptureResult(session, request, result)
+            // Once this prewarmed session becomes the active recording session its original
+            // standby callback remains installed. Keep the per-lens OIS policy working there too.
+            if (session === captureSession &&
+                standbyBinding?.pipeline?.shouldDisableOisForMissingTelemetry == true &&
+                !videoEisPlusOisDisabledForSession
+            ) {
+                videoEisPlusOisDisabledForSession = true
+                Log.w(TAG, "Photon EIS+ OIS decision: active standby camera has no usable optical telemetry; requesting OIS OFF")
+                try {
+                    synchronized(previewRequestLock) {
+                        previewRequestBuilder?.let { builder ->
+                            applyHardwareOisRequest(
+                                builder,
+                                oisAllowed = isOisAllowedForCurrentSession(),
+                                physicalCameraId = activeSessionPhysicalCameraId,
+                                vendorCameraIdOverride = cameraDevice?.id
+                            )
+                            session.setRepeatingRequest(builder.build(), this, backgroundHandler)
+                        }
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Could not update OIS for the switched EIS+ camera", t)
+                }
+            }
             if (session == ultraWideStandbyCaptureSession && shouldKeepUltraWideStreamReady() && isTextureValid) {
                 if (!isUltraWideStreaming.get()) {
                     isUltraWideStreaming.set(true)
@@ -1245,6 +1269,7 @@ class Camera2Engine(private val context: Context) {
 
                     override fun onClosed(session: CameraCaptureSession) {
                         if (ultraWideStandbyCaptureSession == session) {
+                            standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, relay) }
                             ultraWideStandbyCaptureSession = null
                             isUltraWideStreaming.set(false)
                             standbyConfiguredForRecording = false
@@ -3320,8 +3345,12 @@ class Camera2Engine(private val context: Context) {
             _selectedLens.value = targetLens
             activeSessionLens = targetLens
             val useUw = (targetLens.lensType == LensType.ULTRAWIDE)
+            val targetSource = if (useUw) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
+            if (_isRecordingVideo.value) {
+                setActiveRecordingSource(targetSource, targetLens.cameraId)
+            }
             _isUsingUltraWideSurface.value = useUw
-            _displayedPreviewSource.value = if (useUw) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
+            _displayedPreviewSource.value = targetSource
 
             startCamera()
         }
