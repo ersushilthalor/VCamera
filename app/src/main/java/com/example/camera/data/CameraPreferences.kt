@@ -344,8 +344,8 @@ class CameraPreferences(context: Context) {
         set(value) = prefs.edit().putFloat(KEY_VIDEO_EIS_PLUS_STRENGTH, value.coerceIn(0f, 1f)).apply()
 
     var videoEisPlusLookahead: Int
-        get() = prefs.getInt(KEY_VIDEO_EIS_PLUS_LOOKAHEAD, 7).coerceIn(0, 10)
-        set(value) = prefs.edit().putInt(KEY_VIDEO_EIS_PLUS_LOOKAHEAD, value.coerceIn(0, 10)).apply()
+        get() = prefs.getInt(KEY_VIDEO_EIS_PLUS_LOOKAHEAD, 7).coerceIn(3, 10)
+        set(value) = prefs.edit().putInt(KEY_VIDEO_EIS_PLUS_LOOKAHEAD, value.coerceIn(3, 10)).apply()
 
     var isAudioEnabled: Boolean
         get() = prefs.getBoolean(KEY_AUDIO_ENABLED, true)
@@ -782,11 +782,11 @@ class CameraPreferences(context: Context) {
         }
 
     var isOisEnabled: Boolean
-        get() = true
-        set(@Suppress("UNUSED_PARAMETER") value) {
+        get() = prefs.getBoolean("pref_ois_enabled", true)
+        set(value) {
             prefs.edit()
-                .putBoolean("pref_ois_enabled", true)
-                .putBoolean("pref_ois_preferred", true)
+                .putBoolean("pref_ois_enabled", value)
+                .putBoolean("pref_ois_preferred", value)
                 .apply()
         }
 
