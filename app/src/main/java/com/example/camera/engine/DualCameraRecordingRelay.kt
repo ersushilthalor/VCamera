@@ -152,6 +152,9 @@ class DualCameraRecordingRelay internal constructor(
     private var passthroughProgramId: Int = 0
     private var eisPlusRenderer: MgcEisYuvRenderer? = null
     private var eisPlusRenderFailureCount = 0L
+    // Coalesce camera-thread notifications so a slow GL thread receives one drain task,
+    // rather than an unbounded runnable per stabilized frame.
+    private val eisPlusRenderTaskScheduled = AtomicBoolean(false)
     private var eisPlusProgramId: Int = 0
     private var eisPlusPassthroughProgramId: Int = 0
     private var eisPlusVadJHandles: VideoAdjustmentsPipeline.VideoAdjustmentsShaderHandles? = null
@@ -246,19 +249,33 @@ class DualCameraRecordingRelay internal constructor(
 
     /** Schedule a timestamp-matched MGC frame on the relay's owning GL thread. */
     fun notifyEisPlusFrameAvailable() {
+        val pipeline = eisPlusPipeline ?: return
+        if (!pipeline.isRunning || isReleased.get()) return
         val handler = glHandler ?: run {
             EisPlusDiagnosticLog.event("RELAY", "GL_HANDLER_MISSING", "EIS+ frame callback has no GL handler", "ERROR")
             return
         }
-        if (!handler.post {
-                try {
-                    renderEisPlusFrames()
-                } catch (t: Throwable) {
-                    EisPlusDiagnosticLog.event("RELAY", "RENDER_EXCEPTION", "${t.javaClass.simpleName}: ${t.message}", "ERROR")
-                    Log.e(TAG, "MGC EIS+ relay render failed; keeping GL thread alive: ${t.message}", t)
+        // The GL task drains all currently available frames. Coalescing avoids queueing one
+        // redundant Runnable for every result when the camera callback outruns the GL thread.
+        if (!eisPlusRenderTaskScheduled.compareAndSet(false, true)) return
+        val accepted = handler.post {
+            try {
+                renderEisPlusFrames()
+            } catch (t: Throwable) {
+                EisPlusDiagnosticLog.event("RELAY", "RENDER_EXCEPTION", "${t.javaClass.simpleName}: ${t.message}", "ERROR")
+                Log.e(TAG, "MGC EIS+ relay render failed; keeping GL thread alive: ${t.message}", t)
+            } finally {
+                eisPlusRenderTaskScheduled.set(false)
+                // Close the race where a result arrives after the drain sees an empty queue
+                // but before this task releases its scheduled flag. A callback in that window
+                // may have been coalesced; pendingFrameCount makes sure it is drained now.
+                if (!isReleased.get() && pipeline.isRunning && pipeline.pendingFrameCount > 0) {
+                    notifyEisPlusFrameAvailable()
                 }
             }
-        ) {
+        }
+        if (!accepted) {
+            eisPlusRenderTaskScheduled.set(false)
             EisPlusDiagnosticLog.event("RELAY", "GL_POST_REJECTED", "GL thread stopped accepting EIS+ frame tasks", "ERROR")
             Log.w(TAG, "Unable to schedule timestamp-matched MGC EIS+ frame")
         }
