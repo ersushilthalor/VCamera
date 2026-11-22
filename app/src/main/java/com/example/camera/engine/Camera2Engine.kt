@@ -813,7 +813,12 @@ class Camera2Engine(private val context: Context) {
             } else {
                 null
             }
-            val targetStandbyRatio = calculateStandbyCropRatio(standbyLens, handoffZoom)
+            val calibratedStandbyRatio = calculateStandbyCropRatio(standbyLens, handoffZoom)
+            val targetStandbyRatio = CameraOpticalCalibration.resolveSpecialVideoStandbyCropRatio(
+                calibratedCropRatio = calibratedStandbyRatio,
+                standbyLensType = standbyLens.lensType,
+                isSpecialVideoRecordingActive = isSpecialVideoRecordingActive
+            )
             val zoomRange = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && chars != null) {
                 chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
             } else {

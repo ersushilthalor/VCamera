@@ -3,6 +3,8 @@ package com.example.camera.ui
 import android.widget.MediaController
 import android.widget.VideoView
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -46,6 +48,14 @@ import com.example.camera.gallery.SpecialVideoClip
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+internal const val SPECIAL_VIDEO_GALLERY_LENS_SWITCH_DURATION_MS = 3_000
+
+private class GalleryVideoPlayerState(
+    val uri: String,
+    var isPrepared: Boolean = false,
+    var wasActive: Boolean = false
+)
 
 @Composable
 fun SpecialVideoGalleryDialog(
@@ -189,7 +199,6 @@ private fun SpecialVideoPlayer(
     var isUltraWide by rememberSaveable(clip.id) { mutableStateOf(false) }
     var playbackPosition by rememberSaveable(clip.id) { mutableStateOf(0) }
     var shouldResumePlayback by rememberSaveable(clip.id) { mutableStateOf(true) }
-    var playerPrepared by remember(clip.id) { mutableStateOf(false) }
     val videoViewState = remember(clip.id) { mutableStateOf<VideoView?>(null) }
     val currentUri = if (isUltraWide) clip.ultraWideUri else clip.mainUri
 
@@ -198,11 +207,13 @@ private fun SpecialVideoPlayer(
     val selectLens: (Boolean) -> Unit = { useUltraWide ->
         if (isUltraWide != useUltraWide) {
             videoViewState.value?.let { videoView ->
-                if (playerPrepared) {
+                val viewState = videoView.tag as? GalleryVideoPlayerState
+                if (viewState?.isPrepared == true) {
                     playbackPosition = videoView.currentPosition.coerceAtLeast(0)
                     shouldResumePlayback = videoView.isPlaying
                     videoView.pause()
                 }
+                viewState?.wasActive = false
             }
             isUltraWide = useUltraWide
         }
@@ -235,63 +246,101 @@ private fun SpecialVideoPlayer(
             }
         }
 
-        AndroidView(
+        Crossfade(
+            targetState = isUltraWide,
+            animationSpec = tween(durationMillis = SPECIAL_VIDEO_GALLERY_LENS_SWITCH_DURATION_MS),
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
-                .padding(horizontal = 8.dp),
-            factory = { viewContext ->
-                VideoView(viewContext).apply {
-                    videoViewState.value = this
-                    val controller = MediaController(viewContext)
-                    controller.setAnchorView(this)
-                    setMediaController(controller)
-                    setOnPreparedListener { player ->
-                        player.isLooping = false
-                        playerPrepared = true
-                        playbackPosition = 0
-                        shouldResumePlayback = true
-                        start()
-                    }
-                    setVideoURI(currentUri)
-                    tag = currentUri.toString()
-                }
-            },
-            update = { videoView ->
-                videoViewState.value = videoView
-                val newKey = currentUri.toString()
-                if (videoView.tag != newKey) {
-                    val restorePosition = playbackPosition
-                    val resumeAfterSwitch = shouldResumePlayback
-                    playerPrepared = false
+                .weight(1f),
+            label = "special-video-gallery-lens-switch"
+        ) { targetIsUltraWide ->
+            val targetUri = if (targetIsUltraWide) clip.ultraWideUri else clip.mainUri
 
-                    videoView.setOnPreparedListener { player ->
-                        player.isLooping = false
-                        val lastSafePosition = (player.duration - 250).coerceAtLeast(0)
-                        val targetPosition = restorePosition.coerceAtMost(lastSafePosition)
-
-                        if (targetPosition > 0) {
-                            // Do not start until the seek has completed; otherwise the first
-                            // frames of the replacement lens can replay from the beginning.
-                            player.setOnSeekCompleteListener { seekedPlayer ->
-                                seekedPlayer.setOnSeekCompleteListener(null)
-                                playbackPosition = seekedPlayer.currentPosition.coerceAtLeast(0)
-                                playerPrepared = true
-                                if (resumeAfterSwitch) videoView.start()
-                            }
-                            player.seekTo(targetPosition)
+            // Each lens keeps its own prepared player during the crossfade. The outgoing
+            // player is paused at the saved timestamp; the incoming player seeks first and
+            // only then resumes, so switching never restarts the clip from zero.
+            val restorePlayback: (VideoView, GalleryVideoPlayerState) -> Unit = { videoView, viewState ->
+                val lastSafePosition = (videoView.duration - 250).coerceAtLeast(0)
+                val targetPosition = playbackPosition.coerceAtMost(lastSafePosition)
+                val resumeAfterSeek = shouldResumePlayback
+                if (targetPosition > 0) {
+                    videoView.setOnSeekCompleteListener { seekedPlayer ->
+                        seekedPlayer.setOnSeekCompleteListener(null)
+                        if (targetIsUltraWide == isUltraWide && viewState.wasActive) {
+                            playbackPosition = seekedPlayer.currentPosition.coerceAtLeast(0)
+                            videoViewState.value = videoView
+                            if (resumeAfterSeek) videoView.start() else videoView.pause()
                         } else {
-                            playbackPosition = 0
-                            playerPrepared = true
-                            if (resumeAfterSwitch) videoView.start()
+                            videoView.pause()
                         }
                     }
-
-                    videoView.tag = newKey
-                    videoView.setVideoURI(currentUri)
+                    videoView.seekTo(targetPosition)
+                } else {
+                    playbackPosition = 0
+                    if (targetIsUltraWide == isUltraWide && viewState.wasActive) {
+                        videoViewState.value = videoView
+                        if (resumeAfterSeek) videoView.start() else videoView.pause()
+                    } else {
+                        videoView.pause()
+                    }
                 }
             }
-        )
+
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 8.dp),
+                factory = { viewContext ->
+                    VideoView(viewContext).apply {
+                        val viewState = GalleryVideoPlayerState(
+                            uri = targetUri.toString(),
+                            wasActive = targetIsUltraWide == isUltraWide
+                        )
+                        tag = viewState
+                        if (viewState.wasActive) videoViewState.value = this
+
+                        val controller = MediaController(viewContext)
+                        controller.setAnchorView(this)
+                        setMediaController(controller)
+                        setOnPreparedListener { player ->
+                            player.isLooping = false
+                            viewState.isPrepared = true
+                            if (targetIsUltraWide == isUltraWide) {
+                                viewState.wasActive = true
+                                videoViewState.value = this
+                                restorePlayback(this, viewState)
+                            } else {
+                                viewState.wasActive = false
+                                pause()
+                            }
+                        }
+                        setVideoURI(targetUri)
+                    }
+                },
+                update = { videoView ->
+                    val viewState = videoView.tag as? GalleryVideoPlayerState
+                    if (viewState != null) {
+                        val shouldBeActive = targetIsUltraWide == isUltraWide
+                        if (shouldBeActive && !viewState.wasActive) {
+                            viewState.wasActive = true
+                            videoViewState.value = videoView
+                            if (viewState.isPrepared) restorePlayback(videoView, viewState)
+                        } else if (shouldBeActive) {
+                            videoViewState.value = videoView
+                        } else {
+                            viewState.wasActive = false
+                        }
+                    }
+                },
+                onRelease = { videoView ->
+                    if (videoViewState.value === videoView) videoViewState.value = null
+                    videoView.setOnPreparedListener(null)
+                    videoView.setOnSeekCompleteListener(null)
+                    videoView.setMediaController(null)
+                    videoView.stopPlayback()
+                }
+            )
+        }
 
         Surface(
             modifier = Modifier

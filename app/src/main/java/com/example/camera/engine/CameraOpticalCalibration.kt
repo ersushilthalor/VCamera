@@ -296,6 +296,23 @@ object CameraOpticalCalibration {
     }
 
     /**
+     * Special Video stores Ultra-Wide as an independent recording. Unlike a live lens
+     * handoff, that recording must retain the sensor's native, uncropped field of view.
+     * Keep the normal standby crop calibration unchanged for every other preview/record path.
+     */
+    fun resolveSpecialVideoStandbyCropRatio(
+        calibratedCropRatio: Float,
+        standbyLensType: LensType,
+        isSpecialVideoRecordingActive: Boolean
+    ): Float {
+        return if (isSpecialVideoRecordingActive && standbyLensType == LensType.ULTRAWIDE) {
+            1.0f
+        } else {
+            calibratedCropRatio
+        }
+    }
+
+    /**
      * Returns true only while a continuous slider gesture is still below the physical lens
      * handoff threshold. This prevents the outgoing Ultra-Wide stream from being held forever
      * after the zoom crosses 1x, which would otherwise digitally crop Ultra-Wide all the way in.
