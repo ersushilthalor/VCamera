@@ -408,7 +408,7 @@ fun CameraScreen(
                 },
                 isUsingUltraWideSurface = isUsingUltraWideSurface,
                 isSpecialVideoPreviewEnabled = cameraMode == CameraMode.VIDEO &&
-                    instantSwitchState.isShowUltraWidePreview && isUsingRearMainLens,
+                    instantSwitchState.isShowUltraWidePreview && isUsingRearMainLens && !isRecordingVideo,
                 previewOverlapState = previewOverlapState,
                 onUltraWideSurfaceTextureAvailable = { texture, width, height ->
                     viewModel.engine.setUltraWidePreviewSurfaceTexture(texture, width, height)
