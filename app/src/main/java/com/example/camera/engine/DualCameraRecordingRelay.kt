@@ -163,7 +163,6 @@ class DualCameraRecordingRelay internal constructor(
     private var eisPlusAPositionHandle: Int = -1
     private var eisPlusATexCoordHandle: Int = -1
     private var eisPlusSamplerHandle: Int = -1
-    private val eisPlusIdentityMatrix = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
     private var vadjHandles: VideoAdjustmentsPipeline.VideoAdjustmentsShaderHandles? = null
     private var mainOesTexId: Int = 0
     private var ultraWideOesTexId: Int = 0
@@ -1238,16 +1237,30 @@ class DualCameraRecordingRelay internal constructor(
         val useAdjustments = !currentVideoAdjustments.isDefault
         val activeProgram = if (useAdjustments) eisPlusProgramId else eisPlusPassthroughProgramId
         if (activeProgram == 0) return false
-        GLES30.glViewport(0, 0, outputWidth.coerceAtLeast(2), outputHeight.coerceAtLeast(2))
+        // EGL window surfaces can have a different pixel size from the cached
+        // viewfinder layout dimensions. Query the actual target before setting the
+        // viewport or calculating the aspect crop; otherwise only part of the
+        // preview surface may be redrawn and the remainder stays black.
+        val targetSize = queryEglSurfaceSize(
+            display = display,
+            targetSurface = targetSurface,
+            fallbackWidth = outputWidth,
+            fallbackHeight = outputHeight
+        )
+        val targetWidth = targetSize.first
+        val targetHeight = targetSize.second
+        GLES30.glViewport(0, 0, targetWidth, targetHeight)
         GLES30.glUseProgram(activeProgram)
 
-        computeCameraTexMatrix(
-            stMatrix = eisPlusIdentityMatrix,
+        // The MGC YUV renderer outputs a regular GL_TEXTURE_2D whose row/texture
+        // convention is already normalized. Do not apply the OES SurfaceTexture
+        // flip/rotation heuristic here; it adds a second flip to the MGC result.
+        computeEisPlusPresentationMatrix(
             isFront = isFrontFacing,
             sensorOrientation = cameraSensorOrientation,
             deviceRotation = activeDeviceRotation,
-            viewportWidth = outputWidth,
-            viewportHeight = outputHeight,
+            viewportWidth = targetWidth,
+            viewportHeight = targetHeight,
             camBufferWidth = frame.width,
             camBufferHeight = frame.height,
             outMatrix = renderTexMatrix
@@ -1305,6 +1318,92 @@ class DualCameraRecordingRelay internal constructor(
             EGLExt.eglPresentationTimeANDROID(display, targetSurface, presentationNs)
         }
         return EGL14.eglSwapBuffers(display, targetSurface)
+    }
+
+    private fun queryEglSurfaceSize(
+        display: EGLDisplay,
+        targetSurface: EGLSurface,
+        fallbackWidth: Int,
+        fallbackHeight: Int
+    ): Pair<Int, Int> {
+        val width = IntArray(1)
+        val height = IntArray(1)
+        val queried = runCatching {
+            EGL14.eglQuerySurface(display, targetSurface, 0x3057, width, 0) &&
+                EGL14.eglQuerySurface(display, targetSurface, 0x3056, height, 0)
+        }.getOrDefault(false)
+        return if (queried && width[0] > 0 && height[0] > 0) {
+            width[0] to height[0]
+        } else {
+            fallbackWidth.coerceAtLeast(2) to fallbackHeight.coerceAtLeast(2)
+        }
+    }
+
+    /**
+     * Builds a presentation matrix for the MGC output texture (GL_TEXTURE_2D).
+     *
+     * Unlike a Camera2 SurfaceTexture/OES input, MgcEisYuvRenderer has already
+     * converted the top-first YUV image into a correctly oriented 2D texture.
+     * Therefore this matrix applies only sensor-to-display rotation, optional
+     * front-camera horizontal mirroring, and a center crop to fill the target.
+     */
+    internal fun computeEisPlusPresentationMatrix(
+        isFront: Boolean,
+        sensorOrientation: Int,
+        deviceRotation: Int,
+        viewportWidth: Int,
+        viewportHeight: Int,
+        camBufferWidth: Int,
+        camBufferHeight: Int,
+        outMatrix: FloatArray
+    ) {
+        require(outMatrix.size >= 16) { "EIS+ presentation matrix must contain 16 values" }
+
+        val rotationDegrees = Math.floorMod(
+            if (isFront) sensorOrientation + deviceRotation else sensorOrientation - deviceRotation,
+            360
+        )
+        val radians = Math.toRadians(rotationDegrees.toDouble())
+        val cosine = kotlin.math.cos(radians).toFloat()
+        val sine = kotlin.math.sin(radians).toFloat()
+
+        val sourceWidth = if (rotationDegrees == 90 || rotationDegrees == 270) {
+            camBufferHeight
+        } else {
+            camBufferWidth
+        }.coerceAtLeast(1)
+        val sourceHeight = if (rotationDegrees == 90 || rotationDegrees == 270) {
+            camBufferWidth
+        } else {
+            camBufferHeight
+        }.coerceAtLeast(1)
+
+        val sourceAspect = sourceWidth.toFloat() / sourceHeight.toFloat()
+        val targetAspect = viewportWidth.coerceAtLeast(1).toFloat() /
+            viewportHeight.coerceAtLeast(1).toFloat()
+        val cropX: Float
+        val cropY: Float
+        if (targetAspect > sourceAspect) {
+            cropX = 1f
+            cropY = sourceAspect / targetAspect
+        } else {
+            cropX = targetAspect / sourceAspect
+            cropY = 1f
+        }
+
+        // Texture coordinates are transformed in output space. A positive
+        // camera orientation uses the inverse sampling rotation so the sensor
+        // image appears upright in the destination surface.
+        val signedCropX = if (isFront) -cropX else cropX
+        outMatrix.fill(0f)
+        outMatrix[0] = signedCropX * cosine
+        outMatrix[4] = -signedCropX * sine
+        outMatrix[12] = 0.5f - 0.5f * outMatrix[0] - 0.5f * outMatrix[4]
+        outMatrix[1] = cropY * sine
+        outMatrix[5] = cropY * cosine
+        outMatrix[13] = 0.5f - 0.5f * outMatrix[1] - 0.5f * outMatrix[5]
+        outMatrix[10] = 1f
+        outMatrix[15] = 1f
     }
 
     /**
