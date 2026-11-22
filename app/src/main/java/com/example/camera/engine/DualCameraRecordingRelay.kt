@@ -42,7 +42,7 @@ import kotlin.math.min
  *   while [setActiveSource] atomically switches which Camera2 stream is written into the encoder
  *   with a strictly monotonic presentation timestamp timeline.
  */
-class DualCameraRecordingRelay(
+class DualCameraRecordingRelay internal constructor(
     private val encoderTargetSurface: Surface,
     private val bufferWidth: Int,
     private val bufferHeight: Int,
