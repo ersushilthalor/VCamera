@@ -1170,7 +1170,7 @@ class Camera2Engine(private val context: Context) {
                     standbyLens = standbyLens,
                     recordingSize = effectiveStandbyVideoSize,
                     physicalCameraId = targetPhysId,
-                    recordingRelay = recordingRelay
+                    relay = recordingRelay
                 )
                 val standbyEisPlusSurface = standbyEisPlusBinding?.pipeline?.surface
                     ?.takeIf { it.isValid }
