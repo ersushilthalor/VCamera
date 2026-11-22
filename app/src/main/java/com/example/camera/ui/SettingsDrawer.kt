@@ -880,6 +880,8 @@ private fun VideoSettingsPage(
     isDollyZoomSettingEnabled: Boolean = false,
     onDollyZoomSettingToggle: (Boolean) -> Unit = {}
 ) {
+    var showEisPlusDiagnosticLogs by remember { mutableStateOf(false) }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -941,6 +943,18 @@ private fun VideoSettingsPage(
                 color = Color.White.copy(alpha = 0.7f),
                 fontSize = 11.sp
             )
+        }
+
+        item {
+            OutlinedButton(
+                onClick = { showEisPlusDiagnosticLogs = true },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                border = BorderStroke(1.dp, Color(0xFFFFA04A).copy(alpha = 0.65f)),
+            ) {
+                Text("View EIS+ Diagnostic Logs", color = Color(0xFFFFA04A), fontSize = 13.sp)
+            }
         }
 
         item {
@@ -1081,6 +1095,10 @@ private fun VideoSettingsPage(
                 )
             }
         }
+    }
+
+    if (showEisPlusDiagnosticLogs) {
+        EisPlusDiagnosticLogsDialog(onDismiss = { showEisPlusDiagnosticLogs = false })
     }
 }
 
