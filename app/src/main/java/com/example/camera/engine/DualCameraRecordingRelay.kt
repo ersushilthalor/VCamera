@@ -340,6 +340,15 @@ class DualCameraRecordingRelay(
      * Neither camera session nor the video encoder is stopped or reconfigured.
      */
     fun setActiveSource(source: PreviewStreamSource) {
+        // During Special Video the primary encoder is permanently the main lens;
+        // the ultra-wide OES stream is written to its own encoder surface.
+        if (secondaryEncoderTargetSurface?.isValid == true && source == PreviewStreamSource.ULTRAWIDE) {
+            if (activeSource != PreviewStreamSource.MAIN) {
+                activeSource = PreviewStreamSource.MAIN
+                cinemaRecorder?.setActiveStreamSource(PreviewStreamSource.MAIN)
+            }
+            return
+        }
         if (activeSource != source) {
             activeSource = source
             pendingClockSyncOnSwitch = true
