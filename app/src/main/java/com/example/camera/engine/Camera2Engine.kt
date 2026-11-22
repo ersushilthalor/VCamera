@@ -41,6 +41,7 @@ import android.util.SizeF
 import android.view.Surface
 import com.example.camera.model.*
 import com.example.camera.data.CubeLutParser
+import com.example.camera.gallery.SpecialVideoGalleryRepository
 import java.io.ByteArrayInputStream
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -145,9 +146,10 @@ class Camera2Engine(private val context: Context) {
     private val _isKeepUltraWideReady = MutableStateFlow(preferences.isKeepUltraWideReady)
     val isKeepUltraWideReady: StateFlow<Boolean> = _isKeepUltraWideReady.asStateFlow()
     @Volatile private var isSpecialVideoPreviewEnabled: Boolean = preferences.isShowUltraWidePreview
+    @Volatile private var isSpecialVideoRecordingActive: Boolean = false
 
     private fun shouldKeepUltraWideStreamReady(): Boolean =
-        _isKeepUltraWideReady.value || (isSpecialVideoPreviewEnabled && currentMode == CameraMode.VIDEO)
+        _isKeepUltraWideReady.value || ((isSpecialVideoPreviewEnabled || isSpecialVideoRecordingActive) && currentMode == CameraMode.VIDEO)
 
     private val _isAutoSwitchToUltraWide = MutableStateFlow(preferences.isAutoSwitchToUltraWide)
     val isAutoSwitchToUltraWide: StateFlow<Boolean> = _isAutoSwitchToUltraWide.asStateFlow()
@@ -927,7 +929,9 @@ class Camera2Engine(private val context: Context) {
      */
     fun setSpecialVideoPreviewEnabled(enabled: Boolean) {
         isSpecialVideoPreviewEnabled = enabled
-        dualCameraRecordingRelay?.setSpecialVideoPiPEnabled(enabled && currentMode == CameraMode.VIDEO)
+        // Special Video is now saved as two independent files. Never bake an inset into
+        // the main recording, and don't mutate the active recording after it has started.
+        if (_isRecordingVideo.value || isStartingRecording.get()) return
         val shouldKeepReady = shouldKeepUltraWideStreamReady()
         if (shouldKeepReady && _isCameraInitialized.value) {
             _ultraWideStreamStatus.value = BackgroundCameraStatus.PREPARING
@@ -1729,6 +1733,9 @@ class Camera2Engine(private val context: Context) {
     var viewfinderResolution: ViewfinderResolution = ViewfinderResolution.NORMAL
     private val cinemaSoftwareRecorder by lazy { CinemaSoftwareRecordingEngine(context) }
     private val normalVideoRecorder by lazy { NormalVideoRecordingEngine(context) }
+    private val specialVideoUltraWideRecorder by lazy { NormalVideoRecordingEngine(context) }
+    @Volatile private var specialVideoUltraWideTempFile: File? = null
+    @Volatile private var specialVideoUltraWideSurface: Surface? = null
     private var isSoftwareCinemaRecording: Boolean = false
     private var recordingCinemaConfig: CinemaConfig? = null
 
@@ -6475,6 +6482,7 @@ class Camera2Engine(private val context: Context) {
         } catch (ignored: Throwable) {}
         dualCameraRecordingRelay = null
 
+        isSpecialVideoRecordingActive = false
         try {
             cinemaSoftwareRecorder.stopRecording()
         } catch (ignored: Throwable) {}
@@ -6482,6 +6490,12 @@ class Camera2Engine(private val context: Context) {
         try {
             normalVideoRecorder.stopRecording()
         } catch (ignored: Throwable) {}
+        if (specialVideoUltraWideTempFile != null) {
+            try { specialVideoUltraWideRecorder.stopRecording() } catch (ignored: Throwable) {}
+        }
+        try { specialVideoUltraWideTempFile?.delete() } catch (ignored: Throwable) {}
+        specialVideoUltraWideTempFile = null
+        specialVideoUltraWideSurface = null
 
         try {
             mediaRecorder?.reset()
@@ -6538,8 +6552,11 @@ class Camera2Engine(private val context: Context) {
             onError("Preview surface not ready")
             return
         }
-
-
+        val specialVideoRecordingRequested = currentMode == CameraMode.VIDEO &&
+            isSpecialVideoPreviewEnabled && lens.facing == CameraCharacteristics.LENS_FACING_BACK
+        isSpecialVideoRecordingActive = specialVideoRecordingRequested
+        specialVideoUltraWideTempFile = null
+        specialVideoUltraWideSurface = null
 
         try {
             val chars = getCharacteristics(lens.cameraId)
@@ -6919,6 +6936,45 @@ class Camera2Engine(private val context: Context) {
                     orientationHint = activeOrientHint,
                     encoderRotation = encoderRotation
                 )
+
+                if (specialVideoRecordingRequested) {
+                    val ultraWideLens = _availableLenses.value.firstOrNull {
+                        it.facing == CameraCharacteristics.LENS_FACING_BACK && it.lensType == LensType.ULTRAWIDE
+                    } ?: run {
+                        cleanupFailedRecording(onError, "Special Video requires a rear ultra-wide camera")
+                        return
+                    }
+                    val ultraWideSensorOrientation = try {
+                        getCharacteristics(ultraWideLens.cameraId)?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: sensorOrient
+                    } catch (_: Exception) {
+                        sensorOrient
+                    }
+                    val ultraWideTemp = File(recordingDir, "rec_temp_ultrawide_" + System.currentTimeMillis() + ".mp4")
+                    try {
+                        specialVideoUltraWideSurface = specialVideoUltraWideRecorder.startRecording(
+                            destFile = ultraWideTemp,
+                            width = finalRecordWidth,
+                            height = finalRecordHeight,
+                            fps = validatedConfig.fps,
+                            bitrate = (validatedConfig.bitrate * 0.45f).toInt().coerceIn(2_000_000, 16_000_000),
+                            codec = targetCodec,
+                            isAudioEnabled = false,
+                            orientationHint = activeOrientHint,
+                            isFront = false,
+                            sensorOrientation = ultraWideSensorOrientation,
+                            deviceRotation = currentRot
+                        )
+                        specialVideoUltraWideTempFile = ultraWideTemp
+                        Log.i(TAG, "[SPECIAL_VIDEO] Independent ultra-wide encoder started")
+                    } catch (t: Throwable) {
+                        try { ultraWideTemp.delete() } catch (_: Throwable) {}
+                        cleanupFailedRecording(
+                            onError,
+                            "Could not start the ultra-wide recording track: " + (t.localizedMessage ?: t.message)
+                        )
+                        return
+                    }
+                }
             }
                 val is10BitSession = is10BitRequested || (isSoftwareCinema && cinemaCodec == CinemaCodec.PRORES && has10BitDynamicRange)
                 val targetDynamicProfile: Long? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && is10BitSession) {
@@ -6963,7 +7019,10 @@ class Camera2Engine(private val context: Context) {
                     ?: backLensesForRec.firstOrNull { it.lensType == LensType.WIDE && !it.isZoomPreset }
                     ?: backLensesForRec.firstOrNull { it.lensType == LensType.WIDE }
 
-                val initialStreamSource = if (lens.lensType == LensType.ULTRAWIDE) {
+                val isSpecialVideoRecording = specialVideoRecordingRequested
+                val initialStreamSource = if (isSpecialVideoRecording) {
+                    PreviewStreamSource.MAIN
+                } else if (lens.lensType == LensType.ULTRAWIDE) {
                     PreviewStreamSource.ULTRAWIDE
                 } else {
                     PreviewStreamSource.MAIN
@@ -6974,9 +7033,6 @@ class Camera2Engine(private val context: Context) {
                 } catch (_: Exception) {
                     if (isFront) 270 else 90
                 }
-
-                val isSpecialVideoRecording = currentMode == CameraMode.VIDEO &&
-                    isSpecialVideoPreviewEnabled && lens.facing == CameraCharacteristics.LENS_FACING_BACK
                 val isKeepUwReadyBack = shouldKeepUltraWideStreamReady() &&
                     lens.facing == CameraCharacteristics.LENS_FACING_BACK &&
                     uwLensForRec != null &&
@@ -7001,7 +7057,11 @@ class Camera2Engine(private val context: Context) {
                     previewWidth = viewfinderWidth,
                     previewHeight = viewfinderHeight,
                     initialAdjustments = currentVideoAdjustments,
-                    initialSpecialVideoPiPEnabled = isSpecialVideoRecording
+                    initialSpecialVideoPiPEnabled = false,
+                    secondarySensorOrientation = if (isSpecialVideoRecording && uwLensForRec != null) {
+                        getCharacteristics(uwLensForRec.cameraId)?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: sensorOrient
+                    } else sensorOrient,
+                    secondaryEncoderTargetSurface = if (isSpecialVideoRecording) specialVideoUltraWideSurface else null
                 )
                 if (relay.isRelayReady) {
                     if (isKeepUwReadyBack && uwLensForRec != null && mainLensForRec != null) {
@@ -7026,6 +7086,20 @@ class Camera2Engine(private val context: Context) {
                     _isGpuRelayPreviewActive.value = false
                 }
 
+                if (isSpecialVideoRecording && (!relay.isRelayReady || !relay.hasDistinctUltraWideSurface() || !relay.hasSecondaryRecordingSurface())) {
+                    Log.e(TAG, "[SPECIAL_VIDEO] Could not configure both independent camera recording surfaces")
+                    if (relay.isRelayReady) {
+                        dualCameraRecordingRelay = relay
+                    } else {
+                        relay.release()
+                    }
+                    cleanupFailedRecording(
+                        onError,
+                        "This device could not configure simultaneous main and ultra-wide recording. Try 1080p 30fps or turn Special Video off."
+                    )
+                    return
+                }
+
                 val activeLensRecorderSurface = dualCameraRecordingRelay?.getRecorderSurfaceForLens(lens) ?: recorderSurface
                 activeRecordingSurface = activeLensRecorderSurface
 
@@ -7037,6 +7111,13 @@ class Camera2Engine(private val context: Context) {
                             detectSimultaneousStreamingMode(mainLensForRec, uwLensForRec)
                         } else {
                             DualStreamingMode.NONE
+                        }
+                        if (isSpecialVideoRecording && dualMode == DualStreamingMode.NONE) {
+                            cleanupFailedRecording(
+                                onError,
+                                "This device does not support simultaneous main and ultra-wide camera streams. Turn Special Video off to record normally."
+                            )
+                            return@post
                         }
 
                         // Prewarm standby recording session in parallel when Main and Ultra-Wide are separate CameraDevices
@@ -7085,6 +7166,14 @@ class Camera2Engine(private val context: Context) {
                             val mainRecSurf = relay?.mainRecorderSurface ?: activeLensRecorderSurface
                             val uwRecSurf = relay?.ultraWideRecorderSurface
 
+                            if (isSpecialVideoRecording && (uwRecSurf == null || !uwRecSurf.isValid || uwPrevSurf == null || !uwPrevSurf.isValid)) {
+                                cleanupFailedRecording(
+                                    onError,
+                                    "The ultra-wide recording output could not be attached to this camera session. Try a lower recording resolution or turn Special Video off."
+                                )
+                                return@post
+                            }
+
                             if (physIds.contains(uwPhysId) && uwPrevSurf != null && uwPrevSurf.isValid && uwPrevSurf !== mainPrevSurf) {
                                 activeSessionPhysicalCameraId = if (isUwSelected) uwPhysId else mainPhysId
                                 _isUsingUltraWideSurface.value = isUwSelected
@@ -7126,6 +7215,13 @@ class Camera2Engine(private val context: Context) {
                                 }
 
                                 fun tryThreeOutputLogicalPhysicalRecording(fallbackToSingleOnFail: () -> Unit) {
+                                    if (isSpecialVideoRecording) {
+                                        cleanupFailedRecording(
+                                            onError,
+                                            "This device cannot record both lenses simultaneously at the selected quality. Try 1080p 30fps or disable Special Video."
+                                        )
+                                        return
+                                    }
                                     try {
                                         val mPrevCfg = OutputConfiguration(mainPrevSurf).apply {
                                             if (mainPhysId != null) setPhysicalCameraId(mainPhysId)
@@ -7266,7 +7362,14 @@ class Camera2Engine(private val context: Context) {
                                         camera.createCaptureSession(sessionCfg4)
                                         return@post
                                     } catch (e: Exception) {
-                                        Log.w(TAG, "4-output logical physical recording setup exception, trying 3-output: ${e.message}")
+                                        Log.w(TAG, "4-output logical physical recording setup exception: ${e.message}")
+                                        if (isSpecialVideoRecording) {
+                                            cleanupFailedRecording(
+                                                onError,
+                                                "The camera rejected simultaneous main and ultra-wide recording surfaces. Try 1080p 30fps or disable Special Video."
+                                            )
+                                            return@post
+                                        }
                                     }
                                 }
                             }
@@ -7517,6 +7620,7 @@ class Camera2Engine(private val context: Context) {
             cinemaSoftwareRecorder.pause()
         } else {
             normalVideoRecorder.pause()
+            if (specialVideoUltraWideTempFile != null) specialVideoUltraWideRecorder.pause()
         }
     }
 
@@ -7533,6 +7637,7 @@ class Camera2Engine(private val context: Context) {
             cinemaSoftwareRecorder.resume()
         } else {
             normalVideoRecorder.resume()
+            if (specialVideoUltraWideTempFile != null) specialVideoUltraWideRecorder.resume()
         }
     }
 
@@ -7604,6 +7709,10 @@ class Camera2Engine(private val context: Context) {
         videoRecordingFileDescriptor = null
         val tempFile = currentRecordingTempFile
         currentRecordingTempFile = null
+        val specialUltraWideTempFile = specialVideoUltraWideTempFile
+        specialVideoUltraWideTempFile = null
+        specialVideoUltraWideSurface = null
+        isSpecialVideoRecordingActive = false
 
         savingVideoJobsCount.incrementAndGet()
         _isSavingVideo.value = true
@@ -7629,6 +7738,15 @@ class Camera2Engine(private val context: Context) {
                     activeRelay.stopRecording()
                     try { Thread.sleep(60L) } catch (_: InterruptedException) {}
                 }
+
+                val ultraWideRecordedFile: File? = if (specialUltraWideTempFile != null) {
+                    try {
+                        specialVideoUltraWideRecorder.stopRecording() ?: specialUltraWideTempFile
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error stopping Special Video ultra-wide recorder", e)
+                        specialUltraWideTempFile
+                    }
+                } else null
 
                 val recordedFile: File? = when {
                     wasSoftwareCinema -> {
@@ -7668,7 +7786,8 @@ class Camera2Engine(private val context: Context) {
                     effectiveMimeType = effectiveMimeType,
                     isFrontFacing = isFrontFacing,
                     lockedOrientationHint = lockedOrientationHint,
-                    notifyComplete = notifyComplete
+                    notifyComplete = notifyComplete,
+                    ultraWideRecordedFile = ultraWideRecordedFile
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Error stopping video recording in background", e)
@@ -7693,10 +7812,12 @@ class Camera2Engine(private val context: Context) {
         effectiveMimeType: String,
         isFrontFacing: Boolean,
         lockedOrientationHint: Int,
-        notifyComplete: (Uri?) -> Unit
+        notifyComplete: (Uri?) -> Unit,
+        ultraWideRecordedFile: File? = null
     ) {
         if (rawRecordedFile == null || !rawRecordedFile.exists() || rawRecordedFile.length() <= 0L) {
             Log.w(TAG, "Recorded file was null or empty, cannot finalize video")
+            try { ultraWideRecordedFile?.delete() } catch (_: Throwable) {}
             notifyComplete(null)
             return
         }
@@ -7789,6 +7910,33 @@ class Camera2Engine(private val context: Context) {
                 } else {
                     "Video"
                 }
+                if (!isCinema && ultraWideRecordedFile != null && ultraWideRecordedFile.exists() &&
+                    validateRecordedFileIntegrity(ultraWideRecordedFile, "video/mp4")) {
+                    val ultraWideFileName = effectiveFileName.substringBeforeLast('.') + "_ULTRAWIDE.mp4"
+                    val ultraWideUri = saveVideoToGallery(
+                        tempFile = ultraWideRecordedFile,
+                        fileName = ultraWideFileName,
+                        mimeType = "video/mp4",
+                        isCinema = false,
+                        isFrontFacing = false,
+                        orientationDegrees = finalOrientation,
+                        width = finalWidth,
+                        height = finalHeight
+                    )
+                    if (ultraWideUri != null) {
+                        SpecialVideoGalleryRepository(context).addClip(
+                            mainUri = savedUri,
+                            ultraWideUri = ultraWideUri,
+                            displayName = videoDisplayName,
+                            timestamp = System.currentTimeMillis()
+                        )
+                        Log.i(TAG, "[SPECIAL_VIDEO] Paired main and ultra-wide clips saved")
+                    } else {
+                        Log.w(TAG, "[SPECIAL_VIDEO] Ultra-wide clip could not be published")
+                    }
+                } else if (ultraWideRecordedFile != null) {
+                    Log.w(TAG, "[SPECIAL_VIDEO] Ultra-wide file is missing or invalid")
+                }
                 _lastCapturedMedia.value = CapturedMedia(
                     uri = savedUri,
                     isVideo = true,
@@ -7809,6 +7957,7 @@ class Camera2Engine(private val context: Context) {
             intermediateFiles.forEach { try { it.delete() } catch (_: Exception) {} }
             try { gradedFile?.delete() } catch (ignored: Exception) {}
             try { rawRecordedFile.delete() } catch (ignored: Exception) {}
+            try { ultraWideRecordedFile?.delete() } catch (ignored: Exception) {}
             updateStorageStats()
         }
     }

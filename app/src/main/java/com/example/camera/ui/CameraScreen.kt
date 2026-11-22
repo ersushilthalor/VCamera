@@ -189,6 +189,8 @@ fun CameraScreen(
     val preferredGalleryPackage by viewModel.preferredGalleryPackage.collectAsStateWithLifecycle()
     val focusRingPoint by viewModel.focusRingPoint.collectAsStateWithLifecycle()
     val toastMessage by viewModel.toastMessage.collectAsStateWithLifecycle()
+    val specialVideoClips by viewModel.specialVideoClips.collectAsStateWithLifecycle()
+    val isSpecialVideoGalleryOpen by viewModel.isSpecialVideoGalleryOpen.collectAsStateWithLifecycle()
     var isQuickOptionsOpen by rememberSaveable { mutableStateOf(false) }
 
 
@@ -218,6 +220,17 @@ fun CameraScreen(
         BackHandler {
             viewModel.setLutWindowOpen(false)
         }
+    }
+
+    if (isSpecialVideoGalleryOpen) {
+        BackHandler {
+            viewModel.closeSpecialVideoGallery()
+        }
+        SpecialVideoGalleryDialog(
+            clips = specialVideoClips,
+            onDismiss = { viewModel.closeSpecialVideoGallery() },
+            onOpenSystemGallery = { viewModel.openSystemGallery(context) }
+        )
     }
 
     val exposureCompensation by viewModel.exposureCompensation.collectAsStateWithLifecycle()
@@ -395,7 +408,7 @@ fun CameraScreen(
                 },
                 isUsingUltraWideSurface = isUsingUltraWideSurface,
                 isSpecialVideoPreviewEnabled = cameraMode == CameraMode.VIDEO &&
-                    instantSwitchState.isShowUltraWidePreview && isUsingRearMainLens,
+                    instantSwitchState.isShowUltraWidePreview && isUsingRearMainLens && !isRecordingVideo,
                 previewOverlapState = previewOverlapState,
                 onUltraWideSurfaceTextureAvailable = { texture, width, height ->
                     viewModel.engine.setUltraWidePreviewSurfaceTexture(texture, width, height)
@@ -495,7 +508,7 @@ fun CameraScreen(
             showUltraWidePreview = instantSwitchState.isShowUltraWidePreview &&
                 isUsingRearMainLens && cameraMode != CameraMode.VIDEO,
             showFrontPreview = instantSwitchState.isShowFrontCameraPreview && isUsingRearLens &&
-                !(cameraMode == CameraMode.VIDEO && instantSwitchState.isShowUltraWidePreview && isUsingRearMainLens),
+                !(cameraMode == CameraMode.VIDEO && instantSwitchState.isShowUltraWidePreview),
             ultraWideStatus = instantSwitchState.ultraWideStatus,
             frontStatus = instantSwitchState.frontStatus,
             onUltraWideSurfaceTextureAvailable = { texture ->
