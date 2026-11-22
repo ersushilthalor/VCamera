@@ -18,6 +18,7 @@ import android.util.Log
 import android.view.Surface
 import com.example.camera.model.LensInfo
 import com.example.camera.model.LensType
+import com.example.camera.stabilization.EisPlusDiagnosticLog
 import com.example.camera.stabilization.MgcEisYuvRenderer
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -150,6 +151,7 @@ class DualCameraRecordingRelay internal constructor(
     private var programId: Int = 0
     private var passthroughProgramId: Int = 0
     private var eisPlusRenderer: MgcEisYuvRenderer? = null
+    private var eisPlusRenderFailureCount = 0L
     private var eisPlusProgramId: Int = 0
     private var eisPlusPassthroughProgramId: Int = 0
     private var eisPlusVadJHandles: VideoAdjustmentsPipeline.VideoAdjustmentsShaderHandles? = null
@@ -244,15 +246,20 @@ class DualCameraRecordingRelay internal constructor(
 
     /** Schedule a timestamp-matched MGC frame on the relay's owning GL thread. */
     fun notifyEisPlusFrameAvailable() {
-        val handler = glHandler ?: return
+        val handler = glHandler ?: run {
+            EisPlusDiagnosticLog.event("RELAY", "GL_HANDLER_MISSING", "EIS+ frame callback has no GL handler", "ERROR")
+            return
+        }
         if (!handler.post {
                 try {
                     renderEisPlusFrames()
                 } catch (t: Throwable) {
+                    EisPlusDiagnosticLog.event("RELAY", "RENDER_EXCEPTION", "${t.javaClass.simpleName}: ${t.message}", "ERROR")
                     Log.e(TAG, "MGC EIS+ relay render failed; keeping GL thread alive: ${t.message}", t)
                 }
             }
         ) {
+            EisPlusDiagnosticLog.event("RELAY", "GL_POST_REJECTED", "GL thread stopped accepting EIS+ frame tasks", "ERROR")
             Log.w(TAG, "Unable to schedule timestamp-matched MGC EIS+ frame")
         }
     }
@@ -1125,16 +1132,28 @@ class DualCameraRecordingRelay internal constructor(
         while (true) {
             val pending = pipeline.dequeueFrame() ?: break
             if (activeSource != PreviewStreamSource.MAIN || isPaused.get() || !isStreamingActive.get()) {
+                EisPlusDiagnosticLog.event(
+                    "RELAY", "FRAME_SKIPPED",
+                    "timestampNs=${pending.timestampNs} activeSource=$activeSource paused=${isPaused.get()} streaming=${isStreamingActive.get()}",
+                    "WARN",
+                )
                 pending.image.close()
                 continue
             }
             val renderer = eisPlusRenderer
             if (renderer == null) {
+                EisPlusDiagnosticLog.event("RELAY", "RENDERER_MISSING", "matched timestampNs=${pending.timestampNs}", "ERROR")
                 pending.image.close()
                 Log.e(TAG, "MGC EIS+ renderer is unavailable; dropping matched frame")
                 continue
             }
-            val frame = renderer.render(pending) ?: continue
+            val frame = renderer.render(pending) ?: run {
+                eisPlusRenderFailureCount += 1L
+                if (eisPlusRenderFailureCount <= 3L || eisPlusRenderFailureCount % 30L == 0L) {
+                    EisPlusDiagnosticLog.event("RELAY", "YUV_RENDER_RETURNED_NULL", "count=$eisPlusRenderFailureCount timestampNs=${pending.timestampNs}", "ERROR")
+                }
+                continue
+            }
 
             val sourceTimestampNs = frame.timestampNs
             if (recordingStartMonotonicNs <= 0L) recordingStartMonotonicNs = sourceTimestampNs
@@ -1150,16 +1169,37 @@ class DualCameraRecordingRelay internal constructor(
             val encoded = renderEisPlusOutput(
                 display, context, encoderSurface, frame, presentationNs, bufferWidth, bufferHeight
             )
-            if (!encoded) continue
+            if (!encoded) {
+                eisPlusRenderFailureCount += 1L
+                if (eisPlusRenderFailureCount <= 3L || eisPlusRenderFailureCount % 30L == 0L) {
+                    EisPlusDiagnosticLog.event(
+                        "RELAY", "ENCODER_RENDER_FAILED",
+                        "count=$eisPlusRenderFailureCount sourceTsNs=$sourceTimestampNs ptsNs=$presentationNs " +
+                            "size=${frame.width}x${frame.height} glError=0x${GLES30.glGetError().toString(16)}",
+                        "ERROR",
+                    )
+                }
+                continue
+            }
             lastOutputPtsNs = presentationNs
-            relayedFrameCount.incrementAndGet()
+            val renderedOutputCount = relayedFrameCount.incrementAndGet()
+            if (renderedOutputCount <= 3L || renderedOutputCount % 30L == 0L) {
+                EisPlusDiagnosticLog.event(
+                    "RELAY", "ENCODER_FRAME_PRESENTED",
+                    "count=$renderedOutputCount sourceTsNs=$sourceTimestampNs ptsNs=$presentationNs " +
+                        "frameSize=${frame.width}x${frame.height} outputSize=${bufferWidth}x$bufferHeight",
+                )
+            }
             CameraPerformanceMonitor.onRecordingFrame()
 
             val preview = eglPreviewSurface
             if (preview != null && preview != EGL14.EGL_NO_SURFACE) {
                 val pw = if (previewWidth > 0) previewWidth else bufferWidth
                 val ph = if (previewHeight > 0) previewHeight else bufferHeight
-                renderEisPlusOutput(display, context, preview, frame, presentationNs, pw, ph)
+                val previewRendered = renderEisPlusOutput(display, context, preview, frame, presentationNs, pw, ph)
+                if (!previewRendered && renderedOutputCount <= 3L) {
+                    EisPlusDiagnosticLog.event("RELAY", "PREVIEW_RENDER_FAILED", "ptsNs=$presentationNs previewSize=${pw}x$ph", "WARN")
+                }
             }
         }
     }
