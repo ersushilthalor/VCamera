@@ -124,7 +124,9 @@ class MediaGalleryRepository(context: Context) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) add(MediaStore.Images.Media.OWNER_PACKAGE_NAME)
             else add(MediaStore.Images.Media.DATA)
         }.toTypedArray()
-        val photos = ArrayList<MediaGalleryItem>()
+
+        data class PhotoRow(val id: String, val name: String, val uri: Uri, val timestamp: Long)
+        val rows = ArrayList<PhotoRow>()
 
         try {
             resolver.query(collection, projection, null, null,
@@ -147,16 +149,14 @@ class MediaGalleryRepository(context: Context) {
                     val isVCamera = owner == appContext.packageName ||
                         name.startsWith("VCAM_", true) || description.contains("VCamera", true)
                     if (!isVCamera) continue
+
                     val dateTaken = if (takenCol >= 0) cursor.getLong(takenCol) else 0L
                     val dateAdded = if (addedCol >= 0) cursor.getLong(addedCol) else 0L
-                    photos += MediaGalleryItem(
+                    rows += PhotoRow(
                         id = mediaId.toString(),
-                        displayName = name.ifBlank { "VCamera photo" },
+                        name = name.ifBlank { "VCamera photo" },
                         uri = uri,
-                        timestamp = if (dateTaken > 0L) dateTaken else dateAdded * 1000L,
-                        durationMs = 0L,
-                        isVCameraRecording = true,
-                        isVideo = false
+                        timestamp = if (dateTaken > 0L) dateTaken else dateAdded * 1000L
                     )
                 }
             }
@@ -165,7 +165,27 @@ class MediaGalleryRepository(context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Unable to query VCamera photos", e)
         }
-        return photos
+
+        val byName = rows.associateBy { it.name.lowercase(Locale.ROOT) }
+        return rows
+            // The companion is reachable from its 1× image; never show it as a second tile.
+            .filterNot { it.name.endsWith("_ULTRAWIDE.jpg", ignoreCase = true) }
+            .map { row ->
+                val ultraWideName = if (row.name.endsWith("_MAIN.jpg", ignoreCase = true)) {
+                    row.name.dropLast("_MAIN.jpg".length) + "_ULTRAWIDE.jpg"
+                } else null
+                val ultraWideUri = ultraWideName?.let { byName[it.lowercase(Locale.ROOT)]?.uri }
+                MediaGalleryItem(
+                    id = row.id,
+                    displayName = row.name,
+                    uri = row.uri,
+                    timestamp = row.timestamp,
+                    durationMs = 0L,
+                    isVCameraRecording = true,
+                    isVideo = false,
+                    ultraWideUri = ultraWideUri
+                )
+            }
     }
 
     private fun getAppSpecificVideos(): List<MediaGalleryItem> {
