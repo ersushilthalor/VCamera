@@ -7819,9 +7819,10 @@ class Camera2Engine(private val context: Context) {
                     EisPlusDiagnosticLog.event(
                         "CAMERA2", "ELIGIBILITY",
                         "eligible=$eisPlusEligible reason=$eisPlusUnavailableReason yuvSize=${eisPlusYuvSize?.width}x${eisPlusYuvSize?.height} " +
-                            "logicalZoomRequested=$eisPlusLogicalZoom pipelineLogicalStream=${eisPlusPhysicalId == null} " +
-                                "pipelineCameraId=$eisPlusCameraId activeLensCameraId=${lens.cameraId} activeLensPhysicalId=${lens.physicalCameraId} " +
-                                "physicalCameraId=$eisPlusPhysicalId",
+                            "logicalZoomRequested=$eisPlusLogicalZoom physicalRouting=${eisPlusPhysicalId != null} " +
+                                "logicalMultiCamera=${chars?.physicalCameraIds?.isNotEmpty() == true} pipelineCameraId=$eisPlusCameraId " +
+                                "activeLensCameraId=${lens.cameraId} activeLensPhysicalId=${lens.physicalCameraId} " +
+                                "pipelinePhysicalCameraId=$eisPlusPhysicalId",
                         if (eisPlusCandidate == null) "WARN" else "INFO",
                     )
                 }
