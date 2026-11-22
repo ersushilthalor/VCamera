@@ -7295,7 +7295,9 @@ class Camera2Engine(private val context: Context) {
     private fun activateVideoEisPlusForSource(source: PreviewStreamSource, sessionCameraId: String?) {
         val binding = videoEisPlusBindingsBySource[source]
             ?.takeIf { sessionCameraId == null || it.sessionCameraId == sessionCameraId }
-            ?: sessionCameraId?.let { videoEisPlusBindingsByCameraId[it] }
+            ?: sessionCameraId?.let { cameraId ->
+                videoEisPlusBindingsByCameraId[cameraId]?.takeIf { it.source == source }
+            }
         if (binding != null && binding.pipeline.isRunning) {
             activeVideoEisPlusPipeline = binding.pipeline
             activeVideoEisPlusSurface = binding.pipeline.surface
