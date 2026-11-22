@@ -6,10 +6,12 @@ import android.graphics.Matrix
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.net.Uri
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.os.Build
+import android.util.Log
 import android.util.Size
 import android.view.Surface
 import android.view.TextureView
@@ -47,6 +49,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -77,11 +80,13 @@ import com.example.camera.gallery.MediaGalleryItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.math.roundToInt
 
 internal const val GALLERY_LENS_SWITCH_DURATION_MS = 300
 
@@ -485,11 +490,27 @@ private fun MediaGalleryItemViewer(item: MediaGalleryItem, onBack: () -> Unit, o
     else MediaGalleryPhotoViewer(photo = item, onBack = onBack, onClose = onClose)
 }
 
+private data class GalleryPhotoLoadState(
+    val isLoading: Boolean,
+    val bitmap: Bitmap?
+)
+
 @Composable
 private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit, onClose: () -> Unit) {
     val context = LocalContext.current
-    val bitmap by produceState<Bitmap?>(initialValue = null, key1 = photo.uri) {
-        value = withContext(Dispatchers.IO) { decodeGalleryImage(context, photo.uri, 2200) }
+    val photoLoadState by produceState(
+        initialValue = GalleryPhotoLoadState(isLoading = true, bitmap = null),
+        key1 = photo.uri
+    ) {
+        val decodedBitmap = try {
+            withContext(Dispatchers.IO) {
+                decodeGalleryImage(context, photo.uri, 2200)
+            }
+        } catch (e: Exception) {
+            Log.e(GALLERY_PHOTO_DECODE_TAG, "Photo load failed for ${photo.uri}", e)
+            null
+        }
+        value = GalleryPhotoLoadState(isLoading = false, bitmap = decodedBitmap)
     }
     Column(Modifier.fillMaxSize().background(Color.Black)) {
         Row(
@@ -509,10 +530,16 @@ private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit,
             }
         }
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            if (bitmap != null) {
-                Image(bitmap = bitmap!!.asImageBitmap(), contentDescription = photo.displayName,
-                    modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
-            } else Text("Unable to load photo", color = Color.White.copy(alpha = 0.75f))
+            when {
+                photoLoadState.isLoading -> CircularProgressIndicator(color = Color.White)
+                photoLoadState.bitmap != null -> Image(
+                    bitmap = photoLoadState.bitmap.asImageBitmap(),
+                    contentDescription = photo.displayName,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                )
+                else -> Text("Unable to load photo", color = Color.White.copy(alpha = 0.75f))
+            }
         }
     }
 }
@@ -538,18 +565,104 @@ private fun loadGalleryThumbnail(context: Context, item: MediaGalleryItem): Bitm
     } catch (_: Exception) { null }
 }
 
+private const val GALLERY_PHOTO_DECODE_TAG = "GalleryPhotoDecoder"
+
+/**
+ * Decodes MediaStore and file-backed photos at a bounded size. ImageDecoder is preferred on
+ * Android 9+ because it supports newer still-image formats and applies EXIF orientation.
+ * BitmapFactory plus a file-descriptor fallback keeps older Android versions supported.
+ */
 private fun decodeGalleryImage(context: Context, uri: Uri, maxDimension: Int): Bitmap? {
+    val targetLimit = maxDimension.coerceAtLeast(1)
     val resolver = context.contentResolver
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        try {
+            val source = if (uri.scheme == "file") {
+                val path = uri.path ?: return null
+                ImageDecoder.createSource(File(path))
+            } else {
+                ImageDecoder.createSource(resolver, uri)
+            }
+            return ImageDecoder.decodeBitmap(source) { decoder, imageInfo, _ ->
+                val sourceWidth = imageInfo.size.width.coerceAtLeast(1)
+                val sourceHeight = imageInfo.size.height.coerceAtLeast(1)
+                val scale = minOf(
+                    1f,
+                    targetLimit.toFloat() / maxOf(sourceWidth, sourceHeight).toFloat()
+                )
+                decoder.setTargetSize(
+                    (sourceWidth * scale).roundToInt().coerceAtLeast(1),
+                    (sourceHeight * scale).roundToInt().coerceAtLeast(1)
+                )
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                decoder.isMutableRequired = false
+            }
+        } catch (e: Exception) {
+            Log.w(GALLERY_PHOTO_DECODE_TAG, "ImageDecoder could not decode $uri; trying BitmapFactory", e)
+        }
+    }
+
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) } ?: return null
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    decodeGalleryImageWithBitmapFactory(context, uri, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+        Log.e(
+            GALLERY_PHOTO_DECODE_TAG,
+            "Unsupported, empty, or inaccessible photo: uri=$uri, mime=${runCatching { resolver.getType(uri) }.getOrNull()}"
+        )
+        return null
+    }
+
     var sampleSize = 1
-    while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > maxDimension) sampleSize *= 2
+    while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > targetLimit) {
+        sampleSize *= 2
+    }
     val options = BitmapFactory.Options().apply {
         inSampleSize = sampleSize
         inPreferredConfig = Bitmap.Config.ARGB_8888
+        inDither = false
     }
-    return resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
+    return decodeGalleryImageWithBitmapFactory(context, uri, options).also { bitmap ->
+        if (bitmap == null) {
+            Log.e(
+                GALLERY_PHOTO_DECODE_TAG,
+                "BitmapFactory could not decode photo: uri=$uri, mime=${runCatching { resolver.getType(uri) }.getOrNull()}"
+            )
+        }
+    }
+}
+
+/** Uses a seekable descriptor when a provider does not supply a usable InputStream. */
+private fun decodeGalleryImageWithBitmapFactory(
+    context: Context,
+    uri: Uri,
+    options: BitmapFactory.Options
+): Bitmap? {
+    if (uri.scheme == "file") {
+        val path = uri.path ?: return null
+        return BitmapFactory.decodeFile(path, options)
+    }
+
+    val resolver = context.contentResolver
+    try {
+        val bitmap = resolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input, null, options)
+        }
+        if (bitmap != null || (options.inJustDecodeBounds && options.outWidth > 0 && options.outHeight > 0)) {
+            return bitmap
+        }
+    } catch (e: Exception) {
+        Log.d(GALLERY_PHOTO_DECODE_TAG, "InputStream decode failed for $uri; trying file descriptor", e)
+    }
+
+    return try {
+        resolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+            BitmapFactory.decodeFileDescriptor(descriptor.fileDescriptor, null, options)
+        }
+    } catch (e: Exception) {
+        Log.e(GALLERY_PHOTO_DECODE_TAG, "File-descriptor decode failed for $uri", e)
+        null
+    }
 }
 
 @Composable
