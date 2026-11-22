@@ -14,7 +14,7 @@ import com.example.camera.data.CameraPreferences
 import com.example.camera.gallery.SpecialVideoClip
 import com.example.camera.gallery.SpecialVideoGalleryRepository
 import com.example.camera.gallery.MediaGalleryRepository
-import com.example.camera.gallery.MediaGalleryVideo
+import com.example.camera.gallery.MediaGalleryItem
 import com.example.camera.engine.Camera2Engine
 import com.example.camera.engine.CameraOpticalCalibration
 import com.example.camera.model.*
@@ -49,8 +49,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     val lastCapturedMedia: StateFlow<CapturedMedia?> = engine.lastCapturedMedia
     private val specialVideoGalleryRepository = SpecialVideoGalleryRepository(application.applicationContext)
     private val mediaGalleryRepository = MediaGalleryRepository(application.applicationContext)
-    private val _mediaGalleryVideos = MutableStateFlow<List<MediaGalleryVideo>>(emptyList())
-    val mediaGalleryVideos: StateFlow<List<MediaGalleryVideo>> = _mediaGalleryVideos.asStateFlow()
+    private val _mediaGalleryItems = MutableStateFlow<List<MediaGalleryItem>>(emptyList())
+    val mediaGalleryItems: StateFlow<List<MediaGalleryItem>> = _mediaGalleryItems.asStateFlow()
     private val _specialVideoClips = MutableStateFlow(specialVideoGalleryRepository.getClips())
     val specialVideoClips: StateFlow<List<SpecialVideoClip>> = _specialVideoClips.asStateFlow()
     private val _isSpecialVideoGalleryOpen = MutableStateFlow(false)
@@ -1681,7 +1681,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch(Dispatchers.IO) {
             val clips = specialVideoGalleryRepository.getClips()
             _specialVideoClips.value = clips
-            _mediaGalleryVideos.value = mediaGalleryRepository.getVideos(clips)
+            _mediaGalleryItems.value = mediaGalleryRepository.getMedia(clips)
         }
     }
 

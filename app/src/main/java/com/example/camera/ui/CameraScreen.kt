@@ -65,31 +65,36 @@ fun CameraScreen(
 ) {
     val context = LocalContext.current
 
-    val hasMediaVideoAccess: () -> Boolean = {
+    val hasMediaAccess: () -> Boolean = {
+        val hasImages = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+        val hasVideos = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
         when {
             Build.VERSION.SDK_INT >= 34 ->
-                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED ||
+                hasImages || hasVideos ||
                     ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
-            Build.VERSION.SDK_INT >= 33 ->
-                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
+            Build.VERSION.SDK_INT >= 33 -> hasImages || hasVideos
             else ->
                 ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
         }
     }
-    val mediaVideoPermissions = when {
+    val mediaPermissions = when {
         Build.VERSION.SDK_INT >= 34 -> arrayOf(
+            Manifest.permission.READ_MEDIA_IMAGES,
             Manifest.permission.READ_MEDIA_VIDEO,
             Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
         )
-        Build.VERSION.SDK_INT >= 33 -> arrayOf(Manifest.permission.READ_MEDIA_VIDEO)
+        Build.VERSION.SDK_INT >= 33 -> arrayOf(
+            Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.READ_MEDIA_VIDEO
+        )
         else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
     }
-    var hasMediaVideoPermission by remember { mutableStateOf(hasMediaVideoAccess()) }
-    val mediaVideoPermissionLauncher = rememberLauncherForActivityResult(
+    var hasMediaPermission by remember { mutableStateOf(hasMediaAccess()) }
+    val mediaPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) {
-        hasMediaVideoPermission = hasMediaVideoAccess()
-        if (hasMediaVideoPermission) viewModel.refreshMediaGallery()
+        hasMediaPermission = hasMediaAccess()
+        if (hasMediaPermission) viewModel.refreshMediaGallery()
     }
 
     // Permission handling
@@ -117,8 +122,8 @@ fun CameraScreen(
                 ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         hasAudioPermission = audioGranted
 
-        hasMediaVideoPermission = hasMediaVideoAccess()
-        if (hasMediaVideoPermission) viewModel.refreshMediaGallery()
+        hasMediaPermission = hasMediaAccess()
+        if (hasMediaPermission) viewModel.refreshMediaGallery()
 
         // Ask for microphone access only when the user explicitly enables audio or starts
         // an audio-enabled video recording; never block the initial camera UI with this prompt.
@@ -146,8 +151,8 @@ fun CameraScreen(
             if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                 add(Manifest.permission.RECORD_AUDIO)
             }
-            if (!hasMediaVideoAccess()) {
-                addAll(mediaVideoPermissions)
+            if (!hasMediaAccess()) {
+                addAll(mediaPermissions)
             }
         }
         if (missingPermissions.isNotEmpty()) {
@@ -223,7 +228,7 @@ fun CameraScreen(
     val focusRingPoint by viewModel.focusRingPoint.collectAsStateWithLifecycle()
     val toastMessage by viewModel.toastMessage.collectAsStateWithLifecycle()
     val specialVideoClips by viewModel.specialVideoClips.collectAsStateWithLifecycle()
-    val mediaGalleryVideos by viewModel.mediaGalleryVideos.collectAsStateWithLifecycle()
+    val mediaGalleryItems by viewModel.mediaGalleryItems.collectAsStateWithLifecycle()
     val isSpecialVideoGalleryOpen by viewModel.isSpecialVideoGalleryOpen.collectAsStateWithLifecycle()
     var isQuickOptionsOpen by rememberSaveable { mutableStateOf(false) }
 
@@ -261,10 +266,10 @@ fun CameraScreen(
             viewModel.closeSpecialVideoGallery()
         }
         MediaGalleryDialog(
-            videos = mediaGalleryVideos,
-            hasVideoPermission = hasMediaVideoPermission,
-            onRequestVideoPermission = {
-                mediaVideoPermissionLauncher.launch(mediaVideoPermissions)
+            videos = mediaGalleryItems,
+            hasMediaPermission = hasMediaPermission,
+            onRequestMediaPermission = {
+                mediaPermissionLauncher.launch(mediaPermissions)
             },
             onDismiss = { viewModel.closeSpecialVideoGallery() },
             onOpenSystemGallery = { viewModel.openSystemGallery(context) }
@@ -544,9 +549,10 @@ fun CameraScreen(
         // 1g. Motorola Instant Camera Switching Picture-in-Picture Little Preview
         LittlePreviewOverlay(
             showUltraWidePreview = instantSwitchState.isShowUltraWidePreview &&
-                isUsingRearMainLens && cameraMode != CameraMode.VIDEO,
+                isUsingRearMainLens && cameraMode == CameraMode.CINEMA,
             showFrontPreview = instantSwitchState.isShowFrontCameraPreview && isUsingRearLens &&
-                !(cameraMode == CameraMode.VIDEO && instantSwitchState.isShowUltraWidePreview),
+                !(instantSwitchState.isShowUltraWidePreview &&
+                    (cameraMode == CameraMode.PHOTO || cameraMode == CameraMode.VIDEO)),
             ultraWideStatus = instantSwitchState.ultraWideStatus,
             frontStatus = instantSwitchState.frontStatus,
             onUltraWideSurfaceTextureAvailable = { texture ->
@@ -982,11 +988,7 @@ fun CameraScreen(
             },
             onFlipCameraClick = { viewModel.toggleCameraFacing() },
             onGalleryClick = {
-                if (cameraMode == CameraMode.PHOTO) {
-                    viewModel.openSystemGallery(context)
-                } else {
-                    viewModel.openGallery(context)
-                }
+                viewModel.openGallery(context)
             },
             onCinemaModeClick = { viewModel.toggleCinemaSettings() },
             onSettingsClick = { viewModel.setSettingsOpen(true) },

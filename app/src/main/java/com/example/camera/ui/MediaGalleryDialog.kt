@@ -1,6 +1,9 @@
 package com.example.camera.ui
 
+import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.os.Build
@@ -66,7 +69,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import com.example.camera.gallery.MediaGalleryVideo
+import com.example.camera.gallery.MediaGalleryItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -103,9 +106,9 @@ internal fun calculateGalleryLensSwitchCropScale(
 private val galleryBackground = Color(0xFF0D1413)
 private val galleryAccent = Color(0xFF71F0E5)
 
-private data class GalleryVideoSection(
+private data class GalleryMediaSection(
     val title: String,
-    val videos: List<MediaGalleryVideo>
+    val videos: List<MediaGalleryItem>
 )
 
 private class GalleryPlayerState(
@@ -116,16 +119,16 @@ private class GalleryPlayerState(
 
 @Composable
 fun MediaGalleryDialog(
-    videos: List<MediaGalleryVideo>,
-    hasVideoPermission: Boolean,
-    onRequestVideoPermission: () -> Unit,
+    videos: List<MediaGalleryItem>,
+    hasMediaPermission: Boolean,
+    onRequestMediaPermission: () -> Unit,
     onDismiss: () -> Unit,
     onOpenSystemGallery: () -> Unit
 ) {
-    var selectedVideo by remember { mutableStateOf<MediaGalleryVideo?>(null) }
+    var selectedMedia by remember { mutableStateOf<MediaGalleryItem?>(null) }
 
-    BackHandler(enabled = selectedVideo != null) {
-        selectedVideo = null
+    BackHandler(enabled = selectedMedia != null) {
+        selectedMedia = null
     }
 
     Dialog(
@@ -137,20 +140,20 @@ fun MediaGalleryDialog(
             color = galleryBackground,
             shape = RoundedCornerShape(0.dp)
         ) {
-            val currentVideo = selectedVideo
-            if (currentVideo == null) {
+            val currentMedia = selectedMedia
+            if (currentMedia == null) {
                 MediaGridScreen(
                     videos = videos,
-                    hasVideoPermission = hasVideoPermission,
-                    onRequestVideoPermission = onRequestVideoPermission,
-                    onVideoSelected = { selectedVideo = it },
+                    hasMediaPermission = hasMediaPermission,
+                    onRequestMediaPermission = onRequestMediaPermission,
+                    onMediaSelected = { selectedMedia = it },
                     onDismiss = onDismiss,
                     onOpenSystemGallery = onOpenSystemGallery
                 )
             } else {
-                MediaGalleryPlayer(
-                    video = currentVideo,
-                    onBack = { selectedVideo = null },
+                MediaGalleryItemViewer(
+                    item = currentMedia,
+                    onBack = { selectedMedia = null },
                     onClose = onDismiss
                 )
             }
@@ -160,21 +163,19 @@ fun MediaGalleryDialog(
 
 @Composable
 private fun MediaGridScreen(
-    videos: List<MediaGalleryVideo>,
-    hasVideoPermission: Boolean,
-    onRequestVideoPermission: () -> Unit,
-    onVideoSelected: (MediaGalleryVideo) -> Unit,
+    videos: List<MediaGalleryItem>,
+    hasMediaPermission: Boolean,
+    onRequestMediaPermission: () -> Unit,
+    onMediaSelected: (MediaGalleryItem) -> Unit,
     onDismiss: () -> Unit,
     onOpenSystemGallery: () -> Unit
 ) {
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
-    var onlyVCamera by rememberSaveable { mutableStateOf(false) }
     var oldestFirst by rememberSaveable { mutableStateOf(false) }
     var settingsExpanded by remember { mutableStateOf(false) }
 
     val filteredVideos = videos
-        .filter { !onlyVCamera || it.isVCameraRecording }
         .filter {
             searchQuery.isBlank() ||
                 it.displayName.contains(searchQuery, ignoreCase = true) ||
@@ -199,7 +200,7 @@ private fun MediaGridScreen(
                 today.minusDays(1) -> "Yesterday"
                 else -> date.format(DateTimeFormatter.ofPattern("dd MMM yyyy", Locale.getDefault()))
             }
-            GalleryVideoSection(title, dayVideos)
+            GalleryMediaSection(title, dayVideos)
         }
 
     Column(
@@ -225,13 +226,6 @@ private fun MediaGridScreen(
                 if (!searchOpen) searchQuery = ""
             }) {
                 Icon(Icons.Filled.Search, contentDescription = "Search videos", tint = Color.White)
-            }
-            IconButton(onClick = { onlyVCamera = !onlyVCamera }) {
-                Icon(
-                    Icons.Filled.FilterList,
-                    contentDescription = if (onlyVCamera) "Show all videos" else "Show VCamera videos",
-                    tint = if (onlyVCamera) galleryAccent else Color.White
-                )
             }
             Box {
                 IconButton(onClick = { settingsExpanded = true }) {
@@ -274,7 +268,7 @@ private fun MediaGridScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 4.dp),
                 singleLine = true,
-                placeholder = { Text("Search videos") },
+                placeholder = { Text("Search VCamera media") },
                 colors = TextFieldDefaults.colors(
                     focusedContainerColor = Color(0xFF1B2624),
                     unfocusedContainerColor = Color(0xFF1B2624),
@@ -286,7 +280,7 @@ private fun MediaGridScreen(
             )
         }
 
-        if (!hasVideoPermission) {
+        if (!hasMediaPermission) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -301,19 +295,19 @@ private fun MediaGridScreen(
                     modifier = Modifier.size(52.dp)
                 )
                 Text(
-                    "Allow access to videos",
+                    "Allow access to photos and videos",
                     color = Color.White,
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    "VCamera uses video access to show recordings already saved in DCIM/Camera, including older clips.",
+                    "VCamera uses media access to show photos and videos saved by this app.",
                     color = Color.White.copy(alpha = 0.72f),
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(top = 10.dp, bottom = 18.dp)
                 )
-                androidx.compose.material3.Button(onClick = onRequestVideoPermission) {
-                    Text("Grant video access")
+                androidx.compose.material3.Button(onClick = onRequestMediaPermission) {
+                    Text("Grant media access")
                 }
             }
         } else if (sections.isEmpty()) {
@@ -322,7 +316,7 @@ private fun MediaGridScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    if (videos.isEmpty()) "No videos found in DCIM/Camera yet." else "No videos match this search or filter.",
+                    if (videos.isEmpty()) "No VCamera photos or videos found yet." else "No VCamera media matches this search.",
                     color = Color.White.copy(alpha = 0.75f)
                 )
             }
@@ -356,10 +350,10 @@ private fun MediaGridScreen(
                             horizontalArrangement = Arrangement.spacedBy(7.dp)
                         ) {
                             row.forEach { video ->
-                                GalleryVideoTile(
+                                GalleryMediaTile(
                                     video = video,
                                     modifier = Modifier.weight(1f),
-                                    onClick = { onVideoSelected(video) }
+                                    onClick = { onMediaSelected(video) }
                                 )
                             }
                             repeat(3 - row.size) {
@@ -374,38 +368,14 @@ private fun MediaGridScreen(
 }
 
 @Composable
-private fun GalleryVideoTile(
-    video: MediaGalleryVideo,
+private fun GalleryMediaTile(
+    video: MediaGalleryItem,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     val context = LocalContext.current
     val thumbnail by produceState<Bitmap?>(initialValue = null, key1 = video.uri) {
-        value = withContext(Dispatchers.IO) {
-            try {
-                if (video.uri.scheme == "file") {
-                    val retriever = MediaMetadataRetriever()
-                    try {
-                        retriever.setDataSource(video.uri.path ?: return@withContext null)
-                        retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    } finally {
-                        retriever.release()
-                    }
-                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    context.contentResolver.loadThumbnail(video.uri, Size(360, 360), null)
-                } else {
-                    val retriever = MediaMetadataRetriever()
-                    try {
-                        retriever.setDataSource(context, video.uri)
-                        retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    } finally {
-                        retriever.release()
-                    }
-                }
-            } catch (_: Exception) {
-                null
-            }
-        }
+        value = withContext(Dispatchers.IO) { loadGalleryThumbnail(context, video) }
     }
 
     Box(
@@ -424,7 +394,7 @@ private fun GalleryVideoTile(
             )
         } else {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = Color.White.copy(alpha = 0.7f))
+                Text(if (video.isVideo) "VIDEO" else "PHOTO", color = Color.White.copy(alpha = 0.7f), fontWeight = FontWeight.Bold)
             }
         }
 
@@ -444,30 +414,98 @@ private fun GalleryVideoTile(
             }
         }
 
-        Surface(
-            modifier = Modifier.align(Alignment.BottomEnd).padding(5.dp),
-            color = Color(0xC9000000),
-            shape = RoundedCornerShape(7.dp)
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
+        if (video.isVideo) {
+            Surface(
+                modifier = Modifier.align(Alignment.BottomEnd).padding(5.dp),
+                color = Color(0xC9000000),
+                shape = RoundedCornerShape(7.dp)
             ) {
-                Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
-                Text(
-                    formatGalleryDuration(video.durationMs),
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
+                    Text(formatGalleryDuration(video.durationMs), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
             }
         }
     }
 }
 
+
+@Composable
+private fun MediaGalleryItemViewer(item: MediaGalleryItem, onBack: () -> Unit, onClose: () -> Unit) {
+    if (item.isVideo) MediaGalleryPlayer(video = item, onBack = onBack, onClose = onClose)
+    else MediaGalleryPhotoViewer(photo = item, onBack = onBack, onClose = onClose)
+}
+
+@Composable
+private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit, onClose: () -> Unit) {
+    val context = LocalContext.current
+    val bitmap by produceState<Bitmap?>(initialValue = null, key1 = photo.uri) {
+        value = withContext(Dispatchers.IO) { decodeGalleryImage(context, photo.uri, 2200) }
+    }
+    Column(Modifier.fillMaxSize().background(Color.Black)) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "Back to media", tint = Color.White)
+            }
+            Column(Modifier.weight(1f)) {
+                Text("Photo", color = Color.White, style = MaterialTheme.typography.titleLarge)
+                Text(photo.displayName, color = Color.White.copy(alpha = 0.62f),
+                    style = MaterialTheme.typography.bodySmall, maxLines = 1)
+            }
+            IconButton(onClick = onClose) {
+                Icon(Icons.Filled.Close, contentDescription = "Close photo", tint = Color.White)
+            }
+        }
+        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            if (bitmap != null) {
+                Image(bitmap = bitmap!!.asImageBitmap(), contentDescription = photo.displayName,
+                    modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
+            } else Text("Unable to load photo", color = Color.White.copy(alpha = 0.75f))
+        }
+    }
+}
+
+private fun loadGalleryThumbnail(context: Context, item: MediaGalleryItem): Bitmap? = try {
+    if (item.isVideo && item.uri.scheme == "file") {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(item.uri.path ?: return null)
+            retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        } finally { retriever.release() }
+    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        context.contentResolver.loadThumbnail(item.uri, Size(360, 360), null)
+    } else if (item.isVideo) {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(context, item.uri)
+            retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        } finally { retriever.release() }
+    } else decodeGalleryImage(context, item.uri, 360)
+} catch (_: Exception) { null }
+
+private fun decodeGalleryImage(context: Context, uri: Uri, maxDimension: Int): Bitmap? {
+    val resolver = context.contentResolver
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) } ?: return null
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sampleSize = 1
+    while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > maxDimension) sampleSize *= 2
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sampleSize
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    return resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
+}
+
 @Composable
 private fun MediaGalleryPlayer(
-    video: MediaGalleryVideo,
+    video: MediaGalleryItem,
     onBack: () -> Unit,
     onClose: () -> Unit
 ) {
@@ -536,8 +574,8 @@ private fun MediaGalleryPlayer(
                 val subtitle = when {
                     hasLensPair && isUltraWide -> "Ultra-wide camera"
                     hasLensPair -> "Main camera"
-                    video.isVCameraRecording -> "VCamera recording"
-                    else -> "Camera video"
+                    !video.isVideo -> "VCamera photo"
+                    else -> "VCamera recording"
                 }
                 Text(
                     subtitle,
