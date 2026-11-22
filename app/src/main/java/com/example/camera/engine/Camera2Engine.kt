@@ -42,6 +42,7 @@ import android.view.Surface
 import com.example.camera.model.*
 import com.example.camera.data.CubeLutParser
 import com.example.camera.gallery.SpecialVideoGalleryRepository
+import com.example.camera.stabilization.EisPlusDiagnosticLog
 import java.io.ByteArrayInputStream
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -7127,8 +7128,10 @@ class Camera2Engine(private val context: Context) {
         videoEisPlusOisDisabledForSession = false
         videoEisPlusCaptureGeneration += 1L
         try { pipeline?.stop() } catch (t: Throwable) {
+            EisPlusDiagnosticLog.event("CAMERA2", "PIPELINE_STOP_EXCEPTION", t.toString(), "ERROR")
             Log.w(TAG, "Failed to stop Photon EIS+ input pipeline", t)
         }
+        EisPlusDiagnosticLog.finish("camera2_recording_cleanup closeCameraSession=$closeCameraSession")
         if (_videoEisPlusStatus.value == "Active") {
             _videoEisPlusStatus.value = "Ready for supported SDR video"
         }
@@ -7777,9 +7780,23 @@ class Camera2Engine(private val context: Context) {
                     eisPlusSupportFailureReason != null -> eisPlusSupportFailureReason
                     else -> "EIS+ pipeline could not be created"
                 }
+                if (preferences.videoEisPlusEnabled) {
+                    EisPlusDiagnosticLog.beginIfNeeded(
+                        context.applicationContext,
+                        "mode=$currentMode camera=${camera.id} lens=${lens.lensType} resolution=${videoRes.width}x${videoRes.height} fps=$targetFps " +
+                            "tenBit=$is10BitSession specialVideo=$isSpecialVideoRecording keepUltraWideReady=$isKeepUwReadyBack",
+                    )
+                    EisPlusDiagnosticLog.event(
+                        "CAMERA2", "ELIGIBILITY",
+                        "eligible=$eisPlusEligible reason=$eisPlusUnavailableReason yuvSize=${eisPlusYuvSize?.width}x${eisPlusYuvSize?.height} " +
+                            "logicalZoom=$eisPlusLogicalZoom physicalCameraId=$eisPlusPhysicalId",
+                        if (eisPlusCandidate == null) "WARN" else "INFO",
+                    )
+                }
                 if (preferences.videoEisPlusEnabled && eisPlusCandidate == null) {
                     _videoEisPlusStatus.value = "Unavailable: $eisPlusUnavailableReason"
                     Log.w(TAG, "Photon EIS+ unavailable: $eisPlusUnavailableReason")
+                    EisPlusDiagnosticLog.event("CAMERA2", "EIS_UNAVAILABLE", eisPlusUnavailableReason, "ERROR")
                 } else if (!preferences.videoEisPlusEnabled) {
                     _videoEisPlusStatus.value = "Disabled"
                 }
@@ -7820,6 +7837,7 @@ class Camera2Engine(private val context: Context) {
                 if (eisPlusCandidate != null && !eisPlusPreviewViaRelay) {
                     val reason = "GPU recording relay preview path unavailable"
                     _videoEisPlusStatus.value = "Unavailable: $reason"
+                    EisPlusDiagnosticLog.event("CAMERA2", "RELAY_NOT_READY", reason, "ERROR")
                     Log.w(TAG, "Photon EIS+ unavailable: $reason; using synchronized relay fallback")
                 }
                 if (eisPlusPreviewViaRelay && eisPlusCandidate != null && eisPlusYuvSize != null &&
@@ -7856,6 +7874,7 @@ class Camera2Engine(private val context: Context) {
                         videoEisPlusCaptureGeneration += 1L
                         eisPlusStarted = true
                         _videoEisPlusStatus.value = "Active"
+                        EisPlusDiagnosticLog.event("CAMERA2", "PIPELINE_READY", "camera=$eisPlusCameraId outputYuv=${eisPlusYuvSize.width}x${eisPlusYuvSize.height}")
                         Log.i(
                             TAG,
                             "Photon EIS+ started: camera=$eisPlusCameraId yuv=${eisPlusYuvSize.width}x${eisPlusYuvSize.height} " +
@@ -7866,6 +7885,7 @@ class Camera2Engine(private val context: Context) {
                         val reason = eisPlusCandidate.lastStartFailureReason
                             ?: "input pipeline initialization failed"
                         _videoEisPlusStatus.value = "Unavailable: $reason"
+                        EisPlusDiagnosticLog.event("CAMERA2", "PIPELINE_START_FAILED", reason, "ERROR")
                         Log.w(TAG, "Photon EIS+ fallback reason: $reason; using unwarped relay frames")
                     }
                 }
@@ -8253,6 +8273,7 @@ class Camera2Engine(private val context: Context) {
                                     mediaRecorder?.start()
                                 }
                                 dualCameraRecordingRelay?.startRecording()
+                                EisPlusDiagnosticLog.event("CAMERA2", "VIDEO_RECORDING_STARTED", "eisPlusActive=${activeVideoEisPlusPipeline?.isRunning} relayReady=${dualCameraRecordingRelay?.isRelayReady}")
                                 _isRecordingVideo.value = true
                                 isStartingRecording.set(false)
                                 startVideoTimer()
@@ -8321,6 +8342,7 @@ class Camera2Engine(private val context: Context) {
                             }
 
                             override fun onConfigureFailed(session: CameraCaptureSession) {
+                                EisPlusDiagnosticLog.event("CAMERA2", "RECORDING_SESSION_CONFIGURE_FAILED", "Camera2 rejected recording output surfaces including EIS+ YUV", "ERROR")
                                 Log.w(TAG, "[RECORDING_SESSION] Video capture session configuration failed, trying safe standard fallback")
                                 if (activeVideoEisPlusPipeline != null) {
                                     val reason = "Camera2 rejected the recording session with the MGC EIS+ YUV output"
