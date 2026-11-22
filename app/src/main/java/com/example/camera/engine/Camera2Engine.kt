@@ -6542,6 +6542,21 @@ class Camera2Engine(private val context: Context) {
                         return@launch
                     }
 
+                // The Special Photo toggle recreates the camera sessions to add 4:3 JPEG
+                // surfaces. A shutter press immediately after enabling it waits for that
+                // reconfiguration rather than failing against the short not-ready window.
+                val activeSessionReady = withTimeoutOrNull(6000L) {
+                    while (cameraDevice == null || captureSession == null || !_isCameraReady.value) {
+                        if (isClosingCamera) break
+                        delay(40L)
+                    }
+                    cameraDevice != null && captureSession != null && _isCameraReady.value
+                } ?: false
+                if (!activeSessionReady) {
+                    finish(null, null, null, "")
+                    return@launch
+                }
+
                 if (_selectedLens.value?.id != mainLens.id) {
                     switchLensSuspend(mainLens, preserveZoom = false, targetZoom = 1f)
                 }
