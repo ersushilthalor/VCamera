@@ -6949,7 +6949,7 @@ class Camera2Engine(private val context: Context) {
                     } catch (_: Exception) {
                         sensorOrient
                     }
-                    val ultraWideTemp = File(recordingDir, "rec_temp_ultrawide_\${System.currentTimeMillis()}.mp4")
+                    val ultraWideTemp = File(recordingDir, "rec_temp_ultrawide_" + System.currentTimeMillis() + ".mp4")
                     try {
                         specialVideoUltraWideSurface = specialVideoUltraWideRecorder.startRecording(
                             destFile = ultraWideTemp,
@@ -6970,7 +6970,7 @@ class Camera2Engine(private val context: Context) {
                         try { ultraWideTemp.delete() } catch (_: Throwable) {}
                         cleanupFailedRecording(
                             onError,
-                            "Could not start the ultra-wide recording track: \${t.localizedMessage ?: t.message}"
+                            "Could not start the ultra-wide recording track: " + (t.localizedMessage ?: t.message)
                         )
                         return
                     }
@@ -7019,6 +7019,7 @@ class Camera2Engine(private val context: Context) {
                     ?: backLensesForRec.firstOrNull { it.lensType == LensType.WIDE && !it.isZoomPreset }
                     ?: backLensesForRec.firstOrNull { it.lensType == LensType.WIDE }
 
+                val isSpecialVideoRecording = specialVideoRecordingRequested
                 val initialStreamSource = if (isSpecialVideoRecording) {
                     PreviewStreamSource.MAIN
                 } else if (lens.lensType == LensType.ULTRAWIDE) {
@@ -7032,8 +7033,6 @@ class Camera2Engine(private val context: Context) {
                 } catch (_: Exception) {
                     if (isFront) 270 else 90
                 }
-
-                val isSpecialVideoRecording = specialVideoRecordingRequested
                 val isKeepUwReadyBack = shouldKeepUltraWideStreamReady() &&
                     lens.facing == CameraCharacteristics.LENS_FACING_BACK &&
                     uwLensForRec != null &&
