@@ -574,7 +574,7 @@ private fun MediaGalleryPlayer(
         if (hasLensPair && isUltraWide != useUltraWide && !isLensSwitchLocked) {
             isLensSwitchLocked = true
             val sourceWasUltraWide = isUltraWide
-            activeVideoView.value?.let { view ->
+            activeTextureView.value?.let { view ->
                 val state = view.tag as? GalleryPlayerState
                 val player = state?.mediaPlayer
                 if (state?.isPrepared == true && player != null) {
@@ -586,8 +586,7 @@ private fun MediaGalleryPlayer(
             }
 
             switchScope.launch {
-                // Reset the crop before changing the target player so the first visible frame
-                // starts at the matching field of view instead of flashing at the final scale.
+                // Start the zoom animation from the matching field of view before switching sources.
                 zoomProgress.snapTo(0f)
                 transitionFromUltraWide = sourceWasUltraWide
                 isLensTransitionRunning = true
