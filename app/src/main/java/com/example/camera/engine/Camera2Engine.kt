@@ -7698,8 +7698,9 @@ class Camera2Engine(private val context: Context) {
             activeVideoEisPlusPhysicalCameraId = binding.physicalCameraId
             activeVideoEisPlusSessionCameraId = binding.sessionCameraId
             videoEisPlusOisDisabledForSession = false
-        } else if (sessionCameraId != null && activeVideoEisPlusSessionCameraId != sessionCameraId) {
-            // Never apply one sensor's gyro/calibration to another lens when it has no binding.
+        } else {
+            // Never retain the previous lens' pipeline when this source has no matching
+            // sensor binding, even when both physical lenses share one logical CameraDevice.
             activeVideoEisPlusPipeline = null
             activeVideoEisPlusSurface = null
             activeVideoEisPlusPhysicalCameraId = null
