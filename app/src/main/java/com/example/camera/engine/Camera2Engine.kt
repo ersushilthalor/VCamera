@@ -6456,7 +6456,13 @@ class Camera2Engine(private val context: Context) {
             val handler = backgroundHandler
 
             fun finish(mainUri: Uri?, ultraUri: Uri?, skewNs: Long?, displayName: String) {
-                if (!completed.compareAndSet(false, true)) return
+                if (!completed.compareAndSet(false, true)) {
+                    // A failure/timeout may win a race with the asynchronous MediaStore save.
+                    // Remove any late pair so a half-finished photo never pollutes the gallery.
+                    try { mainUri?.let { context.contentResolver.delete(it, null, null) } } catch (_: Throwable) {}
+                    try { ultraUri?.let { context.contentResolver.delete(it, null, null) } } catch (_: Throwable) {}
+                    return
+                }
                 timeoutRunnable?.let { handler?.removeCallbacks(it) }
                 try { mainReaderForCleanup?.setOnImageAvailableListener(null, null) } catch (_: Throwable) {}
                 try { ultraReaderForCleanup?.setOnImageAvailableListener(null, null) } catch (_: Throwable) {}
@@ -6522,7 +6528,9 @@ class Camera2Engine(private val context: Context) {
                 if (_selectedLens.value?.id != mainLens.id) {
                     switchLensSuspend(mainLens, preserveZoom = false, targetZoom = 1f)
                 }
-                if (cameraDevice == null || captureSession == null || !_isCameraReady.value) {
+                if (!isRunningOnLens(mainLens) ||
+                    cameraDevice == null || captureSession == null || !_isCameraReady.value
+                ) {
                     finish(null, null, null, "")
                     return@launch
                 }
@@ -6571,7 +6579,21 @@ class Camera2Engine(private val context: Context) {
                     val ultraFrame = ultraImage.get()
                     if (mainFrame != null && ultraFrame != null && saving.compareAndSet(false, true)) {
                         engineScope.launch(Dispatchers.IO) {
-                            val skew = kotlin.math.abs(mainFrame.second - ultraFrame.second)
+                            val timestampDomainsMatch = if (mainLens.cameraId == ultraWideLens.cameraId) {
+                                true
+                            } else {
+                                val mainTimestampSource = getCharacteristics(mainLens.cameraId)
+                                    ?.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
+                                val ultraTimestampSource = getCharacteristics(ultraWideLens.cameraId)
+                                    ?.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
+                                mainTimestampSource == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME &&
+                                    ultraTimestampSource == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+                            }
+                            val skew = if (timestampDomainsMatch) {
+                                kotlin.math.abs(mainFrame.second - ultraFrame.second)
+                            } else {
+                                -1L
+                            }
                             val mainUri = try {
                                 saveJpegBytesToMediaStore(mainFrame.first, filePrefix = "VCAM_SPECIAL")
                             } catch (t: Throwable) {
