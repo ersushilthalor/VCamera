@@ -834,6 +834,127 @@ private fun mergeSpecialPhotoBitmaps(main: Bitmap, ultraWide: Bitmap): Bitmap {
     }
 }
 
+private fun loadGalleryThumbnail(context: Context, item: MediaGalleryItem): Bitmap? {
+    return try {
+        if (item.isVideo && item.uri.scheme == "file") {
+            val filePath = item.uri.path ?: return null
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(filePath)
+                retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } finally { retriever.release() }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            context.contentResolver.loadThumbnail(item.uri, Size(360, 360), null)
+        } else if (item.isVideo) {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(context, item.uri)
+                retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } finally { retriever.release() }
+        } else decodeGalleryImage(context, item.uri, 360)
+    } catch (_: Exception) { null }
+}
+
+private const val GALLERY_PHOTO_DECODE_TAG = "GalleryPhotoDecoder"
+
+/**
+ * Decodes MediaStore and file-backed photos at a bounded size. ImageDecoder is preferred on
+ * Android 9+ because it supports newer still-image formats and applies EXIF orientation.
+ * BitmapFactory plus a file-descriptor fallback keeps older Android versions supported.
+ */
+private fun decodeGalleryImage(context: Context, uri: Uri, maxDimension: Int): Bitmap? {
+    val targetLimit = maxDimension.coerceAtLeast(1)
+    val resolver = context.contentResolver
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        try {
+            val source = if (uri.scheme == "file") {
+                val path = uri.path ?: return null
+                ImageDecoder.createSource(File(path))
+            } else {
+                ImageDecoder.createSource(resolver, uri)
+            }
+            return ImageDecoder.decodeBitmap(source) { decoder, imageInfo, _ ->
+                val sourceWidth = imageInfo.size.width.coerceAtLeast(1)
+                val sourceHeight = imageInfo.size.height.coerceAtLeast(1)
+                val scale = minOf(
+                    1f,
+                    targetLimit.toFloat() / maxOf(sourceWidth, sourceHeight).toFloat()
+                )
+                decoder.setTargetSize(
+                    (sourceWidth * scale).roundToInt().coerceAtLeast(1),
+                    (sourceHeight * scale).roundToInt().coerceAtLeast(1)
+                )
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                decoder.isMutableRequired = false
+            }
+        } catch (e: Exception) {
+            Log.w(GALLERY_PHOTO_DECODE_TAG, "ImageDecoder could not decode $uri; trying BitmapFactory", e)
+        }
+    }
+
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    decodeGalleryImageWithBitmapFactory(context, uri, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+        Log.e(
+            GALLERY_PHOTO_DECODE_TAG,
+            "Unsupported, empty, or inaccessible photo: uri=$uri, mime=${runCatching { resolver.getType(uri) }.getOrNull()}"
+        )
+        return null
+    }
+
+    var sampleSize = 1
+    while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > targetLimit) {
+        sampleSize *= 2
+    }
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sampleSize
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+        inDither = false
+    }
+    return decodeGalleryImageWithBitmapFactory(context, uri, options).also { bitmap ->
+        if (bitmap == null) {
+            Log.e(
+                GALLERY_PHOTO_DECODE_TAG,
+                "BitmapFactory could not decode photo: uri=$uri, mime=${runCatching { resolver.getType(uri) }.getOrNull()}"
+            )
+        }
+    }
+}
+
+/** Uses a seekable descriptor when a provider does not supply a usable InputStream. */
+private fun decodeGalleryImageWithBitmapFactory(
+    context: Context,
+    uri: Uri,
+    options: BitmapFactory.Options
+): Bitmap? {
+    if (uri.scheme == "file") {
+        val path = uri.path ?: return null
+        return BitmapFactory.decodeFile(path, options)
+    }
+
+    val resolver = context.contentResolver
+    try {
+        val bitmap = resolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input, null, options)
+        }
+        if (bitmap != null || (options.inJustDecodeBounds && options.outWidth > 0 && options.outHeight > 0)) {
+            return bitmap
+        }
+    } catch (e: Exception) {
+        Log.d(GALLERY_PHOTO_DECODE_TAG, "InputStream decode failed for $uri; trying file descriptor", e)
+    }
+
+    return try {
+        resolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+            BitmapFactory.decodeFileDescriptor(descriptor.fileDescriptor, null, options)
+        }
+    } catch (e: Exception) {
+        Log.e(GALLERY_PHOTO_DECODE_TAG, "File-descriptor decode failed for $uri", e)
+        null
+    }
+}
+
 @Composable
 private fun MediaGalleryPlayer(
     video: MediaGalleryItem,
