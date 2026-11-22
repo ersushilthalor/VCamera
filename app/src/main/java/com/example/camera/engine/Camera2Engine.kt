@@ -1144,6 +1144,7 @@ class Camera2Engine(private val context: Context) {
             // When video recording is active, configure the standby session with BOTH the preview surface
             // AND its dedicated recording surface at the active recording configuration/FPS/dynamic range.
             if (isRecordingActive && standbyRecorderSurf != null && standbyRecorderSurf.isValid) {
+                val recordingRelay = relay ?: return
                 val recConfig = activeRecordingStreamConfig
                 val requestedVideoRes = recConfig?.videoResolution
                     ?: (userSelectedVideoResolution ?: _selectedVideoResolution.value ?: CameraResolution(1920, 1080))
@@ -1152,7 +1153,7 @@ class Camera2Engine(private val context: Context) {
                     max(resolvedStandbyRes.width, resolvedStandbyRes.height),
                     min(resolvedStandbyRes.width, resolvedStandbyRes.height)
                 )
-                relay?.updateInputBufferSize(
+                recordingRelay?.updateInputBufferSize(
                     isUltraWide = (standbyLens.lensType == LensType.ULTRAWIDE),
                     width = effectiveStandbyVideoSize.width,
                     height = effectiveStandbyVideoSize.height
@@ -1169,7 +1170,7 @@ class Camera2Engine(private val context: Context) {
                     standbyLens = standbyLens,
                     recordingSize = effectiveStandbyVideoSize,
                     physicalCameraId = targetPhysId,
-                    relay = relay
+                    recordingRelay = recordingRelay
                 )
                 val standbyEisPlusSurface = standbyEisPlusBinding?.pipeline?.surface
                     ?.takeIf { it.isValid }
@@ -1219,7 +1220,7 @@ class Camera2Engine(private val context: Context) {
                             !isTextureValid) {
                             isPreparingUltraWideStandby.set(false)
                             try { session.close() } catch (_: Throwable) {}
-                            standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, relay) }
+                            standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, recordingRelay) }
                             return
                         }
                         ultraWideStandbyCaptureSession = session
@@ -1255,7 +1256,7 @@ class Camera2Engine(private val context: Context) {
                             if (ultraWideStandbyCaptureSession == session) {
                                 ultraWideStandbyCaptureSession = null
                             }
-                            standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, relay) }
+                            standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, recordingRelay) }
                             standbyConfiguredForRecording = false
                             standbyRecordingSessionFailed = true
                             isPreparingUltraWideStandby.set(false)
@@ -1270,7 +1271,7 @@ class Camera2Engine(private val context: Context) {
                     override fun onClosed(session: CameraCaptureSession) {
                         // This callback follows the session when it is swapped into the active slot.
                         // Release its own sensor pipeline whenever that CameraCaptureSession closes.
-                        standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, relay) }
+                        standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, recordingRelay) }
                         if (ultraWideStandbyCaptureSession == session) {
                             ultraWideStandbyCaptureSession = null
                             isUltraWideStreaming.set(false)
@@ -1292,7 +1293,7 @@ class Camera2Engine(private val context: Context) {
                         if (standbyEisPlusBinding != null && !retriedWithoutEisPlus) {
                             retriedWithoutEisPlus = true
                             Log.w(TAG, "[KEEP_ULTRAWIDE_READY] Standby session rejected its EIS+ YUV output; retrying without secondary EIS+")
-                            unregisterVideoEisPlusBinding(standbyEisPlusBinding, relay)
+                            unregisterVideoEisPlusBinding(standbyEisPlusBinding, recordingRelay)
                             standbyEisPlusSurface?.let { surface -> runCatching { recordBuilder.removeTarget(surface) } }
                             createRecordingCaptureSession(
                                 camera = camera,
