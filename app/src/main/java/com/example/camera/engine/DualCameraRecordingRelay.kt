@@ -1282,8 +1282,8 @@ class DualCameraRecordingRelay internal constructor(
                 VideoAdjustmentsPipeline.bindUniforms(
                     handles = it,
                     adjustments = currentVideoAdjustments,
-                    width = outputWidth,
-                    height = outputHeight,
+                    width = targetWidth,
+                    height = targetHeight,
                     timeSec = presentationNs.toFloat() / 1_000_000_000f
                 )
             }
