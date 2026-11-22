@@ -7982,6 +7982,45 @@ class Camera2Engine(private val context: Context) {
         }
     }
 
+    /**
+     * Stores the Special Video ultra-wide companion in app-private storage.
+     * It remains playable from VCamera's paired gallery but is never indexed by
+     * Android MediaStore or shown as a second clip in other gallery applications.
+     */
+    private fun saveSpecialVideoCompanionPrivately(source: File): Uri? {
+        if (!source.exists() || source.length() <= 0L) return null
+
+        val directory = File(context.filesDir, "special_video_companions")
+        if (!directory.exists() && !directory.mkdirs()) {
+            Log.e(TAG, "[SPECIAL_VIDEO] Could not create private companion directory")
+            return null
+        }
+
+        val destination = File(
+            directory,
+            "VCAM_SPECIAL_ULTRAWIDE_${System.currentTimeMillis()}_${System.nanoTime()}.mp4"
+        )
+        return try {
+            source.inputStream().buffered().use { input ->
+                destination.outputStream().buffered().use { output ->
+                    input.copyTo(output)
+                    output.flush()
+                }
+            }
+            if (destination.length() != source.length()) {
+                Log.e(TAG, "[SPECIAL_VIDEO] Private companion copy size mismatch")
+                destination.delete()
+                null
+            } else {
+                Uri.fromFile(destination)
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "[SPECIAL_VIDEO] Failed to store private ultra-wide companion", t)
+            try { destination.delete() } catch (_: Throwable) {}
+            null
+        }
+    }
+
     private suspend fun finalizeAndSaveRecordedVideo(
         rawRecordedFile: File?,
         isCinema: Boolean,
@@ -8090,17 +8129,9 @@ class Camera2Engine(private val context: Context) {
                 }
                 if (!isCinema && ultraWideRecordedFile != null && ultraWideRecordedFile.exists() &&
                     validateRecordedFileIntegrity(ultraWideRecordedFile, "video/mp4")) {
-                    val ultraWideFileName = effectiveFileName.substringBeforeLast('.') + "_ULTRAWIDE.mp4"
-                    val ultraWideUri = saveVideoToGallery(
-                        tempFile = ultraWideRecordedFile,
-                        fileName = ultraWideFileName,
-                        mimeType = "video/mp4",
-                        isCinema = false,
-                        isFrontFacing = false,
-                        orientationDegrees = finalOrientation,
-                        width = finalWidth,
-                        height = finalHeight
-                    )
+                    // Keep the 0.5x companion private. Only the main 1x video is
+                    // published to MediaStore, so system/third-party galleries show one clip.
+                    val ultraWideUri = saveSpecialVideoCompanionPrivately(ultraWideRecordedFile)
                     if (ultraWideUri != null) {
                         SpecialVideoGalleryRepository(context).addClip(
                             mainUri = savedUri,
