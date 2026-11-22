@@ -56,6 +56,7 @@ class DualCameraRecordingRelay(
     private val previewHeight: Int = 0,
     initialAdjustments: com.example.camera.model.VideoAdjustments? = null,
     private val initialSpecialVideoPiPEnabled: Boolean = false,
+    private val secondarySensorOrientation: Int = sensorOrientation,
     private val secondaryEncoderTargetSurface: Surface? = null
 ) {
     companion object {
@@ -960,7 +961,7 @@ class DualCameraRecordingRelay(
             computeCameraTexMatrix(
                 stMatrix = ultraWideStMatrix,
                 isFront = false,
-                sensorOrientation = cameraSensorOrientation,
+                sensorOrientation = secondarySensorOrientation,
                 deviceRotation = activeDeviceRotation,
                 viewportWidth = outW,
                 viewportHeight = outH,
