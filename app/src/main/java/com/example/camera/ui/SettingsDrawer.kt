@@ -963,13 +963,36 @@ private fun VideoSettingsPage(
         }
 
         item {
-            SettingsSegmentedCard(
-                title = "Look-ahead Frames",
-                description = "MGC buffers future gyro/frame timing to smooth motion. More frames improve prediction but increase delay.",
-                options = listOf(0, 3, 5, 7, 10).map { it to "$it" },
-                selectedOption = videoEisPlusLookahead.coerceIn(0, 10),
-                onOptionSelected = onVideoEisPlusLookaheadChange
-            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Look-ahead Frames", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    Text(videoEisPlusLookahead.coerceIn(0, 10).toString(), color = Color(0xFFFF8A32), fontSize = 12.sp)
+                }
+                Slider(
+                    value = videoEisPlusLookahead.coerceIn(0, 10).toFloat(),
+                    onValueChange = { onVideoEisPlusLookaheadChange(it.roundToInt()) },
+                    valueRange = 0f..10f,
+                    steps = 9,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFFFF8A32),
+                        activeTrackColor = Color(0xFFFF8A32),
+                        inactiveTrackColor = Color.White.copy(alpha = 0.15f)
+                    )
+                )
+                Text(
+                    "0 uses no future-frame look-ahead; higher values smooth motion more but add delay.",
+                    color = Color.White.copy(alpha = 0.55f),
+                    fontSize = 11.sp
+                )
+            }
         }
 
         item {
