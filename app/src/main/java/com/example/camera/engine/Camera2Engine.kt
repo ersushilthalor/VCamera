@@ -7866,14 +7866,15 @@ class Camera2Engine(private val context: Context) {
                     }
                 }
 
-                videoEisPlusOisDisabledForSession =
-                    eisPlusStarted && activeVideoEisPlusPipeline?.supportsOpticalTelemetry != true
+                // Keep the user's normal OIS request during a short result-based probe. Static
+                // capability metadata can under-report legacy OIS samples on older HALs.
+                videoEisPlusOisDisabledForSession = false
                 if (eisPlusStarted) {
                     Log.i(
                         TAG,
                         "Photon EIS+ OIS decision: preferenceEnabled=$isOisAllowed, " +
-                            "opticalTelemetry=${activeVideoEisPlusPipeline?.supportsOpticalTelemetry}, " +
-                            "forceOisOff=$videoEisPlusOisDisabledForSession",
+                            "advertisedOpticalTelemetry=${activeVideoEisPlusPipeline?.supportsOpticalTelemetry}, " +
+                            "probingCaptureResults=true, forceOisOff=false",
                     )
                 }
                 if (relay.isRelayReady) {
