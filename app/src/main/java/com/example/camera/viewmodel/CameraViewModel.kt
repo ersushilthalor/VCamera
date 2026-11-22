@@ -686,6 +686,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private var toastDismissJob: Job? = null
 
     init {
+        // Remove previously published ultra-wide companion rows as soon as VCamera starts,
+        // not only when the user happens to open the in-app gallery.
+        viewModelScope.launch(Dispatchers.IO) {
+            specialVideoGalleryRepository.migrateLegacyUltraWideClipsToPrivateStorage()
+        }
+
         val initialMode = preferences.cameraMode
         _cameraMode.value = initialMode
 
