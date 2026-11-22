@@ -117,6 +117,9 @@ fun CameraScreen(
                 ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         hasAudioPermission = audioGranted
 
+        hasMediaVideoPermission = hasMediaVideoAccess()
+        if (hasMediaVideoPermission) viewModel.refreshMediaGallery()
+
         // Ask for microphone access only when the user explicitly enables audio or starts
         // an audio-enabled video recording; never block the initial camera UI with this prompt.
         if (pendingAudioEnable) {
@@ -143,6 +146,9 @@ fun CameraScreen(
             if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                 add(Manifest.permission.RECORD_AUDIO)
             }
+            if (!hasMediaVideoAccess()) {
+                addAll(mediaVideoPermissions)
+            }
         }
         if (missingPermissions.isNotEmpty()) {
             permissionLauncher.launch(missingPermissions.toTypedArray())
@@ -150,7 +156,7 @@ fun CameraScreen(
     }
 
     LaunchedEffect(Unit) {
-        // Request camera and microphone access together as soon as the app opens.
+        // Request camera, microphone, and shared-video-library access together as soon as the app opens.
         requestMissingStartupPermissions()
     }
 
