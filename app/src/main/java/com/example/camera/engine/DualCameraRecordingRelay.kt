@@ -1189,7 +1189,7 @@ class DualCameraRecordingRelay internal constructor(
                     // The inactive lens still runs its own sensor/metadata timeline. Drain its
                     // output to release ImageReader leases; its live frames will be available
                     // immediately when the user switches back to that source.
-                    if (pending.image.image.isValid) pending.image.close()
+                    pending.image.close()
                     continue
                 }
                 val renderer = eisPlusRenderer
