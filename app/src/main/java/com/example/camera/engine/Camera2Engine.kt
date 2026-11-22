@@ -7811,7 +7811,9 @@ class Camera2Engine(private val context: Context) {
                     } else null,
                     eisPlusPipeline = eisPlusCandidate
                 )
-                var eisPlusPreviewViaRelay = eisPlusCandidate != null && relay.isRelayReady && relay.isRelayPreviewActive
+                // EGL preview attachment is deferred until Camera2 has replaced the old preview session.
+                // The relay can still encode stabilized YUV frames if its optional preview output fails.
+                var eisPlusPreviewViaRelay = eisPlusCandidate != null && relay.isRelayReady
                 var eisPlusStarted = false
                 if (eisPlusCandidate != null && !eisPlusPreviewViaRelay) {
                     val reason = "GPU recording relay preview path unavailable"
@@ -8222,48 +8224,98 @@ class Camera2Engine(private val context: Context) {
                         }
 
                         var isFallbackActive = false
-                        val sessionCallback = object : CameraCaptureSession.StateCallback() {
+                        fun startConfiguredRecordingSession(session: CameraCaptureSession) {
+                            Log.i(TAG, "[RECORDING_SESSION] Video recording session configured")
+                            captureSession = session
+                            try {
+                                synchronized(previewRequestLock) {
+                                    applyCommonSettings(recordBuilder)
+                                    applyHardwareEisRequest(recordBuilder)
+                                    applyHardwareOisRequest(
+                                        recordBuilder,
+                                        oisAllowed = isOisAllowedForCurrentSession()
+                                    )
+                                    if (activeVideoEisPlusPipeline?.shouldRequestOisSamples == true &&
+                                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                                    ) {
+                                        runCatching {
+                                            recordBuilder.set(
+                                                CaptureRequest.STATISTICS_OIS_DATA_MODE,
+                                                CaptureRequest.STATISTICS_OIS_DATA_MODE_ON
+                                            )
+                                        }
+                                    }
+                                    session.setRepeatingRequest(recordBuilder.build(), captureCallback, backgroundHandler)
+                                }
+                                if (!isSoftwareCinema) {
+                                    mediaRecorder?.start()
+                                }
+                                dualCameraRecordingRelay?.startRecording()
+                                _isRecordingVideo.value = true
+                                isStartingRecording.set(false)
+                                startVideoTimer()
+                                val is4kRec = maxOf(videoRes.width, videoRes.height) >= 3840
+                                if (shouldKeepUltraWideStreamReady() && !is4kRec) {
+                                    ensureUltraWideSimultaneousReady()
+                                }
+                                if (pendingLensWhileSwitching != null || pendingZoomWhileSwitching != null) {
+                                    completeLensSwitch(lens)
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Failed starting repeating request or recorder", e)
+                                cleanupFailedRecording(onError, "Failed to start recording: ${e.message}")
+                            }
+                        }
+                        var sessionCallback: CameraCaptureSession.StateCallback? = null
+                        sessionCallback = object : CameraCaptureSession.StateCallback() {
                             override fun onConfigured(session: CameraCaptureSession) {
-                                Log.i(TAG, "[RECORDING_SESSION] Video recording session configured")
                                 captureSession = session
-                                try {
-                                    synchronized(previewRequestLock) {
-                                        applyCommonSettings(recordBuilder)
-                                        applyHardwareEisRequest(recordBuilder)
-                                        applyHardwareOisRequest(
-                                            recordBuilder,
-                                            oisAllowed = isOisAllowedForCurrentSession()
-                                        )
-                                        if (activeVideoEisPlusPipeline?.shouldRequestOisSamples == true &&
-                                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-                                        ) {
-                                            runCatching {
-                                                recordBuilder.set(
-                                                    CaptureRequest.STATISTICS_OIS_DATA_MODE,
-                                                    CaptureRequest.STATISTICS_OIS_DATA_MODE_ON
+                                if (eisPlusPreviewViaRelay && !relay.isRelayPreviewActive) {
+                                    // This callback runs only after Camera2 has replaced its previous
+                                    // preview session, so the viewfinder BufferQueue is now free for EGL.
+                                    relay.attachPreviewTargetSurface { attached ->
+                                        (backgroundHandler ?: mainHandler).post {
+                                            if (captureSession !== session || isStoppingRecording.get()) {
+                                                return@post
+                                            }
+                                            if (attached) {
+                                                _isGpuRelayPreviewActive.value = true
+                                                startConfiguredRecordingSession(session)
+                                            } else {
+                                                Log.w(
+                                                    TAG,
+                                                    "EIS+ preview attachment failed; keeping stabilized encoder output and restoring direct Camera2 preview",
+                                                )
+                                                eisPlusPreviewViaRelay = false
+                                                _isGpuRelayPreviewActive.value = false
+                                                runCatching { recordBuilder.addTarget(previewSurf) }
+                                                    .onFailure {
+                                                        cleanupFailedRecording(
+                                                            onError,
+                                                            "Could not restore the direct preview surface: ${it.message}",
+                                                        )
+                                                        return@post
+                                                    }
+                                                createRecordingCaptureSession(
+                                                    camera = camera,
+                                                    previewSurface = previewSurf,
+                                                    recorderSurface = activeLensRecorderSurface,
+                                                    is10Bit = is10BitSession,
+                                                    physicalCameraId = targetPhysId,
+                                                    stabilizationSurface = if (eisPlusStarted) activeVideoEisPlusSurface else null,
+                                                    previewViaRelay = false,
+                                                    callback = sessionCallback
+                                                        ?: run {
+                                                            cleanupFailedRecording(onError, "Recording session callback was unavailable")
+                                                            return@post
+                                                        },
                                                 )
                                             }
                                         }
-                                        session.setRepeatingRequest(recordBuilder.build(), captureCallback, backgroundHandler)
                                     }
-                                    if (!isSoftwareCinema) {
-                                        mediaRecorder?.start()
-                                    }
-                                    dualCameraRecordingRelay?.startRecording()
-                                    _isRecordingVideo.value = true
-                                    isStartingRecording.set(false)
-                                    startVideoTimer()
-                                    val is4kRec = maxOf(videoRes.width, videoRes.height) >= 3840
-                                    if (shouldKeepUltraWideStreamReady() && !is4kRec) {
-                                        ensureUltraWideSimultaneousReady()
-                                    }
-                                    if (pendingLensWhileSwitching != null || pendingZoomWhileSwitching != null) {
-                                        completeLensSwitch(lens)
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Failed starting repeating request or recorder", e)
-                                    cleanupFailedRecording(onError, "Failed to start recording: ${e.message}")
+                                    return
                                 }
+                                startConfiguredRecordingSession(session)
                             }
 
                             override fun onConfigureFailed(session: CameraCaptureSession) {
@@ -8274,6 +8326,10 @@ class Camera2Engine(private val context: Context) {
                                     Log.w(TAG, "Photon EIS+ fallback reason: $reason")
                                 }
                                 stopActiveVideoEisPlus()
+                                // The failed Camera2 session never handed the viewfinder Surface to EGL.
+                                // Restore that Surface as a direct Camera2 output for the safe fallback.
+                                eisPlusPreviewViaRelay = false
+                                _isGpuRelayPreviewActive.value = false
                                 activeSessionPhysicalCameraId = null
                                 if (!isFallbackActive) {
                                     isFallbackActive = true
