@@ -230,6 +230,7 @@ fun CameraScreen(
     val specialVideoClips by viewModel.specialVideoClips.collectAsStateWithLifecycle()
     val mediaGalleryItems by viewModel.mediaGalleryItems.collectAsStateWithLifecycle()
     val isSpecialVideoGalleryOpen by viewModel.isSpecialVideoGalleryOpen.collectAsStateWithLifecycle()
+    val isSpecialPhotoEnabled by viewModel.isSpecialPhotoEnabled.collectAsStateWithLifecycle()
     var isQuickOptionsOpen by rememberSaveable { mutableStateOf(false) }
 
 
@@ -657,6 +658,7 @@ fun CameraScreen(
             isAudioEnabled = isAudioEnabled,
             hasActiveVideoAdjustments = !videoAdjustments.isDefault,
             isSpecialVideoEnabled = instantSwitchState.isShowUltraWidePreview,
+            isSpecialPhotoEnabled = isSpecialPhotoEnabled,
             cinemaConfig = cinemaConfig,
             isEvOpen = false,
             exposureCompensation = exposureCompensation,
@@ -665,6 +667,7 @@ fun CameraScreen(
             onTimerClick = { viewModel.cycleTimerMode() },
             onGridClick = { viewModel.cycleGridType() },
             onRawClick = { viewModel.toggleRawCapture() },
+            onSpecialPhotoToggle = { viewModel.setSpecialPhotoCaptureEnabled(!isSpecialPhotoEnabled) },
             onVideoSettingsClick = {
                 isQuickOptionsOpen = false
                 viewModel.setVideoSettingsPanelOpen(true)
