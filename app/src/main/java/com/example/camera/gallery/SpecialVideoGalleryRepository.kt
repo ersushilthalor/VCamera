@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
 data class SpecialVideoClip(
     val id: String,
@@ -20,7 +21,8 @@ data class SpecialVideoClip(
  */
 class SpecialVideoGalleryRepository(context: Context) {
 
-    private val preferences = context.applicationContext.getSharedPreferences(
+    private val appContext = context.applicationContext
+    private val preferences = appContext.getSharedPreferences(
         PREFERENCES_NAME,
         Context.MODE_PRIVATE
     )
@@ -63,10 +65,89 @@ class SpecialVideoGalleryRepository(context: Context) {
             ultraWideUri = ultraWideUri,
             timestamp = timestamp
         )
-        val existing = getClips().filterNot { it.id == clip.id }
+        val previous = getClips()
+        val existing = previous.filterNot { it.id == clip.id }
         val updated = (listOf(clip) + existing).take(MAX_SAVED_CLIPS)
+        persistClips(updated)
+
+        // Remove private companion files whose paired clips were pruned from the 100-item list.
+        val retainedIds = updated.mapTo(HashSet()) { it.id }
+        previous.filterNot { it.id in retainedIds }.forEach { removed ->
+            deletePrivateCompanion(removed.ultraWideUri)
+        }
+    }
+
+    /**
+     * Moves legacy Special Video ultra-wide MP4s out of public MediaStore.
+     * A companion is rewritten to a file:// URI only after its bytes are copied successfully.
+     */
+    fun migrateLegacyUltraWideClipsToPrivateStorage() {
+        val clips = getClips()
+        var changed = false
+        val migrated = clips.map { clip ->
+            val publicUri = clip.ultraWideUri
+            if (publicUri.scheme != "content") {
+                clip
+            } else {
+                val directory = File(preferencesStorageRoot(), "special_video_companions")
+                if (!directory.exists() && !directory.mkdirs()) {
+                    clip
+                } else {
+                    val safeTimestamp = clip.timestamp.takeIf { it > 0L } ?: System.currentTimeMillis()
+                    val suffix = Integer.toHexString(publicUri.toString().hashCode())
+                    val destination = File(directory, "VCAM_SPECIAL_ULTRAWIDE_${safeTimestamp}_${suffix}.mp4")
+                    try {
+                        if (!destination.exists() || destination.length() <= 0L) {
+                            val input = appContext.contentResolver.openInputStream(publicUri)
+                            if (input == null) {
+                                return@map clip
+                            }
+                            input.use { source ->
+                                destination.outputStream().buffered().use { output ->
+                                    source.copyTo(output)
+                                    output.flush()
+                                }
+                            }
+                        }
+
+                        if (!destination.exists() || destination.length() <= 0L) {
+                            destination.delete()
+                            clip
+                        } else {
+                            try {
+                                // These URIs are the app's own legacy _ULTRAWIDE companion rows.
+                                appContext.contentResolver.delete(publicUri, null, null)
+                            } catch (t: Throwable) {
+                                Log.w(TAG, "Could not remove legacy public companion $publicUri", t)
+                            }
+                            changed = true
+                            clip.copy(ultraWideUri = Uri.fromFile(destination))
+                        }
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "Could not migrate legacy ultra-wide companion $publicUri", t)
+                        try { destination.delete() } catch (_: Throwable) {}
+                        clip
+                    }
+                }
+            }
+        }
+        if (changed) persistClips(migrated)
+    }
+
+    private fun preferencesStorageRoot(): File = File(appContext.filesDir, "")
+
+    private fun deletePrivateCompanion(uri: Uri) {
+        if (uri.scheme != "file") return
+        try {
+            uri.path?.let { File(it).delete() }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Could not delete pruned private companion $uri", t)
+        }
+    }
+
+    private fun persistClips(clips: List<SpecialVideoClip>) {
         val array = JSONArray()
-        updated.forEach { item ->
+        clips.forEach { item ->
             array.put(
                 JSONObject().apply {
                     put(KEY_ID, item.id)
