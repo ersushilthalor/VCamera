@@ -1156,7 +1156,12 @@ class Camera2Engine(private val context: Context) {
                     applySynchronizedStandbySettings(this, standbyLens)
                     if (standbyEisPlusBinding != null) {
                         applyHardwareEisRequest(this)
-                        applyHardwareOisRequest(this, oisAllowed = isOisAllowedForCurrentSession())
+                        applyHardwareOisRequest(
+                            this,
+                            oisAllowed = isOisAllowed && isOisSupportedForLens(standbyLens, targetPhysId),
+                            physicalCameraId = targetPhysId,
+                            vendorCameraIdOverride = camera.id
+                        )
                         if (standbyEisPlusBinding.pipeline.shouldRequestOisSamples &&
                             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
                         ) {
@@ -1201,6 +1206,22 @@ class Camera2Engine(private val context: Context) {
 
                         try {
                             applySynchronizedStandbySettings(recordBuilder, standbyLens)
+                            if (standbyEisPlusBinding != null) {
+                                applyHardwareEisRequest(recordBuilder)
+                                applyHardwareOisRequest(
+                                    recordBuilder,
+                                    oisAllowed = isOisAllowed && isOisSupportedForLens(standbyLens, targetPhysId),
+                                    physicalCameraId = targetPhysId,
+                                    vendorCameraIdOverride = camera.id
+                                )
+                                if (standbyEisPlusBinding.pipeline.shouldRequestOisSamples &&
+                                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                                ) {
+                                    runCatching {
+                                        recordBuilder.set(CaptureRequest.STATISTICS_OIS_DATA_MODE, CaptureRequest.STATISTICS_OIS_DATA_MODE_ON)
+                                    }
+                                }
+                            }
                             recordBuilder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
                             session.setRepeatingRequest(recordBuilder.build(), standbyCaptureCallback, backgroundHandler)
                             Log.i(TAG, "[KEEP_ULTRAWIDE_READY] Prewarmed recording-capable standby session active on ID ${camera.id} (${standbyLens.lensType})")
@@ -7279,7 +7300,7 @@ class Camera2Engine(private val context: Context) {
             isSoftwareCinemaRecording ||
             activeRecordingStreamConfig?.is10Bit == true ||
             camera.id == cameraDevice?.id ||
-            activeVideoEisPlusPipeline?.isRunning != true
+            videoEisPlusBindingsByCameraId.values.none { it.pipeline.isRunning }
         ) return null
 
         val pipelineCameraId = physicalCameraId ?: camera.id
