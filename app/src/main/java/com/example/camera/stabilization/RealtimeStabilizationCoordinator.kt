@@ -1146,18 +1146,18 @@ class RealtimeStabilizationCoordinator(context: Context) {
 
     private fun appendNativeResultLocked(result: MgcEisNativeEngine.FrameResult) {
         resultSequence += 1L
-        if (resultSequence <= 3L || resultSequence % 30L == 0L) {
-            EisPlusDiagnosticLog.event(
-                "NATIVE", "RESULT_QUEUED",
-                "sequence=$resultSequence type=${result.javaClass.simpleName} queueSize=${nativeResults.size + 1}",
-                if (result is MgcEisNativeEngine.FrameResult.Dropped) "WARN" else "INFO",
-            )
-        }
-        // Keep the result history strictly bounded. The previous implementation briefly
-        // reported 91 entries for a 90-entry ring because it logged before trimming.
+        // Keep the result history strictly bounded. Report the post-insert size, not the
+        // temporary size before the oldest history entry is evicted.
         val evictingOldest = nativeResults.size >= MAX_RESULT_COUNT
         nativeResults.addLast(SequencedNativeResult(resultSequence, result))
         if (evictingOldest) nativeResults.removeFirst()
+        if (resultSequence <= 3L || resultSequence % 30L == 0L) {
+            EisPlusDiagnosticLog.event(
+                "NATIVE", "RESULT_QUEUED",
+                "sequence=$resultSequence type=${result.javaClass.simpleName} storedHistorySize=${nativeResults.size}/$MAX_RESULT_COUNT evictingOldest=$evictingOldest",
+                if (result is MgcEisNativeEngine.FrameResult.Dropped) "WARN" else "INFO",
+            )
+        }
         if (evictingOldest && (resultSequence <= 3L || resultSequence % 30L == 0L)) {
             EisPlusDiagnosticLog.event(
                 "NATIVE", "RESULT_HISTORY_ROLLOVER",
