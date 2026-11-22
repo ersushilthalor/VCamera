@@ -504,8 +504,7 @@ private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit,
     var isExpanded by remember(photo.uri) { mutableStateOf(false) }
     val photoLoadState by produceState(
         initialValue = GalleryPhotoLoadState(isLoading = true, bitmap = null),
-        key1 = photo.uri,
-        key2 = photo.ultraWideUri
+        key1 = "${photo.uri}|${photo.ultraWideUri}"
     ) {
         val decoded = try {
             withContext(Dispatchers.IO) {
