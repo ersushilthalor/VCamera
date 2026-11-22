@@ -23,8 +23,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -189,7 +187,26 @@ private fun SpecialVideoPlayer(
     onClose: () -> Unit
 ) {
     var isUltraWide by rememberSaveable(clip.id) { mutableStateOf(false) }
+    var playbackPosition by rememberSaveable(clip.id) { mutableStateOf(0) }
+    var shouldResumePlayback by rememberSaveable(clip.id) { mutableStateOf(true) }
+    var playerPrepared by remember(clip.id) { mutableStateOf(false) }
+    val videoViewState = remember(clip.id) { mutableStateOf<VideoView?>(null) }
     val currentUri = if (isUltraWide) clip.ultraWideUri else clip.mainUri
+
+    // Snapshot and pause the current player before changing its source. VideoView otherwise
+    // keeps a PLAYING target state and may briefly autoplay the replacement from time zero.
+    val selectLens: (Boolean) -> Unit = { useUltraWide ->
+        if (isUltraWide != useUltraWide) {
+            videoViewState.value?.let { videoView ->
+                if (playerPrepared) {
+                    playbackPosition = videoView.currentPosition.coerceAtLeast(0)
+                    shouldResumePlayback = videoView.isPlaying
+                    videoView.pause()
+                }
+            }
+            isUltraWide = useUltraWide
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -218,24 +235,6 @@ private fun SpecialVideoPlayer(
             }
         }
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            LensSwitchButton(
-                label = "MAIN",
-                isSelected = !isUltraWide,
-                modifier = Modifier.weight(1f)
-            ) { isUltraWide = false }
-            LensSwitchButton(
-                label = "ULTRA-WIDE",
-                isSelected = isUltraWide,
-                modifier = Modifier.weight(1f)
-            ) { isUltraWide = true }
-        }
-
         AndroidView(
             modifier = Modifier
                 .fillMaxWidth()
@@ -243,9 +242,15 @@ private fun SpecialVideoPlayer(
                 .padding(horizontal = 8.dp),
             factory = { viewContext ->
                 VideoView(viewContext).apply {
-                    setMediaController(MediaController(viewContext))
+                    videoViewState.value = this
+                    val controller = MediaController(viewContext)
+                    controller.setAnchorView(this)
+                    setMediaController(controller)
                     setOnPreparedListener { player ->
                         player.isLooping = false
+                        playerPrepared = true
+                        playbackPosition = 0
+                        shouldResumePlayback = true
                         start()
                     }
                     setVideoURI(currentUri)
@@ -253,31 +258,63 @@ private fun SpecialVideoPlayer(
                 }
             },
             update = { videoView ->
+                videoViewState.value = videoView
                 val newKey = currentUri.toString()
                 if (videoView.tag != newKey) {
-                    val previousPosition = videoView.currentPosition
-                    val wasPlaying = videoView.isPlaying
+                    val restorePosition = playbackPosition
+                    val resumeAfterSwitch = shouldResumePlayback
+                    playerPrepared = false
+
                     videoView.setOnPreparedListener { player ->
-                        val safePosition = previousPosition.coerceAtMost(
-                            (player.duration - 250).coerceAtLeast(0)
-                        )
-                        if (safePosition > 0) videoView.seekTo(safePosition)
-                        if (wasPlaying) videoView.start()
+                        player.isLooping = false
+                        val lastSafePosition = (player.duration - 250).coerceAtLeast(0)
+                        val targetPosition = restorePosition.coerceAtMost(lastSafePosition)
+
+                        if (targetPosition > 0) {
+                            // Do not start until the seek has completed; otherwise the first
+                            // frames of the replacement lens can replay from the beginning.
+                            player.setOnSeekCompleteListener { seekedPlayer ->
+                                seekedPlayer.setOnSeekCompleteListener(null)
+                                playbackPosition = seekedPlayer.currentPosition.coerceAtLeast(0)
+                                playerPrepared = true
+                                if (resumeAfterSwitch) videoView.start()
+                            }
+                            player.seekTo(targetPosition)
+                        } else {
+                            playbackPosition = 0
+                            playerPrepared = true
+                            if (resumeAfterSwitch) videoView.start()
+                        }
                     }
-                    videoView.setVideoURI(currentUri)
+
                     videoView.tag = newKey
+                    videoView.setVideoURI(currentUri)
                 }
             }
         )
 
-        Text(
-            text = "Switch lenses while keeping the playback position.",
-            color = Color.White.copy(alpha = 0.55f),
-            style = MaterialTheme.typography.bodySmall,
+        Surface(
             modifier = Modifier
                 .align(Alignment.CenterHorizontally)
-                .padding(12.dp)
-        )
+                .padding(top = 8.dp, bottom = 12.dp),
+            color = Color(0xFF20242B),
+            shape = RoundedCornerShape(22.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                LensSwitchButton(
+                    label = "0.5x",
+                    isSelected = isUltraWide
+                ) { selectLens(true) }
+                LensSwitchButton(
+                    label = "1x",
+                    isSelected = !isUltraWide
+                ) { selectLens(false) }
+            }
+        }
     }
 }
 
@@ -285,19 +322,26 @@ private fun SpecialVideoPlayer(
 private fun LensSwitchButton(
     label: String,
     isSelected: Boolean,
-    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
-    Button(
-        onClick = onClick,
-        modifier = modifier.height(48.dp),
-        shape = RoundedCornerShape(14.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = if (isSelected) Color(0xFF2D65B8) else Color(0xFF20242B),
-            contentColor = Color.White
-        )
+    Surface(
+        modifier = Modifier
+            .height(34.dp)
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(18.dp),
+        color = if (isSelected) Color(0xFF2D65B8) else Color.Transparent,
+        contentColor = Color.White
     ) {
-        Text(label, style = MaterialTheme.typography.labelLarge)
+        Box(
+            modifier = Modifier.padding(horizontal = 14.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = label,
+                color = Color.White,
+                style = MaterialTheme.typography.labelLarge
+            )
+        }
     }
 }
 
