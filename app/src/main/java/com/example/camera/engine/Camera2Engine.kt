@@ -1158,6 +1158,21 @@ class Camera2Engine(private val context: Context) {
                     height = effectiveStandbyVideoSize.height
                 )
 
+                val targetPhysId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                    standbyLens.physicalCameraId != null &&
+                    standbyLens.supportsPhysicalStream &&
+                    standbyLens.physicalCameraId != standbyLens.cameraId) {
+                    standbyLens.physicalCameraId
+                } else null
+                val standbyEisPlusBinding = startStandbyVideoEisPlusPipeline(
+                    camera = camera,
+                    standbyLens = standbyLens,
+                    recordingSize = effectiveStandbyVideoSize,
+                    physicalCameraId = targetPhysId,
+                    relay = recordingRelay
+                )
+                val standbyEisPlusSurface = standbyEisPlusBinding?.pipeline?.surface?.takeIf { it.isValid }
+
                 val recordBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                     addTarget(standbyPreviewSurf)
                     addTarget(standbyRecorderSurf)
@@ -1182,25 +1197,6 @@ class Camera2Engine(private val context: Context) {
                     set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
                 }
                 ultraWideStandbyRequestBuilder = recordBuilder
-
-                val targetPhysId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
-                    standbyLens.physicalCameraId != null &&
-                    standbyLens.supportsPhysicalStream &&
-                    standbyLens.physicalCameraId != standbyLens.cameraId) {
-                    standbyLens.physicalCameraId
-                } else null
-                val standbyEisPlusBinding = startStandbyVideoEisPlusPipeline(
-                    camera = camera,
-                    standbyLens = standbyLens,
-                    recordingSize = effectiveStandbyVideoSize,
-                    physicalCameraId = targetPhysId,
-                    relay = recordingRelay
-                )
-                val standbyEisPlusSurface = standbyEisPlusBinding?.pipeline?.surface?.takeIf { it.isValid }
-                if (standbyEisPlusSurface != null) {
-                    // The EIS+ ImageReader must be part of the same recording session as this sensor.
-                    // Otherwise CaptureResults and YUV timestamps cannot be matched reliably.
-                }
                 val is10BitStandby = recConfig?.is10Bit == true
 
                 var retriedWithoutAdvancedConfig = false
@@ -4951,7 +4947,7 @@ class Camera2Engine(private val context: Context) {
     private fun attachPreviewEisPlusOutput(
         session: CameraCaptureSession,
         camera: CameraDevice,
-        configGeneration: Long
+        configGeneration: Int
     ): Boolean {
         val relay = previewVideoEisPlusRelay ?: return true
         val latch = CountDownLatch(1)
@@ -7579,8 +7575,19 @@ class Camera2Engine(private val context: Context) {
     }
 
     private fun setActiveRecordingSource(source: PreviewStreamSource, sessionCameraId: String?) {
-        dualCameraRecordingRelay?.setActiveSource(source)
-        activateVideoEisPlusForSource(source, sessionCameraId)
+        val relay = dualCameraRecordingRelay
+        relay?.setActiveSource(source)
+        // Special Video can pin the primary encoder to MAIN while ULTRAWIDE is the
+        // companion stream. In that case keep EIS+ bound to MAIN's own pipeline.
+        val effectiveSource = relay?.activeSource ?: source
+        val effectiveCameraId = if (effectiveSource == source) sessionCameraId else null
+        activateVideoEisPlusForSource(effectiveSource, effectiveCameraId)
+        EisPlusDiagnosticLog.event(
+            "CAMERA2", "EIS_PLUS_ACTIVE_SOURCE",
+            "source=$effectiveSource sessionCamera=$effectiveCameraId " +
+                "pipelineReady=${activeVideoEisPlusPipeline?.isRunning == true} " +
+                "pipelineCamera=${activeVideoEisPlusSessionCameraId ?: "unbound"}"
+        )
     }
 
     private fun startStandbyVideoEisPlusPipeline(
