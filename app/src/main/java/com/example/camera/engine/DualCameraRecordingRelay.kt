@@ -57,7 +57,8 @@ class DualCameraRecordingRelay(
     initialAdjustments: com.example.camera.model.VideoAdjustments? = null,
     private val initialSpecialVideoPiPEnabled: Boolean = false,
     private val secondarySensorOrientation: Int = sensorOrientation,
-    private val secondaryEncoderTargetSurface: Surface? = null
+    private val secondaryEncoderTargetSurface: Surface? = null,
+    private val onSpecialVideoTimelineStarted: ((Long) -> Unit)? = null
 ) {
     companion object {
         private const val TAG = "DualCamRecRelay"
@@ -138,6 +139,7 @@ class DualCameraRecordingRelay(
     private val secondaryRecordingEnabled = AtomicBoolean(false)
     private val specialVideoRecordingTimeline = SpecialVideoRecordingTimeline()
     private val hasLoggedSpecialVideoFrameWait = AtomicBoolean(false)
+    private val hasNotifiedSpecialVideoTimelineStarted = AtomicBoolean(false)
     @Volatile private var lastUltraWideOutputPtsNs: Long = -1L
     val ultraWideRecordedFrameCount = AtomicLong(0L)
     private var programId: Int = 0
@@ -232,6 +234,7 @@ class DualCameraRecordingRelay(
         recordingStartMonotonicNs = 0L
         specialVideoRecordingTimeline.reset()
         hasLoggedSpecialVideoFrameWait.set(false)
+        hasNotifiedSpecialVideoTimelineStarted.set(false)
         streamClockOffsetNs = 0L
         pendingClockSyncOnSwitch = false
         totalPausedDurationNs = 0L
@@ -248,6 +251,7 @@ class DualCameraRecordingRelay(
         recordingStartMonotonicNs = 0L
         specialVideoRecordingTimeline.reset()
         hasLoggedSpecialVideoFrameWait.set(false)
+        hasNotifiedSpecialVideoTimelineStarted.set(false)
         Log.i(TAG, "[RECORDING_RELAY] Streaming to encoder stopped (relayedFrames=${relayedFrameCount.get()})")
     }
 
@@ -678,6 +682,13 @@ class DualCameraRecordingRelay(
 
         if (isSpecialDualRecording && hasLoggedSpecialVideoFrameWait.getAndSet(false)) {
             Log.i(TAG, "[SPECIAL_VIDEO] Both camera streams are ready; shared timeline started at $recordingStartNs ns")
+        }
+        if (isSpecialDualRecording && hasNotifiedSpecialVideoTimelineStarted.compareAndSet(false, true)) {
+            try {
+                onSpecialVideoTimelineStarted?.invoke(recordingStartNs)
+            } catch (t: Throwable) {
+                Log.w(TAG, "[SPECIAL_VIDEO] Shared timeline callback failed: ${t.message}", t)
+            }
         }
 
         // Special Video records the ultra-wide camera as a separate, continuously updated

@@ -74,6 +74,10 @@ class NormalVideoRecordingEngine(private val context: Context) {
     private var audioRecordThread: Thread? = null
     private var audioDrainThread: Thread? = null
     private var totalAudioFramesWritten = 0L
+    private var audioFrameChunkSize = 4096
+    private var audioSampleRate = 48_000
+    private val audioCaptureStarted = AtomicBoolean(false)
+    @Volatile private var deferAudioStartUntilSpecialTimeline = false
 
     // Pause tracking
     private var pauseStartNs = 0L
@@ -117,11 +121,14 @@ class NormalVideoRecordingEngine(private val context: Context) {
         isFront: Boolean = false,
         sensorOrientation: Int = 90,
         deviceRotation: Int = 0,
-        preserveInputPresentationTimestamps: Boolean = false
+        preserveInputPresentationTimestamps: Boolean = false,
+        deferAudioStartUntilSpecialTimeline: Boolean = false
     ): Surface {
         activeCodec = codec
         outputFile = destFile
         this.preserveInputPresentationTimestamps = preserveInputPresentationTimestamps
+        this.deferAudioStartUntilSpecialTimeline = deferAudioStartUntilSpecialTimeline
+        audioCaptureStarted.set(false)
 
         isRecording.set(true)
         isStopping.set(false)
@@ -206,7 +213,7 @@ class NormalVideoRecordingEngine(private val context: Context) {
         // 4. Setup Audio Pipeline if requested
         if (isAudioEnabled) {
             try {
-                setupAudioPipeline()
+                setupAudioPipeline(startImmediately = !deferAudioStartUntilSpecialTimeline)
             } catch (e: Exception) {
                 Log.w(TAG, "Audio recording initialization skipped/failed: ${e.message}")
                 isAudioRequested = false
@@ -520,7 +527,7 @@ class NormalVideoRecordingEngine(private val context: Context) {
     // AUDIO PIPELINE
     // =========================================================================
 
-    private fun setupAudioPipeline() {
+    private fun setupAudioPipeline(startImmediately: Boolean) {
         val audioMime = MediaFormat.MIMETYPE_AUDIO_AAC
         val sampleRate = 48000
         val channelConfig = AudioFormat.CHANNEL_IN_STEREO
@@ -569,7 +576,7 @@ class NormalVideoRecordingEngine(private val context: Context) {
         try {
             encoder.configure(audioMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             encoder.start()
-            record.startRecording()
+            if (startImmediately) record.startRecording()
         } catch (e: Exception) {
             record.release()
             try { encoder.release() } catch (_: Throwable) {}
@@ -579,10 +586,41 @@ class NormalVideoRecordingEngine(private val context: Context) {
         }
 
         totalAudioFramesWritten = 0L
+        audioFrameChunkSize = frameChunkSize
+        audioSampleRate = sampleRate
         audioRecord = record
         audioCodec = encoder
+        audioCaptureStarted.set(startImmediately)
 
-        startAudioThreads(record, encoder, frameChunkSize, sampleRate)
+        if (startImmediately) {
+            startAudioThreads(record, encoder, frameChunkSize, sampleRate)
+        } else {
+            Log.i(TAG, "Special Video audio prepared; waiting for synchronized dual-camera timeline")
+        }
+    }
+
+    /** Starts main audio capture only after the Special Video shared video timeline exists. */
+    fun startDeferredAudioRecording() {
+        if (!deferAudioStartUntilSpecialTimeline || !isRecording.get() || !isAudioRequested) return
+        if (!audioCaptureStarted.compareAndSet(false, true)) return
+
+        val record = audioRecord
+        val encoder = audioCodec
+        if (record == null || encoder == null) {
+            audioCaptureStarted.set(false)
+            return
+        }
+
+        try {
+            record.startRecording()
+            totalAudioFramesWritten = 0L
+            startAudioThreads(record, encoder, audioFrameChunkSize, audioSampleRate)
+            Log.i(TAG, "Special Video audio capture started on the shared dual-camera timeline")
+        } catch (t: Throwable) {
+            audioCaptureStarted.set(false)
+            isAudioRequested = false
+            Log.w(TAG, "Could not start deferred Special Video audio capture", t)
+        }
     }
 
     private fun startAudioThreads(

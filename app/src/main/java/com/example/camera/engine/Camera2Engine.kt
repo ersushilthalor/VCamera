@@ -6925,7 +6925,8 @@ class Camera2Engine(private val context: Context) {
                         isFront = isFront,
                         sensorOrientation = sensorOrient,
                         deviceRotation = currentRot,
-                        preserveInputPresentationTimestamps = specialVideoRecordingRequested
+                        preserveInputPresentationTimestamps = specialVideoRecordingRequested,
+                        deferAudioStartUntilSpecialTimeline = specialVideoRecordingRequested
                     )
                 } catch (t: Throwable) {
                     Log.e(TAG, "Failed starting normal video recording: ${t.message}", t)
@@ -7069,7 +7070,10 @@ class Camera2Engine(private val context: Context) {
                     secondarySensorOrientation = if (isSpecialVideoRecording && uwLensForRec != null) {
                         getCharacteristics(uwLensForRec.cameraId)?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: sensorOrient
                     } else sensorOrient,
-                    secondaryEncoderTargetSurface = if (isSpecialVideoRecording) specialVideoUltraWideSurface else null
+                    secondaryEncoderTargetSurface = if (isSpecialVideoRecording) specialVideoUltraWideSurface else null,
+                    onSpecialVideoTimelineStarted = if (isSpecialVideoRecording) {
+                        { _ -> normalVideoRecorder.startDeferredAudioRecording() }
+                    } else null
                 )
                 if (relay.isRelayReady) {
                     if (isKeepUwReadyBack && uwLensForRec != null && mainLensForRec != null) {
