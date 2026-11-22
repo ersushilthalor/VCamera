@@ -8136,6 +8136,7 @@ class Camera2Engine(private val context: Context) {
         val contentValues = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Video.Media.TITLE, fileName.substringBeforeLast('.'))
+            put(MediaStore.Video.Media.DESCRIPTION, "VCamera")
             put(MediaStore.Video.Media.MIME_TYPE, mimeType)
             put(MediaStore.Video.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
             put(MediaStore.Video.Media.DATE_TAKEN, System.currentTimeMillis())
@@ -8181,6 +8182,7 @@ class Camera2Engine(private val context: Context) {
                     val minimalValues = ContentValues().apply {
                         put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
                         put(MediaStore.Video.Media.MIME_TYPE, mimeType)
+                        put(MediaStore.Video.Media.DESCRIPTION, "VCamera")
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                             put(MediaStore.Video.Media.RELATIVE_PATH, "DCIM/Camera")
                             put(MediaStore.Video.Media.IS_PENDING, 1)
