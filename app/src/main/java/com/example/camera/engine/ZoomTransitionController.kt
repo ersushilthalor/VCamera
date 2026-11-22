@@ -94,10 +94,13 @@ class ZoomTransitionController(
             durationMs: Long,
             holdDurationMs: Long,
             isUltraWideToMainSwitch: Boolean,
-            isDirectHalfXToOneXHold: Boolean
+            isDirectHalfXToOneXHold: Boolean,
+            includeHoldWithinDuration: Boolean = false
         ): Long {
             val requestedDuration = durationMs.coerceAtLeast(1L)
-            return if (isUltraWideToMainSwitch && !isDirectHalfXToOneXHold) {
+            val shouldReserveHoldTime = isUltraWideToMainSwitch &&
+                (!isDirectHalfXToOneXHold || includeHoldWithinDuration)
+            return if (shouldReserveHoldTime) {
                 (requestedDuration - holdDurationMs).coerceAtLeast(1L)
             } else {
                 requestedDuration
@@ -478,6 +481,7 @@ class ZoomTransitionController(
         scope: CoroutineScope,
         durationMs: Long = TOTAL_TRANSITION_DURATION_MS,
         skipHoldAtSwitchPoint: Boolean = false,
+        includeHoldWithinDuration: Boolean = false,
         onZoomUpdate: (Float) -> Unit,
         onComplete: (Float, LensInfo?) -> Unit
     ): Job {
@@ -543,7 +547,8 @@ class ZoomTransitionController(
                 durationMs = transitionDurationMs,
                 holdDurationMs = holdDuration,
                 isUltraWideToMainSwitch = isUltraWideToMainSwitch,
-                isDirectHalfXToOneXHold = isHoldTimeHandoffEligible(startZ, endZ)
+                isDirectHalfXToOneXHold = isHoldTimeHandoffEligible(startZ, endZ),
+                includeHoldWithinDuration = includeHoldWithinDuration
             )
 
             if (isUltraWideToMainSwitch) {
@@ -784,7 +789,12 @@ class ZoomTransitionController(
                                 it >= holdFrameSequenceBeforeApply + HOLD_FOV_CONFIRMATION_FRAMES
                             }
                         }
-                        delay(holdDuration)
+                        val remainingHoldMs = if (includeHoldWithinDuration) {
+                            (startTime + transitionDurationMs - SystemClock.uptimeMillis()).coerceAtLeast(0L)
+                        } else {
+                            holdDuration
+                        }
+                        delay(remainingHoldMs)
                     }
                     onSelectLensOnEngine(mainWideLens, effectiveSwitchZoom, true)
                 } else if (mainLensPreparedInOverlap) {
