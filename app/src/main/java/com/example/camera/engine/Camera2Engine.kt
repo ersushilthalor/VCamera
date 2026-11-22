@@ -6900,6 +6900,35 @@ class Camera2Engine(private val context: Context) {
         )
     }
 
+
+    private fun resolveVideoEisPlusYuvSize(
+        cameraId: String,
+        preferredWidth: Int,
+        preferredHeight: Int
+    ): Size? {
+        val map = getCharacteristics(cameraId)
+            ?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null
+        val sizes = map.getOutputSizes(ImageFormat.YUV_420_888)?.toList().orEmpty()
+        if (sizes.isEmpty() || preferredWidth <= 0 || preferredHeight <= 0) return null
+        val targetLong = max(preferredWidth, preferredHeight)
+        val targetShort = min(preferredWidth, preferredHeight)
+        val targetArea = targetLong.toLong() * targetShort.toLong()
+        val targetRatio = targetLong.toFloat() / targetShort.toFloat()
+        val candidates = sizes.filter { size ->
+            val longEdge = max(size.width, size.height)
+            val shortEdge = min(size.width, size.height)
+            shortEdge >= 360 && longEdge >= 640 &&
+                kotlin.math.abs(longEdge.toFloat() / shortEdge.toFloat() - targetRatio) <= 0.025f
+        }
+        if (candidates.isEmpty()) return null
+        return candidates.firstOrNull { it.width == targetLong && it.height == targetShort }
+            ?: candidates.filter { it.width.toLong() * it.height.toLong() <= targetArea }
+                .maxByOrNull { it.width.toLong() * it.height.toLong() }
+            ?: candidates.minByOrNull {
+                kotlin.math.abs(it.width.toLong() * it.height.toLong() - targetArea)
+            }
+    }
+
     private fun findBestFpsRange(chars: CameraCharacteristics, targetFps: Int): Range<Int>? {
         val availableFpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
         if (availableFpsRanges.isEmpty()) return null
@@ -7623,6 +7652,39 @@ class Camera2Engine(private val context: Context) {
                     uwLensForRec != null &&
                     mainLensForRec != null
 
+                // Photon EIS+ is only eligible for standard SDR single-camera Video mode.
+                // Special Video, Cinema, 10-bit/HDR, ultra-wide, and dual-ready sessions keep
+                // their existing synchronized OES pipelines unchanged.
+                val eisPlusLogicalZoom = canUseLogicalZoomForLens(camera.id, lens, currentZoom)
+                val eisPlusPhysicalId = if (eisPlusLogicalZoom) null else lens.physicalCameraId
+                    ?.takeIf { chars?.physicalCameraIds?.contains(it) == true }
+                val eisPlusCameraId = eisPlusPhysicalId ?: camera.id
+                val eisPlusCameraChars = getCharacteristics(eisPlusCameraId)
+                val eisPlusTimingChars = getCharacteristics(camera.id) ?: chars ?: eisPlusCameraChars
+                val eisPlusYuvSize = resolveVideoEisPlusYuvSize(
+                    eisPlusCameraId,
+                    max(videoRes.width, videoRes.height),
+                    min(videoRes.width, videoRes.height)
+                )
+                val eisPlusEligible = preferences.videoEisPlusEnabled &&
+                    currentMode == CameraMode.VIDEO &&
+                    !isSpecialVideoRecording &&
+                    !isSoftwareCinema &&
+                    !is10BitSession &&
+                    !isKeepUwReadyBack &&
+                    lens.lensType != LensType.ULTRAWIDE
+                val eisPlusCandidate = if (
+                    eisPlusEligible && eisPlusCameraChars != null &&
+                    eisPlusTimingChars != null && eisPlusYuvSize != null
+                ) {
+                    VideoEisPlusPipeline(context).takeIf {
+                        it.isSupported(eisPlusCameraChars, eisPlusTimingChars)
+                    }
+                } else null
+                if (preferences.videoEisPlusEnabled && eisPlusEligible && eisPlusCandidate == null) {
+                    Log.w(TAG, "Photon EIS+ unavailable: camera lacks realtime timestamp/gyro support or a matching YUV stream size")
+                }
+
                 // Initialize DualCameraRecordingRelay as the live GPU processing surface:
                 // Camera2 Surface -> GPU/EGL relay -> VideoAdjustments shader -> split to:
                 // 1. Preview surface (viewfinder)
@@ -7638,7 +7700,7 @@ class Camera2Engine(private val context: Context) {
                     sensorOrientation = sensorOrient,
                     deviceRotation = currentRot,
                     isFront = isFront,
-                    previewTargetSurface = null,
+                    previewTargetSurface = if (eisPlusCandidate != null) previewSurf else null,
                     previewWidth = viewfinderWidth,
                     previewHeight = viewfinderHeight,
                     initialAdjustments = currentVideoAdjustments,
@@ -7649,8 +7711,39 @@ class Camera2Engine(private val context: Context) {
                     secondaryEncoderTargetSurface = if (isSpecialVideoRecording) specialVideoUltraWideSurface else null,
                     onSpecialVideoTimelineStarted = if (isSpecialVideoRecording) {
                         { _ -> normalVideoRecorder.startDeferredAudioRecording() }
-                    } else null
+                    } else null,
+                    eisPlusPipeline = eisPlusCandidate
                 )
+                var eisPlusPreviewViaRelay = eisPlusCandidate != null && relay.isRelayReady && relay.isRelayPreviewActive
+                var eisPlusStarted = false
+                if (eisPlusPreviewViaRelay && eisPlusCandidate != null && eisPlusYuvSize != null &&
+                    eisPlusCameraChars != null && eisPlusTimingChars != null
+                ) {
+                    val started = eisPlusCandidate.start(
+                        cameraId = eisPlusCameraId,
+                        characteristics = eisPlusCameraChars,
+                        timingCharacteristics = eisPlusTimingChars,
+                        width = eisPlusYuvSize.width,
+                        height = eisPlusYuvSize.height,
+                        frontFacing = isFront,
+                        strength = preferences.videoEisPlusStrength,
+                        lookaheadFrames = preferences.videoEisPlusLookahead,
+                        imageHandler = backgroundHandler ?: mainHandler,
+                        onFrameAvailable = { relay.notifyEisPlusFrameAvailable() },
+                        onUnavailable = {
+                            Log.w(TAG, "Photon EIS+ input pipeline did not start; using synchronized relay fallback")
+                        }
+                    )
+                    if (started && eisPlusCandidate.surface?.isValid == true) {
+                        activeVideoEisPlusPipeline = eisPlusCandidate
+                        activeVideoEisPlusSurface = eisPlusCandidate.surface
+                        videoEisPlusCaptureGeneration += 1L
+                        eisPlusStarted = true
+                    } else {
+                        eisPlusCandidate.stop()
+                        Log.w(TAG, "Photon EIS+ initialization failed; falling back to unwarped relay frames")
+                    }
+                }
                 if (relay.isRelayReady) {
                     if (isKeepUwReadyBack && uwLensForRec != null && mainLensForRec != null) {
                         val bestUwRes = resolveEffectiveVideoResolutionForLens(uwLensForRec, videoRes)
