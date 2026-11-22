@@ -130,7 +130,10 @@ internal object EisPlusDiagnosticLog {
         val directory = File(context.applicationContext.filesDir, LOG_DIRECTORY_NAME)
         return directory.listFiles().orEmpty()
             .filter { it.isFile && (it.extension.equals("log", true) || it.extension.equals("csv", true)) }
-            .sortedByDescending(File::lastModified)
+            .sortedWith(
+                compareByDescending<File> { it.extension.equals("log", true) }
+                    .thenByDescending { it.lastModified() },
+            )
     }
 
     private fun pruneOldFiles(directory: File?) {
