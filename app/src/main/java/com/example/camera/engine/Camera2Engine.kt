@@ -7019,7 +7019,9 @@ class Camera2Engine(private val context: Context) {
                     ?: backLensesForRec.firstOrNull { it.lensType == LensType.WIDE && !it.isZoomPreset }
                     ?: backLensesForRec.firstOrNull { it.lensType == LensType.WIDE }
 
-                val initialStreamSource = if (lens.lensType == LensType.ULTRAWIDE) {
+                val initialStreamSource = if (isSpecialVideoRecording) {
+                    PreviewStreamSource.MAIN
+                } else if (lens.lensType == LensType.ULTRAWIDE) {
                     PreviewStreamSource.ULTRAWIDE
                 } else {
                     PreviewStreamSource.MAIN
