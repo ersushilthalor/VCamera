@@ -6,12 +6,11 @@ import java.util.Locale
 import java.util.concurrent.Executors
 
 /**
- * Debug-only, bounded native-input trace for differential EIS reconstruction.
+ * Bounded native-input trace for post-recording EIS diagnostics.
  *
- * This has no image payload and is deliberately outside the stabilizer's timing path: it retains
- * only the exact Java-to-Native call sequence in memory, then writes one immutable snapshot from
- * a background thread.  The snapshot can be replayed by the isolated original-MGC oracle; it is
- * never read by, packaged with, or executed by the camera pipeline.
+ * This contains no image payload and stays outside the stabilizer's timing path. It retains the
+ * Java-to-native call sequence in memory, then writes one immutable CSV snapshot on a background
+ * thread. The diagnostic trace is never read by or executed by the camera pipeline.
  */
 internal class MgcEisDiagnosticTrace(
     private val cacheDirectory: File,
@@ -39,7 +38,7 @@ internal class MgcEisDiagnosticTrace(
         snapshotQueued = false
         gyroCount = 0
         frameCount = 0
-        if (!active) return
+        EisPlusDiagnosticLog.event("NATIVE_TRACE", "CAPTURE_STARTED", "size=${width}x$height frontFacing=$frontFacing strength=$strength")
         entries += listOf(
             "HEADER",
             width.toString(),
