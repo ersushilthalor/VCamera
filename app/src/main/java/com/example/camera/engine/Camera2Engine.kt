@@ -4844,7 +4844,7 @@ class Camera2Engine(private val context: Context) {
     private fun attachPreviewEisPlusOutput(
         session: CameraCaptureSession,
         camera: CameraDevice,
-        configGeneration: Long
+        configGeneration: Int
     ): Boolean {
         val relay = previewVideoEisPlusRelay ?: return true
         val latch = CountDownLatch(1)
