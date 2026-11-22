@@ -5,6 +5,7 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.TotalCaptureResult
 import android.os.Handler
 import android.util.Log
+import com.example.camera.stabilization.EisPlusDiagnosticLog
 import com.example.camera.stabilization.RealtimeStabilizationCoordinator
 import com.example.camera.stabilization.StabilizationFrame
 import com.example.camera.stabilization.StabilizationImageReader
@@ -23,12 +24,14 @@ internal class VideoEisPlusPipeline(private val context: android.content.Context
         private set
     @Volatile var lastStartFailureReason: String? = null
         private set
+    private var dequeuedFrameCount = 0L
 
     /** Camera2Engine uses this only for a confirmed video-stabilization HAL conflict. */
     @Volatile var onRuntimeUnavailable: (() -> Unit)? = null
 
     init {
         coordinator.onEnhancedStabilizationUnavailable = {
+            EisPlusDiagnosticLog.event("PIPELINE", "RUNTIME_UNAVAILABLE", "HAL reported video stabilization remained active after OFF request", "ERROR")
             isUnavailable = true
             onRuntimeUnavailable?.invoke()
         }
@@ -63,13 +66,21 @@ internal class VideoEisPlusPipeline(private val context: android.content.Context
         onFrameAvailable: () -> Unit,
         onUnavailable: () -> Unit
     ): Boolean {
-        stop()
+        if (session != null || imageReader != null) stop()
+        EisPlusDiagnosticLog.beginIfNeeded(
+            context.applicationContext,
+            "cameraId=$cameraId size=${width}x$height frontFacing=$frontFacing strength=$strength lookahead=$lookaheadFrames",
+        )
+        dequeuedFrameCount = 0L
+        EisPlusDiagnosticLog.event("PIPELINE", "START_REQUEST", "cameraId=$cameraId")
         lastStartFailureReason = supportFailureReason(characteristics, timingCharacteristics)
             ?: if (width <= 0 || height <= 0) "no matching positive-sized YUV output" else null
         if (lastStartFailureReason != null) {
             isUnavailable = true
+            EisPlusDiagnosticLog.event("PIPELINE", "START_REJECTED", lastStartFailureReason.orEmpty(), "ERROR")
             Log.w("VideoEisPlusPipeline", "Photon EIS+ start unavailable: $lastStartFailureReason")
             onUnavailable()
+            EisPlusDiagnosticLog.finish("pipeline_start_rejected: ${lastStartFailureReason.orEmpty()}")
             return false
         }
         return try {
@@ -97,6 +108,7 @@ internal class VideoEisPlusPipeline(private val context: android.content.Context
             session = eisSession
             if (!eisSession.start()) {
                 lastStartFailureReason = "MGC native engine or calibrated gyro stream failed to start"
+                EisPlusDiagnosticLog.event("PIPELINE", "SESSION_START_FAILED", lastStartFailureReason.orEmpty(), "ERROR")
                 stop()
                 isUnavailable = true
                 Log.w("VideoEisPlusPipeline", "Photon EIS+ unavailable: $lastStartFailureReason")
@@ -105,6 +117,7 @@ internal class VideoEisPlusPipeline(private val context: android.content.Context
             } else {
                 lastStartFailureReason = null
                 isUnavailable = false
+                EisPlusDiagnosticLog.event("PIPELINE", "SESSION_ACTIVE", "cameraId=$cameraId size=${width}x$height")
                 Log.i(
                     "VideoEisPlusPipeline",
                     "Photon EIS+ input started: camera=$cameraId size=${width}x$height " +
@@ -115,6 +128,7 @@ internal class VideoEisPlusPipeline(private val context: android.content.Context
         } catch (t: Throwable) {
             lastStartFailureReason = t.message?.takeIf { it.isNotBlank() }
                 ?: "pipeline initialization exception"
+            EisPlusDiagnosticLog.event("PIPELINE", "INITIALIZATION_EXCEPTION", "${t.javaClass.simpleName}: ${t.message}", "ERROR")
             Log.e("VideoEisPlusPipeline", "Failed to initialize Photon EIS+: $lastStartFailureReason", t)
             stop()
             isUnavailable = true
@@ -133,16 +147,38 @@ internal class VideoEisPlusPipeline(private val context: android.content.Context
         coordinator.submitCaptureResult(result, generation, request, outputPhysicalCameraId)
     }
 
-    fun dequeueFrame(): StabilizationFrame? = session?.dequeueFrame()
+    fun dequeueFrame(): StabilizationFrame? {
+        val frame = session?.dequeueFrame()
+        if (frame != null) {
+            dequeuedFrameCount += 1L
+            if (dequeuedFrameCount <= 3L || dequeuedFrameCount % 30L == 0L) {
+                EisPlusDiagnosticLog.event(
+                    "PIPELINE", "FRAME_DELIVERED",
+                    "count=$dequeuedFrameCount timestampNs=${frame.timestampNs} transformApplied=${frame.transform != null} image=${frame.image.width}x${frame.image.height}",
+                    if (frame.transform != null) "INFO" else "WARN",
+                )
+            }
+        }
+        return frame
+    }
 
     fun stop() {
-        try { session?.stop() } catch (_: Throwable) {}
+        EisPlusDiagnosticLog.event(
+            "PIPELINE", "STOP",
+            "running=$isRunning unavailable=$isUnavailable deliveredFrames=$dequeuedFrameCount failure=${lastStartFailureReason.orEmpty()}",
+        )
+        try { session?.stop() } catch (error: Throwable) {
+            EisPlusDiagnosticLog.event("PIPELINE", "SESSION_STOP_EXCEPTION", error.toString(), "WARN")
+        }
         session = null
         val reader = imageReader
         imageReader = null
         if (reader != null) {
             try { coordinator.discardStabilizationImages(reader) } catch (_: Throwable) {}
-            try { reader.close() } catch (_: Throwable) {}
+            try { reader.close() } catch (error: Throwable) {
+                EisPlusDiagnosticLog.event("PIPELINE", "IMAGE_READER_CLOSE_EXCEPTION", error.toString(), "WARN")
+            }
         }
+        EisPlusDiagnosticLog.finish("video_eis_plus_pipeline_stopped")
     }
 }
