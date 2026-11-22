@@ -200,6 +200,7 @@ fun CameraScreen(
     val isRecordingVideo by viewModel.engine.isRecordingVideo.collectAsStateWithLifecycle()
     val isRecordingPaused by viewModel.engine.isRecordingPaused.collectAsStateWithLifecycle()
     val videoEisPlusEnabled by viewModel.videoEisPlusEnabled.collectAsStateWithLifecycle()
+    val videoEisPlusStatus by viewModel.videoEisPlusStatus.collectAsStateWithLifecycle()
     val isGpuRelayPreviewActive by viewModel.engine.isGpuRelayPreviewActive.collectAsStateWithLifecycle()
     val isSavingVideo by viewModel.isSavingVideo.collectAsStateWithLifecycle()
     val videoDurationSeconds by viewModel.engine.videoDurationSeconds.collectAsStateWithLifecycle()
@@ -661,6 +662,7 @@ fun CameraScreen(
             isSpecialVideoEnabled = instantSwitchState.isShowUltraWidePreview,
             isSpecialPhotoEnabled = isSpecialPhotoEnabled,
             isEisPlusEnabled = videoEisPlusEnabled,
+            eisPlusStatus = videoEisPlusStatus,
             cinemaConfig = cinemaConfig,
             isEvOpen = false,
             exposureCompensation = exposureCompensation,
