@@ -262,11 +262,12 @@ class RealtimeStabilizationCoordinator(context: Context) {
     val isGyroscopeAvailable: Boolean
         get() = gyroSensor != null
 
-    /** Request legacy OIS samples only when the HAL advertises that result stream. */
+    /**
+     * Request legacy OIS data when lens-intrinsics telemetry is not the selected source.
+     * Older Camera2 HALs may return OIS samples without advertising the API-29 data-mode key.
+     */
     val shouldRequestOisSamples: Boolean
-        get() = calibration?.let {
-            it.supportsOisSamples && !it.supportsLensIntrinsicsSamples
-        } == true
+        get() = calibration?.supportsLensIntrinsicsSamples != true
 
     /** True when the active camera advertises at least one optical-correction telemetry source. */
     val supportsOpticalTelemetry: Boolean
@@ -281,8 +282,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
      */
     val shouldDisableOisForMissingTelemetry: Boolean
         get() = synchronized(lock) {
-            supportsOpticalTelemetry &&
-                activeSessionCount > 0 &&
+            activeSessionCount > 0 &&
                 captureResultCount >= HAL_OPTICAL_CORRECTION_PROBE_FRAME_COUNT &&
                 !opticalCorrectionSourceUsable
         }
