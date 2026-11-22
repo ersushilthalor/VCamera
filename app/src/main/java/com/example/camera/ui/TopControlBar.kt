@@ -288,6 +288,7 @@ fun TopControlBar(
 
         val primaryBadge = @Composable {
             when (cameraMode) {
+                CameraMode.PHOTO -> {}
                 CameraMode.VIDEO -> {
                     val resLabel = when {
                         videoResolution?.width == 3840 || videoResolution?.height == 3840 -> "4K"
@@ -326,6 +327,7 @@ fun TopControlBar(
 
         val secondaryBadge = @Composable {
             when (cameraMode) {
+                CameraMode.PHOTO -> {}
                 CameraMode.VIDEO -> {
                     Box(
                         modifier = Modifier

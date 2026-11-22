@@ -1659,7 +1659,7 @@ class Camera2Engine(private val context: Context) {
     private val engineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     // Capture Settings State
-    var currentMode: CameraMode = CameraMode.VIDEO
+    var currentMode: CameraMode = CameraMode.PHOTO
     var flashMode: FlashMode = FlashMode.OFF
         set(value) {
             field = value
@@ -2261,8 +2261,9 @@ class Camera2Engine(private val context: Context) {
 
     fun getTargetAspectRatioForMode(mode: CameraMode = currentMode): Float {
         return when (mode) {
-                        CameraMode.CINEMA -> cinemaConfig.value.aspectRatio.ratioValue
-            else -> 16f / 9f // Fixed 9:16 portrait (sensor landscape 16:9)
+            CameraMode.PHOTO -> 4f / 3f // Native photo framing (portrait 3:4)
+            CameraMode.CINEMA -> cinemaConfig.value.aspectRatio.ratioValue
+            CameraMode.VIDEO -> 16f / 9f // Portrait 9:16 framing from a landscape sensor stream
         }
     }
 
@@ -3796,8 +3797,8 @@ class Camera2Engine(private val context: Context) {
         val previousMode = currentMode
         val oldRatio = getTargetAspectRatioForMode(previousMode)
         val newRatio = getTargetAspectRatioForMode(mode)
-        val was43 = false
-        val is43 = false
+        val was43 = previousMode == CameraMode.PHOTO
+        val is43 = mode == CameraMode.PHOTO
         val oldStreamRatio = if (was43) 4f / 3f else 16f / 9f
         val newStreamRatio = if (is43) 4f / 3f else 16f / 9f
         val wasVideoTemplate = (previousMode == CameraMode.VIDEO || previousMode == CameraMode.CINEMA)
@@ -6313,8 +6314,138 @@ class Camera2Engine(private val context: Context) {
     /**
      * Take still photo (JPEG + optional RAW). In 50M mode, triggers single-frame computational 50MP capture.
      */
+    private val photoCaptureInProgress = java.util.concurrent.atomic.AtomicBoolean(false)
+
     fun takePhoto(onComplete: (Uri?) -> Unit) {
-        onComplete(null)
+        val camera = cameraDevice
+        val session = captureSession
+        val jpegReader = imageReaderJpeg
+        val handler = backgroundHandler
+
+        if (camera == null || session == null || jpegReader == null ||
+            !jpegReader.surface.isValid || handler == null || !_isCameraReady.value
+        ) {
+            onComplete(null)
+            return
+        }
+        if (!photoCaptureInProgress.compareAndSet(false, true)) return
+
+        _isCapturing.value = true
+        val completed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        fun finishCapture(uri: Uri?) {
+            if (!completed.compareAndSet(false, true)) return
+            try { jpegReader.setOnImageAvailableListener(null, null) } catch (_: Throwable) {}
+            photoCaptureInProgress.set(false)
+            _isCapturing.value = false
+            updateStorageStats()
+            engineScope.launch(Dispatchers.Main) {
+                onComplete(uri)
+            }
+        }
+
+        try {
+            val rawReader = imageReaderRaw?.takeIf {
+                isRawCaptureEnabled && _capabilities.value.supportsRaw
+            }
+
+            jpegReader.setOnImageAvailableListener({ reader ->
+                val image = try {
+                    reader.acquireLatestImage()
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Unable to acquire JPEG image", t)
+                    null
+                } ?: return@setOnImageAvailableListener
+
+                val jpegBytes = try {
+                    val buffer = image.planes.firstOrNull()?.buffer
+                        ?: throw java.io.IOException("JPEG image has no data plane")
+                    ByteArray(buffer.remaining()).also { buffer.get(it) }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Unable to read JPEG image buffer", t)
+                    image.close()
+                    finishCapture(null)
+                    return@setOnImageAvailableListener
+                }
+                image.close()
+
+                engineScope.launch(Dispatchers.IO) {
+                    val savedUri = try {
+                        saveJpegBytesToMediaStore(jpegBytes)
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "Failed to save captured JPEG", t)
+                        null
+                    }
+                    finishCapture(savedUri)
+                }
+            }, handler)
+
+            if (rawReader != null) {
+                rawReader.setOnImageAvailableListener({ reader ->
+                    val rawImage = try {
+                        reader.acquireLatestImage()
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "Unable to acquire RAW image", t)
+                        null
+                    }
+                    if (rawImage != null) {
+                        engineScope.launch(Dispatchers.IO) {
+                            try {
+                                val lens = _selectedLens.value
+                                val characteristics = lens?.let { getCharacteristics(it.cameraId) }
+                                if (characteristics != null) {
+                                    saveRawToMediaStore(rawImage, characteristics)
+                                }
+                            } catch (t: Throwable) {
+                                Log.e(TAG, "Failed to save optional RAW capture", t)
+                            } finally {
+                                rawImage.close()
+                            }
+                        }
+                    }
+                }, handler)
+            }
+
+            val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                addTarget(jpegReader.surface)
+                rawReader?.surface?.let { addTarget(it) }
+                applyCommonSettings(this, isStillCapture = true)
+                set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
+                set(CaptureRequest.JPEG_ORIENTATION, getCaptureJpegOrientation())
+                set(CaptureRequest.JPEG_QUALITY, preferences.jpegQuality.coerceIn(90, 100).toByte())
+            }.build()
+
+            session.capture(captureRequest, object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    result: TotalCaptureResult
+                ) {
+                    lastCaptureResult = result
+                    Log.d(TAG, "Still photo capture completed")
+                }
+
+                override fun onCaptureFailed(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    failure: CaptureFailure
+                ) {
+                    Log.e(TAG, "Still photo capture failed: reason=${failure.reason}")
+                    finishCapture(null)
+                }
+
+                override fun onCaptureSequenceAborted(
+                    session: CameraCaptureSession,
+                    sequenceId: Int
+                ) {
+                    Log.w(TAG, "Still photo capture sequence aborted")
+                    finishCapture(null)
+                }
+            }, handler)
+        } catch (t: Throwable) {
+            Log.e(TAG, "Unable to start still photo capture", t)
+            finishCapture(null)
+        }
     }
 
     fun takePhoto50M(onComplete: (Uri?) -> Unit) {

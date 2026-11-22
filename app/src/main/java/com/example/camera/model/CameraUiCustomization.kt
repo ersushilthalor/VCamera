@@ -550,6 +550,7 @@ data class CustomUiPreset(
 object CameraUiTemplates {
     fun getDefaultConfigForMode(mode: CameraMode, baseConfig: ModeLayoutConfig): ModeLayoutConfig {
         return when (mode) {
+            CameraMode.PHOTO -> baseConfig
             CameraMode.CINEMA -> baseConfig.copy(
                 topControlsOrder = listOf(
                     TopControlItem.FLASH,
@@ -604,7 +605,7 @@ object CameraUiTemplates {
     fun getTemplateConfig(type: UiTemplateType): ModeLayoutConfig {
         return when (type) {
             UiTemplateType.OPPO -> ModeLayoutConfig(
-                visibleModes = listOf(CameraMode.VIDEO, CameraMode.CINEMA),
+                visibleModes = listOf(CameraMode.PHOTO, CameraMode.VIDEO, CameraMode.CINEMA),
                 modeSelectorPosition = ModeSelectorPosition.BELOW_SHUTTER,
                 modeSelectorStyle = ModeSelectorStyle.OPPO_PILL,
                 shutterStyle = ShutterStyle.OPPO_ORANGE,
@@ -636,7 +637,7 @@ object CameraUiTemplates {
             UiTemplateType.SAMSUNG -> ModeLayoutConfig(
                 // Samsung template tuned to the supplied reference. Keep the app's existing
                 // top-control configuration/order untouched; only the lower camera controls change.
-                visibleModes = listOf(CameraMode.VIDEO, CameraMode.CINEMA),
+                visibleModes = listOf(CameraMode.PHOTO, CameraMode.VIDEO, CameraMode.CINEMA),
                 modeSelectorPosition = ModeSelectorPosition.BELOW_SHUTTER,
                 modeSelectorStyle = ModeSelectorStyle.MINIMAL_TEXT,
                 shutterStyle = ShutterStyle.CLASSIC_WHITE,

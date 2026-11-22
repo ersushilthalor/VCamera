@@ -258,8 +258,8 @@ class CameraPreferences(context: Context) {
 
     var cameraMode: CameraMode
         get() {
-            val name = prefs.getString(KEY_CAMERA_MODE, CameraMode.VIDEO.name) ?: CameraMode.VIDEO.name
-            return try { CameraMode.valueOf(name) } catch (e: Exception) { CameraMode.VIDEO }
+            val name = prefs.getString(KEY_CAMERA_MODE, CameraMode.PHOTO.name) ?: CameraMode.PHOTO.name
+            return try { CameraMode.valueOf(name) } catch (e: Exception) { CameraMode.PHOTO }
         }
         set(value) = prefs.edit().putString(KEY_CAMERA_MODE, value.name).apply()
 

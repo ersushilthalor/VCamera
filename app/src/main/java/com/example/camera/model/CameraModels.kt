@@ -5,6 +5,7 @@ import android.graphics.RectF
 import android.util.Size
 
 enum class CameraMode(val title: String) {
+    PHOTO("Photo"),
     VIDEO("Video"),
     CINEMA("Pro Video")
 }

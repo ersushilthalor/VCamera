@@ -408,6 +408,14 @@ fun BottomControlBar(
                             )
 
                             when (cameraMode) {
+                                CameraMode.PHOTO -> {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(shutterSize * 0.76f)
+                                            .clip(CircleShape)
+                                            .background(Color.White)
+                                    )
+                                }
                                 CameraMode.VIDEO, CameraMode.CINEMA -> {
                                     if (isRecordingVideo) {
                                         Box(
@@ -471,8 +479,8 @@ fun BottomControlBar(
                     }
                 }
 
-                val isPixelVideoGroup = true
-                val isPixelPhotoGroup = false
+                val isPixelVideoGroup = cameraMode == CameraMode.VIDEO || cameraMode == CameraMode.CINEMA
+                val isPixelPhotoGroup = cameraMode == CameraMode.PHOTO
 
                 // Mode Carousel Composable
                 val modeCarouselContent = @Composable {
@@ -488,6 +496,15 @@ fun BottomControlBar(
                             )
 
                             val pixelEntries = listOf(
+                                PixelModeEntry(
+                                    tag = "mode_photo",
+                                    label = "Photo",
+                                    isSelected = cameraMode == CameraMode.PHOTO,
+                                    onSelect = {
+                                        onSetManualProOpen(false)
+                                        onModeSelected(CameraMode.PHOTO)
+                                    }
+                                ),
                                 PixelModeEntry(
                                     tag = "mode_video",
                                     label = "Video",
@@ -562,6 +579,7 @@ fun BottomControlBar(
                             val isOppoModeRail = layoutConfig.modeSelectorStyle == ModeSelectorStyle.OPPO_PILL
                             val modesToDisplay = remember {
                                 listOf(
+                                    CameraMode.PHOTO,
                                     CameraMode.VIDEO,
                                     CameraMode.CINEMA
                                 )
@@ -631,7 +649,11 @@ fun BottomControlBar(
                                         label = "modeTextColor"
                                     )
 
-                                    val rawName = if (mode == CameraMode.CINEMA) "Pro Video" else "Video"
+                                    val rawName = when (mode) {
+                                        CameraMode.PHOTO -> "Photo"
+                                        CameraMode.VIDEO -> "Video"
+                                        CameraMode.CINEMA -> "Pro Video"
+                                    }
                                     val displayText = layoutConfig.formatModeText(rawName)
                                     val modeFontWeight = if (isSelected) layoutConfig.fontWeightOption.weight else FontWeight.Normal
                                     val modeLetterSpacing = layoutConfig.letterSpacingSp.sp
@@ -901,7 +923,7 @@ fun BottomControlBar(
                                         .background(if (isPixelPhotoGroup) Color.White else Color.Transparent)
                                         .clickable {
                                             onSetManualProOpen(false)
-                                            onModeSelected(CameraMode.VIDEO)
+                                            onModeSelected(CameraMode.PHOTO)
                                         }
                                         .padding(horizontal = 16.dp, vertical = 6.dp)
                                         .testTag("pixel_dock_photo_modes_icon"),
