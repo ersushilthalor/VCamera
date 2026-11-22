@@ -111,6 +111,18 @@ class Camera2Engine(private val context: Context) {
     }
 
     /**
+     * Logical multi-camera LensInfo entries share the parent camera ID. Use the physical
+     * stream's characteristics where available so preview and recording transforms use
+     * the selected lens' real sensor orientation rather than the logical/main sensor.
+     */
+    private fun getSensorOrientationForLens(lens: LensInfo, fallback: Int): Int {
+        val streamCameraId = resolvePreviewStreamCameraId(lens, usePhysicalStream = true)
+        val characteristics = streamCameraId?.let { getCharacteristics(it) }
+            ?: getCharacteristics(lens.cameraId)
+        return characteristics?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: fallback
+    }
+
+    /**
      * Returns the ID whose StreamConfigurationMap describes the SurfaceTexture output
      * actually bound to the capture session. Physical outputs must use their physical ID;
      * logical fallback sessions must continue using the logical CameraDevice ID.
@@ -3580,11 +3592,7 @@ class Camera2Engine(private val context: Context) {
 
                                 val relay = dualCameraRecordingRelay
                                 val isTargetFront = (lens.facing == CameraCharacteristics.LENS_FACING_FRONT)
-                                val targetSensorOrient = try {
-                                    getCharacteristics(lens.cameraId)?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: (if (isTargetFront) 270 else 90)
-                                } catch (_: Exception) {
-                                    if (isTargetFront) 270 else 90
-                                }
+                                val targetSensorOrient = getSensorOrientationForLens(lens, if (isTargetFront) 270 else 90)
                                 _sensorOrientation.value = targetSensorOrient
                                 if (relay != null) {
                                     relay.updateCameraFacing(isTargetFront, targetSensorOrient)
@@ -4164,7 +4172,7 @@ class Camera2Engine(private val context: Context) {
             val optimalPreviewSize = getOptimalPreviewSize(previewStreamCameraId, targetRatio, lens.lensType)
 
             _previewAspectRatio.value = targetRatio
-            val sensorOrient = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+            val sensorOrient = getSensorOrientationForLens(lens, 90)
             _sensorOrientation.value = sensorOrient
             _previewBufferSize.value = optimalPreviewSize
             val cameraW = max(optimalPreviewSize.width, optimalPreviewSize.height)
@@ -6319,12 +6327,7 @@ class Camera2Engine(private val context: Context) {
     private fun getVideoOrientationHint(): Int {
         val lens = _selectedLens.value ?: return 90
         val isFront = lens.facing == CameraCharacteristics.LENS_FACING_FRONT
-        val sensorOrientation = try {
-            val chars = getCharacteristics(lens.cameraId)
-            chars?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: (if (isFront) 270 else 90)
-        } catch (e: Exception) {
-            if (isFront) 270 else 90
-        }
+        val sensorOrientation = getSensorOrientationForLens(lens, if (isFront) 270 else 90)
         val deviceRotation = getEffectiveDeviceRotation()
         val standardHint = calculateOrientation(sensorOrientation, isFront, deviceRotation)
         return standardHint
@@ -6333,12 +6336,7 @@ class Camera2Engine(private val context: Context) {
     private fun getCaptureJpegOrientation(): Int {
         val lens = _selectedLens.value ?: return 90
         val isFront = lens.facing == CameraCharacteristics.LENS_FACING_FRONT
-        val sensorOrientation = try {
-            val chars = getCharacteristics(lens.cameraId)
-            chars?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: (if (isFront) 270 else 90)
-        } catch (e: Exception) {
-            if (isFront) 270 else 90
-        }
+        val sensorOrientation = getSensorOrientationForLens(lens, if (isFront) 270 else 90)
         val deviceRotation = getEffectiveDeviceRotation()
         return calculateOrientation(sensorOrientation, isFront, deviceRotation)
     }
@@ -7016,11 +7014,7 @@ class Camera2Engine(private val context: Context) {
                 }
                 isSoftwareCinemaRecording = true
                 val isFront = lens.facing == CameraCharacteristics.LENS_FACING_FRONT
-                val sensorOrientation = try {
-                    chars?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: (if (isFront) 270 else 90)
-                } catch (_: Exception) {
-                    if (isFront) 270 else 90
-                }
+                val sensorOrientation = getSensorOrientationForLens(lens, if (isFront) 270 else 90)
                 // Frames are rendered directly upright on the GPU into finalRecordWidth x finalRecordHeight
                 val cinemaOrientationHint = 0
                 val cinemaTargetBitDepth = when (cinemaCodec) {
@@ -7080,11 +7074,7 @@ class Camera2Engine(private val context: Context) {
                     encoderRotation
                 }
 
-                val sensorOrient = try {
-                    chars?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: (if (isFront) 270 else 90)
-                } catch (_: Exception) {
-                    if (isFront) 270 else 90
-                }
+                val sensorOrient = getSensorOrientationForLens(lens, if (isFront) 270 else 90)
 
                 recorderSurface = try {
                     normalVideoRecorder.startRecording(
@@ -7126,11 +7116,7 @@ class Camera2Engine(private val context: Context) {
                         cleanupFailedRecording(onError, "Special Video requires a rear ultra-wide camera")
                         return
                     }
-                    val ultraWideSensorOrientation = try {
-                        getCharacteristics(ultraWideLens.cameraId)?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: sensorOrient
-                    } catch (_: Exception) {
-                        sensorOrient
-                    }
+                    val ultraWideSensorOrientation = getSensorOrientationForLens(ultraWideLens, sensorOrient)
                     val ultraWideTemp = File(recordingDir, "rec_temp_ultrawide_" + System.currentTimeMillis() + ".mp4")
                     try {
                         specialVideoUltraWideSurface = specialVideoUltraWideRecorder.startRecording(
@@ -7211,11 +7197,7 @@ class Camera2Engine(private val context: Context) {
                     PreviewStreamSource.MAIN
                 }
 
-                val sensorOrient = try {
-                    chars?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: (if (isFront) 270 else 90)
-                } catch (_: Exception) {
-                    if (isFront) 270 else 90
-                }
+                val sensorOrient = getSensorOrientationForLens(lens, if (isFront) 270 else 90)
                 val isKeepUwReadyBack = shouldKeepUltraWideStreamReady() &&
                     lens.facing == CameraCharacteristics.LENS_FACING_BACK &&
                     uwLensForRec != null &&
@@ -7242,7 +7224,7 @@ class Camera2Engine(private val context: Context) {
                     initialAdjustments = currentVideoAdjustments,
                     initialSpecialVideoPiPEnabled = false,
                     secondarySensorOrientation = if (isSpecialVideoRecording && uwLensForRec != null) {
-                        getCharacteristics(uwLensForRec.cameraId)?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: sensorOrient
+                        getSensorOrientationForLens(uwLensForRec, sensorOrient)
                     } else sensorOrient,
                     secondaryEncoderTargetSurface = if (isSpecialVideoRecording) specialVideoUltraWideSurface else null,
                     onSpecialVideoTimelineStarted = if (isSpecialVideoRecording) {
