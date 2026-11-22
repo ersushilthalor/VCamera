@@ -201,16 +201,28 @@ class DualCameraRecordingRelay internal constructor(
                         intArrayOf(EGL14.EGL_NONE),
                         0,
                     )
-                    if (created != null && created != EGL14.EGL_NO_SURFACE) {
+                    val context = eglContext
+                    val encoder = eglSurface
+                    val previewCurrent = created != null && created != EGL14.EGL_NO_SURFACE &&
+                        context != null && context != EGL14.EGL_NO_CONTEXT &&
+                        EGL14.eglMakeCurrent(display, created, created, context)
+                    val encoderRestored = context != null && context != EGL14.EGL_NO_CONTEXT &&
+                        encoder != null && encoder != EGL14.EGL_NO_SURFACE &&
+                        EGL14.eglMakeCurrent(display, encoder, encoder, context)
+                    if (previewCurrent && encoderRestored) {
                         eglPreviewSurface = created
                         attached = true
-                        Log.i(TAG, "Attached EGL preview surface after Camera2 handoff")
+                        Log.i(TAG, "Attached and validated EGL preview surface after Camera2 handoff")
                     } else {
+                        if (created != null && created != EGL14.EGL_NO_SURFACE) {
+                            runCatching { EGL14.eglDestroySurface(display, created) }
+                        }
                         eglPreviewSurface = EGL14.EGL_NO_SURFACE
                         Log.w(
                             TAG,
-                            "EGL preview attach failed after Camera2 handoff: error=0x" +
-                                Integer.toHexString(EGL14.eglGetError()),
+                            "EGL preview attach/current failed after Camera2 handoff: " +
+                                "previewCurrent=$previewCurrent encoderRestored=$encoderRestored " +
+                                "error=0x${Integer.toHexString(EGL14.eglGetError())}",
                         )
                     }
                 } else {
@@ -1231,7 +1243,9 @@ class DualCameraRecordingRelay internal constructor(
             GLES30.glDisableVertexAttribArray(aTex)
         }
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
-        EGLExt.eglPresentationTimeANDROID(display, targetSurface, presentationNs)
+        if (targetSurface == eglSurface) {
+            EGLExt.eglPresentationTimeANDROID(display, targetSurface, presentationNs)
+        }
         return EGL14.eglSwapBuffers(display, targetSurface)
     }
 
