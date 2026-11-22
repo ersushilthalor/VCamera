@@ -6459,6 +6459,30 @@ class Camera2Engine(private val context: Context) {
      * handoff FOV. Still photos must undo that crop: retain the full active array on
      * the logical stream and, where supported, explicitly on the physical sensor too.
      */
+    private fun applyFullFramePhysicalJpegCrop(builder: CaptureRequest.Builder, lens: LensInfo) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P ||
+            !lens.supportsPhysicalStream || lens.physicalCameraId == null
+        ) return
+        try {
+            val physicalId = lens.physicalCameraId
+            val physicalChars = getCharacteristics(physicalId) ?: return
+            val physicalArray = physicalChars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
+            builder.setPhysicalCameraKey(
+                CaptureRequest.SCALER_CROP_REGION,
+                Rect(physicalArray),
+                physicalId
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val zoomRange = physicalChars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+                if (zoomRange != null && zoomRange.contains(1f)) {
+                    builder.setPhysicalCameraKey(CaptureRequest.CONTROL_ZOOM_RATIO, 1f, physicalId)
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "[SPECIAL_PHOTO] Could not reset physical crop for ${lens.lensType}", t)
+        }
+    }
+
     private fun applyFullFrameJpegCrop(builder: CaptureRequest.Builder, lens: LensInfo) {
         try {
             val logicalChars = getCharacteristics(lens.cameraId)
