@@ -2,6 +2,8 @@ package com.example.camera.ui
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
 import android.graphics.Matrix
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
@@ -492,27 +494,45 @@ private fun MediaGalleryItemViewer(item: MediaGalleryItem, onBack: () -> Unit, o
 
 private data class GalleryPhotoLoadState(
     val isLoading: Boolean,
-    val bitmap: Bitmap?
+    val bitmap: Bitmap?,
+    val expandedBitmap: Bitmap? = null
 )
 
 @Composable
 private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit, onClose: () -> Unit) {
     val context = LocalContext.current
+    var isExpanded by remember(photo.uri) { mutableStateOf(false) }
     val photoLoadState by produceState(
         initialValue = GalleryPhotoLoadState(isLoading = true, bitmap = null),
-        key1 = photo.uri
+        key1 = "${photo.uri}|${photo.ultraWideUri}"
     ) {
-        val decodedBitmap = try {
+        val decoded = try {
             withContext(Dispatchers.IO) {
-                decodeGalleryImage(context, photo.uri, 2200)
+                val main = decodeGalleryImage(context, photo.uri, 1800)
+                val ultraWide = photo.ultraWideUri?.let { decodeGalleryImage(context, it, 1800) }
+                Pair(main, ultraWide)
             }
         } catch (e: Exception) {
             Log.e(GALLERY_PHOTO_DECODE_TAG, "Photo load failed for ${photo.uri}", e)
-            null
+            Pair(null, null)
         }
-        value = GalleryPhotoLoadState(isLoading = false, bitmap = decodedBitmap)
+        val expanded = if (decoded.first != null && decoded.second != null) {
+            try {
+                withContext(Dispatchers.Default) {
+                    mergeSpecialPhotoBitmaps(decoded.first!!, decoded.second!!)
+                }
+            } catch (e: Exception) {
+                Log.e(GALLERY_PHOTO_DECODE_TAG, "Special Photo merge failed for ${photo.displayName}", e)
+                null
+            }
+        } else null
+        value = GalleryPhotoLoadState(
+            isLoading = false,
+            bitmap = decoded.first,
+            expandedBitmap = expanded
+        )
     }
-    val decodedPhoto = photoLoadState.bitmap
+    val decodedPhoto = if (isExpanded) photoLoadState.expandedBitmap else photoLoadState.bitmap
     Column(Modifier.fillMaxSize().background(Color.Black)) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
@@ -526,6 +546,18 @@ private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit,
                 Text(photo.displayName, color = Color.White.copy(alpha = 0.62f),
                     style = MaterialTheme.typography.bodySmall, maxLines = 1)
             }
+            if (photo.ultraWideUri != null && photoLoadState.expandedBitmap != null) {
+                Text(
+                    text = if (isExpanded) "Collapse" else "Expand",
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(Color.White.copy(alpha = 0.12f))
+                        .clickable { isExpanded = !isExpanded }
+                        .padding(horizontal = 14.dp, vertical = 9.dp)
+                )
+            }
             IconButton(onClick = onClose) {
                 Icon(Icons.Filled.Close, contentDescription = "Close photo", tint = Color.White)
             }
@@ -535,14 +567,72 @@ private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit,
                 photoLoadState.isLoading -> CircularProgressIndicator(color = Color.White)
                 decodedPhoto != null -> Image(
                     bitmap = decodedPhoto.asImageBitmap(),
-                    contentDescription = photo.displayName,
+                    contentDescription = if (isExpanded) "Expanded 1× photo with ultra-wide surround" else photo.displayName,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = androidx.compose.ui.layout.ContentScale.Fit
                 )
+                isExpanded && photoLoadState.bitmap != null -> {
+                    Text("Unable to merge ultra-wide photo", color = Color.White.copy(alpha = 0.75f))
+                }
                 else -> Text("Unable to load photo", color = Color.White.copy(alpha = 0.75f))
             }
         }
     }
+}
+
+/**
+ * Keeps the complete 1× frame centred and uses the ultra-wide frame only for the
+ * additional outer field of view. A short alpha feather softens the join.
+ */
+private fun mergeSpecialPhotoBitmaps(main: Bitmap, ultraWide: Bitmap): Bitmap {
+    val width = ultraWide.width.coerceAtLeast(1)
+    val height = ultraWide.height.coerceAtLeast(1)
+    val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val outputCanvas = Canvas(output)
+    val filteringPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    outputCanvas.drawBitmap(
+        ultraWide,
+        null,
+        RectF(0f, 0f, width.toFloat(), height.toFloat()),
+        filteringPaint
+    )
+
+    val centreWidth = width * 0.50f
+    val mainAspect = main.width.toFloat() / main.height.coerceAtLeast(1).toFloat()
+    val centreHeight = (centreWidth / mainAspect).coerceAtMost(height * 0.50f)
+    val left = (width - centreWidth) * 0.5f
+    val top = (height - centreHeight) * 0.5f
+    val right = left + centreWidth
+    val bottom = top + centreHeight
+
+    val centreOverlay = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    Canvas(centreOverlay).drawBitmap(main, null, RectF(left, top, right, bottom), filteringPaint)
+
+    val pixels = IntArray(width * height)
+    centreOverlay.getPixels(pixels, 0, width, 0, 0, width, height)
+    val featherX = (centreWidth * 0.045f).coerceAtLeast(1f)
+    val featherY = (centreHeight * 0.045f).coerceAtLeast(1f)
+    for (y in 0 until height) {
+        val yInside = minOf(y + 0.5f - top, bottom - (y + 0.5f))
+        for (x in 0 until width) {
+            val index = y * width + x
+            val pixel = pixels[index]
+            val existingAlpha = pixel ushr 24
+            if (existingAlpha == 0) continue
+            val xInside = minOf(x + 0.5f - left, right - (x + 0.5f))
+            val feather = minOf(
+                1f,
+                (xInside / featherX).coerceIn(0f, 1f),
+                (yInside / featherY).coerceIn(0f, 1f)
+            )
+            val alpha = (existingAlpha * feather).toInt().coerceIn(0, 255)
+            pixels[index] = (alpha shl 24) or (pixel and 0x00FFFFFF)
+        }
+    }
+    centreOverlay.setPixels(pixels, 0, width, 0, 0, width, height)
+    outputCanvas.drawBitmap(centreOverlay, 0f, 0f, null)
+    centreOverlay.recycle()
+    return output
 }
 
 private fun loadGalleryThumbnail(context: Context, item: MediaGalleryItem): Bitmap? {
