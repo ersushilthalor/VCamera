@@ -2,6 +2,7 @@ package com.example.camera.engine
 
 import android.hardware.camera2.CameraCharacteristics
 import android.os.SystemClock
+import android.view.Choreographer
 import com.example.camera.model.LensInfo
 import com.example.camera.model.LensType
 import com.example.camera.ui.components.normalizedToZoomLog
@@ -68,7 +69,7 @@ class ZoomTransitionController(
         const val MIN_OVERLAP_DURATION_MS = 100L
         const val MAX_OVERLAP_DURATION_MS = 1000L
         private const val FRAME_HANDOFF_WARMUP_FRAMES = 2
-        private const val FRAME_HANDOFF_REQUIRED_FRAMES = 16
+        const val FRAME_HANDOFF_FADE_DURATION_MS = 160L
         private const val FRAME_HANDOFF_TIMEOUT_MS = 900L
         // Once the incoming lens moves away from the shared ~1x field of view, shorten the
         // overlap so differently cropped frames do not remain visibly doubled.
@@ -122,29 +123,28 @@ class ZoomTransitionController(
          * incoming frames still gate every progress update, so we never fade to a stale stream.
          */
         internal fun calculateFrameHandoffProgress(
-            incomingFrameCount: Int,
+            timeProgress: Float,
             targetSource: PreviewStreamSource,
             currentZoom: Float,
             previousProgress: Float = 0f
         ): Float {
-            val frameProgress = incomingFrameCount.coerceIn(0, FRAME_HANDOFF_REQUIRED_FRAMES).toFloat() /
-                FRAME_HANDOFF_REQUIRED_FRAMES.toFloat()
-            val frameEased = (0.5 * (1.0 - cos(PI * frameProgress.toDouble()))).toFloat()
+            val normalizedTime = timeProgress.coerceIn(0f, 1f)
+            val timeEased = (0.5 * (1.0 - cos(PI * normalizedTime.toDouble()))).toFloat()
             val zoomEased = if (targetSource == PreviewStreamSource.ULTRAWIDE) {
                 // Reverse handoff: below 1x, Main cannot widen enough to match Ultra-Wide.
                 val zoomProgress = ((1.0f - currentZoom) / (1.0f - 0.5f)).coerceIn(0f, 1f)
                 val acceleratedZoomProgress = 1f - (1f - zoomProgress) * (1f - zoomProgress) * (1f - zoomProgress)
                 (0.5 * (1.0 - cos(PI * acceleratedZoomProgress.toDouble()))).toFloat()
             } else {
-                // Forward handoff: the outgoing Ultra-Wide frame is effectively parked near 1x,
-                // while Main's FOV keeps tightening for 2x/3x. Fade along this shared-FOV window.
+                // The outgoing Ultra-Wide standby stream tracks live zoom using
+                // calculateStandbyCropRatio(handoffZoom); fade faster as the FOVs diverge.
                 val zoomProgress = ((currentZoom - 1.0f) / MAIN_FOV_DIVERGENCE_FADE_RANGE).coerceIn(0f, 1f)
                 val acceleratedZoomProgress = 1f - (1f - zoomProgress) * (1f - zoomProgress) * (1f - zoomProgress)
                 (0.5 * (1.0 - cos(PI * acceleratedZoomProgress.toDouble()))).toFloat()
             }
             val previous = previousProgress.coerceIn(0f, 1f)
-            val desired = maxOf(frameEased, zoomEased)
-            // Cap per-frame opacity changes to keep the fade smooth even if zoom/FOV jumps a tick.
+            val desired = maxOf(timeEased, zoomEased)
+            // Bound each display-vsync alpha update while keeping progress strictly monotonic.
             return minOf(desired, previous + MAX_HANDOFF_ALPHA_STEP).coerceIn(previous, 1f)
         }
 
@@ -218,6 +218,8 @@ class ZoomTransitionController(
     private var frameHandoffFromSource: PreviewStreamSource? = null
     private var frameHandoffFrameCount: Int = 0
     private var frameHandoffTimeoutJob: Job? = null
+    private var frameHandoffFadeCallback: Choreographer.FrameCallback? = null
+    private var frameHandoffFadeStartNanos: Long = 0L
 
     // The standby camera can already be producing valid frames before the 1x switch point.
     // Count them silently so the visible crossfade does not waste two more warm-up frames.
@@ -271,7 +273,77 @@ class ZoomTransitionController(
         return targetElapsedMs
     }
 
+    private fun cancelFrameHandoffFade() {
+        frameHandoffFadeCallback?.let { callback ->
+            if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+                Choreographer.getInstance().removeFrameCallback(callback)
+            } else {
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    Choreographer.getInstance().removeFrameCallback(callback)
+                }
+            }
+        }
+        frameHandoffFadeCallback = null
+        frameHandoffFadeStartNanos = 0L
+    }
+
+    private fun finishFrameBasedHandoff(targetSource: PreviewStreamSource) {
+        if (pendingFrameHandoffTarget != targetSource) return
+        frameHandoffTimeoutJob?.cancel()
+        frameHandoffTimeoutJob = null
+        pendingFrameHandoffTarget = null
+        frameHandoffFromSource = null
+        frameHandoffFrameCount = 0
+        setSteadyStatePreview(targetSource == PreviewStreamSource.ULTRAWIDE)
+    }
+
+    private fun startFrameHandoffFade(targetSource: PreviewStreamSource) {
+        if (pendingFrameHandoffTarget != targetSource || frameHandoffFadeCallback != null) return
+        val choreographer = Choreographer.getInstance()
+        frameHandoffFadeStartNanos = 0L
+        val callback = object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                if (pendingFrameHandoffTarget != targetSource) {
+                    cancelFrameHandoffFade()
+                    return
+                }
+                if (frameHandoffFadeStartNanos == 0L) {
+                    frameHandoffFadeStartNanos = frameTimeNanos
+                }
+                val elapsedNanos = (frameTimeNanos - frameHandoffFadeStartNanos).coerceAtLeast(0L)
+                val durationNanos = FRAME_HANDOFF_FADE_DURATION_MS * 1_000_000L
+                val timeProgress = (elapsedNanos.toDouble() / durationNanos.toDouble())
+                    .coerceIn(0.0, 1.0).toFloat()
+                val previousProgress = _previewOverlapState.value.overlapProgress
+                val progress = calculateFrameHandoffProgress(
+                    timeProgress = timeProgress,
+                    targetSource = targetSource,
+                    currentZoom = _currentInterpolatedZoom.value,
+                    previousProgress = previousProgress
+                )
+                _previewOverlapState.value = PreviewOverlapState(
+                    isOverlapping = true,
+                    mainAlpha = if (targetSource == PreviewStreamSource.MAIN) progress else 1f,
+                    ultraWideAlpha = if (targetSource == PreviewStreamSource.ULTRAWIDE) progress else 1f,
+                    activeSource = targetSource,
+                    overlapProgress = progress,
+                    topSource = targetSource
+                )
+                // The duration is display-time based, not frame-count/fps based. Continue one
+                // or more vsyncs past 160ms only when MAX_HANDOFF_ALPHA_STEP still caps alpha.
+                if (timeProgress >= 1f && progress >= 1f) {
+                    finishFrameBasedHandoff(targetSource)
+                } else {
+                    choreographer.postFrameCallback(this)
+                }
+            }
+        }
+        frameHandoffFadeCallback = callback
+        choreographer.postFrameCallback(callback)
+    }
+
     fun setSteadyStatePreview(isUltraWide: Boolean) {
+        cancelFrameHandoffFade()
         _previewOverlapState.value = PreviewOverlapState(
             isOverlapping = false,
             mainAlpha = if (isUltraWide) 0.0f else 1.0f,
@@ -321,6 +393,7 @@ class ZoomTransitionController(
         scope: CoroutineScope
     ) {
         frameHandoffTimeoutJob?.cancel()
+        cancelFrameHandoffFade()
         val nowMs = SystemClock.uptimeMillis()
         val hasFreshPreparedTargetFrames =
             preparedFrameHandoffFromSource == fromSource &&
@@ -350,6 +423,9 @@ class ZoomTransitionController(
             overlapProgress = 0f,
             topSource = fromSource
         )
+        if (frameHandoffFrameCount >= FRAME_HANDOFF_WARMUP_FRAMES) {
+            startFrameHandoffFade(targetSource)
+        }
 
         frameHandoffTimeoutJob = scope.launch {
             delay(FRAME_HANDOFF_TIMEOUT_MS)
@@ -370,8 +446,7 @@ class ZoomTransitionController(
         }
         val targetSource = pendingFrameHandoffTarget
         if (targetSource == null) {
-            // While pre-warming, observe only the target stream. This never changes visible
-            // alpha and cannot complete the handoff before the 1x-equivalent switch point.
+            // Observe only fresh target frames during pre-warm; alpha remains unchanged.
             if (source == preparedFrameHandoffTargetSource) {
                 preparedTargetFrameCount =
                     (preparedTargetFrameCount + 1).coerceAtMost(FRAME_HANDOFF_WARMUP_FRAMES)
@@ -379,17 +454,14 @@ class ZoomTransitionController(
             }
             return
         }
-        if (source != targetSource) return
+        if (source != targetSource || frameHandoffFadeCallback != null) return
 
-        frameHandoffFrameCount = (frameHandoffFrameCount + 1).coerceAtMost(
-            FRAME_HANDOFF_WARMUP_FRAMES + FRAME_HANDOFF_REQUIRED_FRAMES
-        )
-        val fromSource = frameHandoffFromSource ?: return
-
-        // Let two real target frames arrive before blending. Camera2 applies crop/zoom changes
-        // asynchronously; these warm-up frames let the new stream catch up to the continuously
-        // moving zoom value while the outgoing stream remains fully visible.
-        if (frameHandoffFrameCount <= FRAME_HANDOFF_WARMUP_FRAMES) {
+        // Two real target frames are still mandatory unless fresh pre-warmed frames satisfied
+        // this gate in beginFrameBasedHandoff(). After that, display-vsync drives the fade.
+        frameHandoffFrameCount =
+            (frameHandoffFrameCount + 1).coerceAtMost(FRAME_HANDOFF_WARMUP_FRAMES)
+        if (frameHandoffFrameCount < FRAME_HANDOFF_WARMUP_FRAMES) {
+            val fromSource = frameHandoffFromSource ?: return
             _previewOverlapState.value = PreviewOverlapState(
                 isOverlapping = true,
                 mainAlpha = if (fromSource == PreviewStreamSource.MAIN) 1f else 0f,
@@ -400,41 +472,11 @@ class ZoomTransitionController(
             )
             return
         }
-
-        val blendFrameCount = frameHandoffFrameCount - FRAME_HANDOFF_WARMUP_FRAMES
-        // Progress is tied to real target buffers and zoom trajectory. For reverse handoff,
-        // retire the Main layer quickly once the target Ultra-Wide FOV becomes wider than Main.
-        val previousProgress = _previewOverlapState.value.overlapProgress
-        val progress = calculateFrameHandoffProgress(
-            incomingFrameCount = blendFrameCount,
-            targetSource = targetSource,
-            currentZoom = _currentInterpolatedZoom.value,
-            previousProgress = previousProgress
-        )
-        // Keep the outgoing layer fully opaque underneath. Only the incoming top layer
-        // animates its alpha, producing a true old*(1-p) + new*p visual blend without dark gaps.
-        val mainAlpha = if (targetSource == PreviewStreamSource.MAIN) progress else 1f
-        val ultraWideAlpha = if (targetSource == PreviewStreamSource.ULTRAWIDE) progress else 1f
-
-        _previewOverlapState.value = PreviewOverlapState(
-            isOverlapping = true,
-            mainAlpha = mainAlpha,
-            ultraWideAlpha = ultraWideAlpha,
-            activeSource = targetSource,
-            overlapProgress = progress,
-            topSource = targetSource
-        )
-
-        if (blendFrameCount >= FRAME_HANDOFF_REQUIRED_FRAMES) {
-            frameHandoffTimeoutJob?.cancel()
-            frameHandoffTimeoutJob = null
-            pendingFrameHandoffTarget = null
-            frameHandoffFromSource = null
-            setSteadyStatePreview(targetSource == PreviewStreamSource.ULTRAWIDE)
-        }
+        startFrameHandoffFade(targetSource)
     }
 
     private fun cancelFrameBasedHandoff() {
+        cancelFrameHandoffFade()
         val state = _previewOverlapState.value
         val keepUltraWide = if (state.isOverlapping) {
             state.ultraWideAlpha >= state.mainAlpha
