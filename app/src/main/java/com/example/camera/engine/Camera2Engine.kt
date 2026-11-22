@@ -89,6 +89,7 @@ class Camera2Engine(private val context: Context) {
     private var activeRecordingSurface: Surface? = null
     private var activeVideoEisPlusPipeline: VideoEisPlusPipeline? = null
     private var activeVideoEisPlusSurface: Surface? = null
+    @Volatile private var videoEisPlusOisDisabledForSession: Boolean = false
     @Volatile private var videoEisPlusCaptureGeneration: Long = 0L
     private var videoRecordingFileDescriptor: ParcelFileDescriptor? = null
     private var currentRecordingTempFile: File? = null
@@ -1985,16 +1986,24 @@ class Camera2Engine(private val context: Context) {
     private val _actualEisHardwareActive = MutableStateFlow(false)
     val actualEisHardwareActive: StateFlow<Boolean> = _actualEisHardwareActive.asStateFlow()
 
-    // OIS is permanently requested ON. Legacy UI/preferences cannot disable the hardware request.
+    private val _videoEisPlusStatus = MutableStateFlow(
+        if (preferences.videoEisPlusEnabled) "Ready for supported SDR video" else "Disabled"
+    )
+    val videoEisPlusStatus: StateFlow<String> = _videoEisPlusStatus.asStateFlow()
+
+    /** Normal OIS behavior follows the saved preference; EIS+ may override per recording. */
     val isOisAllowed: Boolean
-        get() = true
+        get() = preferences.isOisEnabled
 
     var isOisEnabled: Boolean
-        get() = true
-        set(@Suppress("UNUSED_PARAMETER") value) {
-            preferences.isOisEnabled = true
+        get() = preferences.isOisEnabled
+        set(value) {
+            preferences.isOisEnabled = value
             val current = _hybridStabilizationConfig.value
-            _hybridStabilizationConfig.value = current.copy(isOisPreferred = true, isOisEnabled = true)
+            _hybridStabilizationConfig.value = current.copy(
+                isOisPreferred = value,
+                isOisEnabled = value
+            )
             updatePreviewSettings()
         }
 
@@ -5501,19 +5510,29 @@ class Camera2Engine(private val context: Context) {
         return isOisSupportedForLens(lens, physicalId)
     }
 
+    /** OIS is disabled only during EIS+ when no usable optical telemetry is available. */
+    private fun isOisAllowedForCurrentSession(): Boolean {
+        val eisPlusRequiresOisOff =
+            activeVideoEisPlusPipeline?.isRunning == true && videoEisPlusOisDisabledForSession
+        return isOisAllowed && isOisSupportedForActiveLens() && !eisPlusRequiresOisOff
+    }
+
     /**
      * Apply native Camera2 OIS to the active request and, when this is a logical camera's
      * physical stream, also apply the physical-camera-specific override.
      */
     private fun applyHardwareOisRequest(
         builder: CaptureRequest.Builder,
-        @Suppress("UNUSED_PARAMETER") oisAllowed: Boolean,
+        oisAllowed: Boolean,
         // Only apply the physical-camera override if the active session explicitly routes to it.
         physicalCameraId: String? = activeSessionPhysicalCameraId,
         vendorCameraIdOverride: String? = null
     ) {
-        // Always request native OIS ON, even when camera metadata or a legacy preference says OFF.
-        val mode = CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+        val mode = if (oisAllowed) {
+            CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+        } else {
+            CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
+        }
         try {
             builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, mode)
             Log.d(
@@ -5541,8 +5560,8 @@ class Camera2Engine(private val context: Context) {
             }
         }
 
-        // Keep vendor-specific OIS aliases ON too; no preference path may turn them OFF.
-        applyVendorOisControls(builder, oisAllowed = true, cameraIdOverride = vendorCameraIdOverride)
+        // Keep vendor aliases consistent with the standard logical/physical Camera2 OIS keys.
+        applyVendorOisControls(builder, oisAllowed = oisAllowed, cameraIdOverride = vendorCameraIdOverride)
     }
 
     /**
@@ -5569,7 +5588,7 @@ class Camera2Engine(private val context: Context) {
      */
     private fun applyVendorOisControls(
         builder: CaptureRequest.Builder,
-        @Suppress("UNUSED_PARAMETER") oisAllowed: Boolean,
+        oisAllowed: Boolean,
         cameraIdOverride: String? = null
     ) {
         try {
@@ -5580,7 +5599,7 @@ class Camera2Engine(private val context: Context) {
                 ?: return
             val chars = getCharacteristics(camId) ?: return
             val requestKeys = chars.availableCaptureRequestKeys ?: return
-            val intValue = 1
+            val intValue = if (oisAllowed) 1 else 0
             for (key in requestKeys) {
                 val keyName = key.name.lowercase(Locale.ROOT)
                 val isVendorOisKey = !keyName.startsWith("android.") &&
@@ -5599,7 +5618,7 @@ class Camera2Engine(private val context: Context) {
                             builder.set(typedKey, intValue.toByte())
                         } catch (_: Throwable) {
                             try {
-                                builder.set(typedKey, true)
+                                builder.set(typedKey, oisAllowed)
                             } catch (_: Throwable) {}
                         }
                     }
@@ -5787,10 +5806,10 @@ class Camera2Engine(private val context: Context) {
             }
         }
 
-        // Always force EIS OFF first, then apply hardware OIS to the active capture route.
-        // OIS is controlled only by the OIS preference and the active sensor's capability.
+        // Always force Camera2 EIS OFF first. OIS follows the saved preference and sensor,
+        // except when an EIS+ recording explicitly needs OIS OFF because telemetry is absent.
         applyHardwareEisRequest(builder)
-        val oisAllowed = isOisAllowed && isOisSupportedForActiveLens()
+        val oisAllowed = isOisAllowedForCurrentSession()
         applyHardwareOisRequest(builder, oisAllowed)
 
         // Preserve video recording capture intent and target FPS range across lens switches & setting updates
