@@ -189,6 +189,8 @@ fun CameraScreen(
     val preferredGalleryPackage by viewModel.preferredGalleryPackage.collectAsStateWithLifecycle()
     val focusRingPoint by viewModel.focusRingPoint.collectAsStateWithLifecycle()
     val toastMessage by viewModel.toastMessage.collectAsStateWithLifecycle()
+    val specialVideoClips by viewModel.specialVideoClips.collectAsStateWithLifecycle()
+    val isSpecialVideoGalleryOpen by viewModel.isSpecialVideoGalleryOpen.collectAsStateWithLifecycle()
     var isQuickOptionsOpen by rememberSaveable { mutableStateOf(false) }
 
 
@@ -218,6 +220,17 @@ fun CameraScreen(
         BackHandler {
             viewModel.setLutWindowOpen(false)
         }
+    }
+
+    if (isSpecialVideoGalleryOpen) {
+        BackHandler {
+            viewModel.closeSpecialVideoGallery()
+        }
+        SpecialVideoGalleryDialog(
+            clips = specialVideoClips,
+            onDismiss = { viewModel.closeSpecialVideoGallery() },
+            onOpenSystemGallery = { viewModel.openSystemGallery(context) }
+        )
     }
 
     val exposureCompensation by viewModel.exposureCompensation.collectAsStateWithLifecycle()
