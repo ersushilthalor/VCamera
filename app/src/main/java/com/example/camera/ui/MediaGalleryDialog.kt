@@ -9,6 +9,8 @@ import android.widget.MediaController
 import android.widget.VideoView
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -48,11 +50,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
@@ -64,6 +68,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.camera.gallery.MediaGalleryVideo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.LocalDate
@@ -71,7 +76,30 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-private const val GALLERY_LENS_SWITCH_DURATION_MS = 3_000
+internal const val GALLERY_LENS_SWITCH_DURATION_MS = 3_000
+
+/**
+ * Calculates the actual crop applied to the ultra-wide player while the two gallery sources
+ * are handed off. A nominal 0.5x ultra-wide view needs a 2x crop to match the main 1x view.
+ *
+ * Main -> ultra-wide: crop 2x down to 1x (zoom out).
+ * Ultra-wide -> main: crop 1x up to 2x (zoom in), then hand off to the 1x main source.
+ */
+internal fun calculateGalleryLensSwitchCropScale(
+    isUltraWidePlayer: Boolean,
+    transitionFromUltraWide: Boolean,
+    progress: Float,
+    isTransitionRunning: Boolean
+): Float {
+    if (!isUltraWidePlayer || !isTransitionRunning) return 1f
+    val normalizedProgress = progress.coerceIn(0f, 1f)
+    return if (transitionFromUltraWide) {
+        1f + normalizedProgress
+    } else {
+        2f - normalizedProgress
+    }
+}
+
 private val galleryBackground = Color(0xFF0D1413)
 private val galleryAccent = Color(0xFF71F0E5)
 
@@ -440,9 +468,17 @@ private fun MediaGalleryPlayer(
     var shouldResumePlayback by rememberSaveable(video.id) { mutableStateOf(true) }
     val activeVideoView = remember(video.id) { mutableStateOf<VideoView?>(null) }
     val hasLensPair = video.ultraWideUri != null
+    val switchScope = rememberCoroutineScope()
+    val cropProgress = remember(video.id) { Animatable(1f) }
+    val currentCropProgress = cropProgress.value
+    var transitionFromUltraWide by rememberSaveable(video.id) { mutableStateOf(false) }
+    var isLensTransitionRunning by rememberSaveable(video.id) { mutableStateOf(false) }
+    var isLensSwitchLocked by remember(video.id) { mutableStateOf(false) }
 
     val selectLens: (Boolean) -> Unit = { useUltraWide ->
-        if (hasLensPair && isUltraWide != useUltraWide) {
+        if (hasLensPair && isUltraWide != useUltraWide && !isLensSwitchLocked) {
+            isLensSwitchLocked = true
+            val sourceWasUltraWide = isUltraWide
             activeVideoView.value?.let { view ->
                 val state = view.tag as? GalleryPlayerState
                 if (state?.isPrepared == true) {
@@ -452,7 +488,24 @@ private fun MediaGalleryPlayer(
                 }
                 state?.wasActive = false
             }
-            isUltraWide = useUltraWide
+
+            switchScope.launch {
+                // Reset the crop before changing the target player so the first visible frame
+                // starts at the matching field of view instead of flashing at the final scale.
+                cropProgress.snapTo(0f)
+                transitionFromUltraWide = sourceWasUltraWide
+                isLensTransitionRunning = true
+                isUltraWide = useUltraWide
+                cropProgress.animateTo(
+                    targetValue = 1f,
+                    animationSpec = tween(
+                        durationMillis = GALLERY_LENS_SWITCH_DURATION_MS,
+                        easing = FastOutSlowInEasing
+                    )
+                )
+                isLensTransitionRunning = false
+                isLensSwitchLocked = false
+            }
         }
     }
 
@@ -493,6 +546,7 @@ private fun MediaGalleryPlayer(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
+                .clipToBounds()
         ) {
             Crossfade(
                 targetState = isUltraWide,
@@ -501,6 +555,12 @@ private fun MediaGalleryPlayer(
                 label = "gallery-video-lens-switch"
             ) { targetIsUltraWide ->
                 val targetUri = if (targetIsUltraWide) video.ultraWideUri ?: video.uri else video.uri
+                val cropScale = calculateGalleryLensSwitchCropScale(
+                    isUltraWidePlayer = targetIsUltraWide,
+                    transitionFromUltraWide = transitionFromUltraWide,
+                    progress = currentCropProgress,
+                    isTransitionRunning = isLensTransitionRunning
+                )
 
                 val restorePlayback: (VideoView, GalleryPlayerState) -> Unit = { view, state ->
                     val lastSafePosition = (view.duration - 250).coerceAtLeast(0)
@@ -557,6 +617,14 @@ private fun MediaGalleryPlayer(
                         }
                     },
                     update = { view ->
+                        // VideoView is backed by SurfaceView. API 26+ supports synchronized
+                        // SurfaceView scaling, so this changes the actual displayed crop,
+                        // not merely the gallery controls or the player container.
+                        view.pivotX = view.width / 2f
+                        view.pivotY = view.height / 2f
+                        view.scaleX = cropScale
+                        view.scaleY = cropScale
+
                         val state = view.tag as? GalleryPlayerState
                         if (state != null) {
                             val shouldBeActive = targetIsUltraWide == isUltraWide

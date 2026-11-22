@@ -1,7 +1,8 @@
 package com.example.camera.engine
 
 import com.example.camera.model.LensType
-import com.example.camera.ui.SPECIAL_VIDEO_GALLERY_LENS_SWITCH_DURATION_MS
+import com.example.camera.ui.GALLERY_LENS_SWITCH_DURATION_MS
+import com.example.camera.ui.calculateGalleryLensSwitchCropScale
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -94,8 +95,100 @@ class ZoomTransitionTimingTest {
     }
 
     @Test
-    fun galleryLensSwitchUsesThreeSecondCrossfade() {
-        assertEquals(3_000, SPECIAL_VIDEO_GALLERY_LENS_SWITCH_DURATION_MS)
+    fun galleryLensSwitchUsesThreeSecondCropAnimation() {
+        assertEquals(3_000, GALLERY_LENS_SWITCH_DURATION_MS)
+    }
+
+    @Test
+    fun mainToUltraWideAnimatesFromMatchingMainCropToFullUltraWide() {
+        assertEquals(
+            2.0f,
+            calculateGalleryLensSwitchCropScale(
+                isUltraWidePlayer = true,
+                transitionFromUltraWide = false,
+                progress = 0.0f,
+                isTransitionRunning = true
+            ),
+            0.0001f
+        )
+        assertEquals(
+            1.5f,
+            calculateGalleryLensSwitchCropScale(
+                isUltraWidePlayer = true,
+                transitionFromUltraWide = false,
+                progress = 0.5f,
+                isTransitionRunning = true
+            ),
+            0.0001f
+        )
+        assertEquals(
+            1.0f,
+            calculateGalleryLensSwitchCropScale(
+                isUltraWidePlayer = true,
+                transitionFromUltraWide = false,
+                progress = 1.0f,
+                isTransitionRunning = true
+            ),
+            0.0001f
+        )
+    }
+
+    @Test
+    fun ultraWideToMainAnimatesCropInBeforeReturningToMainFrame() {
+        assertEquals(
+            1.0f,
+            calculateGalleryLensSwitchCropScale(
+                isUltraWidePlayer = true,
+                transitionFromUltraWide = true,
+                progress = 0.0f,
+                isTransitionRunning = true
+            ),
+            0.0001f
+        )
+        assertEquals(
+            1.5f,
+            calculateGalleryLensSwitchCropScale(
+                isUltraWidePlayer = true,
+                transitionFromUltraWide = true,
+                progress = 0.5f,
+                isTransitionRunning = true
+            ),
+            0.0001f
+        )
+        assertEquals(
+            2.0f,
+            calculateGalleryLensSwitchCropScale(
+                isUltraWidePlayer = true,
+                transitionFromUltraWide = true,
+                progress = 1.0f,
+                isTransitionRunning = true
+            ),
+            0.0001f
+        )
+    }
+
+    @Test
+    fun galleryCropIsOnlyAppliedToUltraWidePlayerDuringTransition() {
+        assertEquals(
+            1.0f,
+            calculateGalleryLensSwitchCropScale(
+                isUltraWidePlayer = false,
+                transitionFromUltraWide = false,
+                progress = 0.0f,
+                isTransitionRunning = true
+            ),
+            0.0001f
+        )
+        assertEquals(
+            1.0f,
+            calculateGalleryLensSwitchCropScale(
+                isUltraWidePlayer = true,
+                transitionFromUltraWide = false,
+                progress = 0.5f,
+                isTransitionRunning = false
+            ),
+            0.0001f
+        )
     }
 
     @Test
