@@ -139,6 +139,7 @@ class DualCameraRecordingRelay internal constructor(
     private var eglContext: EGLContext? = EGL14.EGL_NO_CONTEXT
     private var eglSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
     private var eglPreviewSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
+    private var eglConfig: EGLConfig? = null
     private var eglSecondaryRecordSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
     private val secondaryRecordingEnabled = AtomicBoolean(false)
     private val specialVideoRecordingTimeline = SpecialVideoRecordingTimeline()
@@ -169,9 +170,70 @@ class DualCameraRecordingRelay internal constructor(
 
     fun hasPreviewSurface(): Boolean = isRelayPreviewActive
 
+    /**
+     * Attach the UI preview surface only after Camera2 has configured the recording session.
+     * Until that session replaces the old preview session, Camera2 still owns this Surface as
+     * its producer and EGL must not try to connect to the same BufferQueue.
+     */
+    fun attachPreviewTargetSurface(onAttached: (Boolean) -> Unit) {
+        val handler = glHandler
+        if (handler == null) {
+            onAttached(false)
+            return
+        }
+        handler.post {
+            var attached = false
+            try {
+                val display = eglDisplay
+                val config = eglConfig
+                val target = previewTargetSurface
+                if (!isReleased.get() && display != null && display != EGL14.EGL_NO_DISPLAY &&
+                    config != null && target != null && target.isValid
+                ) {
+                    val existing = eglPreviewSurface
+                    if (existing != null && existing != EGL14.EGL_NO_SURFACE) {
+                        EGL14.eglDestroySurface(display, existing)
+                    }
+                    val created = EGL14.eglCreateWindowSurface(
+                        display,
+                        config,
+                        target,
+                        intArrayOf(EGL14.EGL_NONE),
+                        0,
+                    )
+                    if (created != null && created != EGL14.EGL_NO_SURFACE) {
+                        eglPreviewSurface = created
+                        attached = true
+                        Log.i(TAG, "Attached EGL preview surface after Camera2 handoff")
+                    } else {
+                        eglPreviewSurface = EGL14.EGL_NO_SURFACE
+                        Log.w(
+                            TAG,
+                            "EGL preview attach failed after Camera2 handoff: error=0x" +
+                                Integer.toHexString(EGL14.eglGetError()),
+                        )
+                    }
+                } else {
+                    Log.w(TAG, "EGL preview attach skipped: relay/context/target is unavailable")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "EGL preview attach failed: \${t.message}", t)
+                eglPreviewSurface = EGL14.EGL_NO_SURFACE
+            }
+            try {
+                onAttached(attached)
+            } catch (t: Throwable) {
+                Log.w(TAG, "EGL preview attach callback failed: \${t.message}", t)
+            }
+        }
+    }
+
     /** Schedule a timestamp-matched MGC frame on the relay's owning GL thread. */
     fun notifyEisPlusFrameAvailable() {
-        glHandler?.post { renderEisPlusFrames() }
+        val handler = glHandler ?: return
+        if (!handler.post { renderEisPlusFrames() }) {
+            Log.w(TAG, "Unable to schedule timestamp-matched MGC EIS+ frame")
+        }
     }
 
     fun hasSecondaryRecordingSurface(): Boolean {
@@ -490,6 +552,7 @@ class DualCameraRecordingRelay internal constructor(
             }
         }
         val chosenConfig = configs[0] ?: throw IllegalStateException("EGLConfig is null")
+        eglConfig = chosenConfig
 
         val contextAttribs = intArrayOf(
             EGL14.EGL_CONTEXT_CLIENT_VERSION, if (eisPlusPipeline != null) 3 else 2,
@@ -514,21 +577,6 @@ class DualCameraRecordingRelay internal constructor(
                 throw IllegalStateException("eglCreateWindowSurface failed for Special Video ultra-wide encoder")
             }
             eglSecondaryRecordSurface = secondarySurface
-        }
-
-        if (previewTargetSurface != null && previewTargetSurface.isValid) {
-            try {
-                val prevSurf = EGL14.eglCreateWindowSurface(display, chosenConfig, previewTargetSurface, surfaceAttribs, 0)
-                if (prevSurf != null && prevSurf != EGL14.EGL_NO_SURFACE) {
-                    eglPreviewSurface = prevSurf
-                    Log.i(TAG, "Created EGL preview surface for real-time video adjustments preview")
-                } else {
-                    eglPreviewSurface = EGL14.EGL_NO_SURFACE
-                }
-            } catch (t: Throwable) {
-                Log.w(TAG, "Failed creating EGL surface for previewTargetSurface: ${t.message}")
-                eglPreviewSurface = EGL14.EGL_NO_SURFACE
-            }
         }
 
         if (!EGL14.eglMakeCurrent(display, surface, surface, context)) {
@@ -1477,6 +1525,7 @@ class DualCameraRecordingRelay internal constructor(
                         try { EGL14.eglTerminate(display) } catch (_: Throwable) {}
                         eglDisplay = EGL14.EGL_NO_DISPLAY
                     }
+                    eglConfig = null
                 } catch (_: Throwable) {
                 } finally {
                     latch.countDown()
