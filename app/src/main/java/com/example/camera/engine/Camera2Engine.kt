@@ -1268,8 +1268,10 @@ class Camera2Engine(private val context: Context) {
                     }
 
                     override fun onClosed(session: CameraCaptureSession) {
+                        // This callback follows the session when it is swapped into the active slot.
+                        // Release its own sensor pipeline whenever that CameraCaptureSession closes.
+                        standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, relay) }
                         if (ultraWideStandbyCaptureSession == session) {
-                            standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, relay) }
                             ultraWideStandbyCaptureSession = null
                             isUltraWideStreaming.set(false)
                             standbyConfiguredForRecording = false
