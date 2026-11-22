@@ -42,6 +42,8 @@ internal class VideoEisPlusPipeline(private val context: android.content.Context
     val supportsOpticalTelemetry get() = coordinator.supportsOpticalTelemetry
     val shouldDisableOisForMissingTelemetry get() = coordinator.shouldDisableOisForMissingTelemetry
     val isRunning get() = session?.isOperational == true
+    /** Number of timestamp-matched native results waiting for the relay consumer. */
+    val pendingFrameCount: Int get() = session?.pendingResultCount() ?: 0
 
     fun supportFailureReason(
         characteristics: CameraCharacteristics,
