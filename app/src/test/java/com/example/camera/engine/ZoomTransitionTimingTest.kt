@@ -17,7 +17,7 @@ class ZoomTransitionTimingTest {
     }
 
     @Test
-    fun directHalfXToOneXKeepsFullZoomDurationAndAddsHoldAfterward() {
+    fun directHalfXToOneXReservesHoldInsideVideoDurationButNotPhotoDuration() {
         assertEquals(
             300L,
             ZoomTransitionController.calculateTransitionMotionDurationMs(
@@ -33,7 +33,18 @@ class ZoomTransitionTimingTest {
                 durationMs = 300L,
                 holdDurationMs = 200L,
                 isUltraWideToMainSwitch = true,
-                isDirectHalfXToOneXHold = false
+                isDirectHalfXToOneXHold = true,
+                includeHoldWithinDuration = true
+            )
+        )
+        assertEquals(
+            100L,
+            ZoomTransitionController.calculateTransitionMotionDurationMs(
+                durationMs = 300L,
+                holdDurationMs = 200L,
+                isUltraWideToMainSwitch = true,
+                isDirectHalfXToOneXHold = false,
+                includeHoldWithinDuration = true
             )
         )
     }
