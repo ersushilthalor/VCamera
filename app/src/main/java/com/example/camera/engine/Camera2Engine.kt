@@ -6634,13 +6634,13 @@ class Camera2Engine(private val context: Context) {
         val saveStarted = java.util.concurrent.atomic.AtomicBoolean(false)
         val completed = java.util.concurrent.atomic.AtomicBoolean(false)
         val capturedAtMs = System.currentTimeMillis()
-        lateinit var timeout: Runnable
+        var timeout: Runnable? = null
 
         fun finishCapture(uri: Uri?) {
             if (!completed.compareAndSet(false, true)) return
             try { mainReader.setOnImageAvailableListener(null, null) } catch (_: Throwable) {}
             try { ultraReader.setOnImageAvailableListener(null, null) } catch (_: Throwable) {}
-            try { handler.removeCallbacks(timeout) } catch (_: Throwable) {}
+            try { timeout?.let { handler.removeCallbacks(it) } } catch (_: Throwable) {}
             photoCaptureInProgress.set(false)
             _isCapturing.value = false
             updateStorageStats()
@@ -6728,10 +6728,11 @@ class Camera2Engine(private val context: Context) {
             }, handler)
         }
 
-        timeout = Runnable { finishCapture(null) }
+        val captureTimeout = Runnable { finishCapture(null) }
+        timeout = captureTimeout
         installReaderListener(mainReader, isUltraWide = false)
         installReaderListener(ultraReader, isUltraWide = true)
-        handler.postDelayed(timeout, 5000L)
+        handler.postDelayed(captureTimeout, 5000L)
 
         try {
             val activeRequest = activeCamera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
