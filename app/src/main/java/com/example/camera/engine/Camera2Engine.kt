@@ -8448,7 +8448,7 @@ class Camera2Engine(private val context: Context) {
                             physicalCameraId = targetPhysId,
                             stabilizationSurface = if (eisPlusStarted) activeVideoEisPlusSurface else null,
                             previewViaRelay = eisPlusPreviewViaRelay,
-                            callback = sessionCallback
+                            callback = checkNotNull(sessionCallback) { "Recording session callback was unavailable" }
                         )
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to create recording capture session", e)
