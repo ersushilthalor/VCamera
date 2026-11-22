@@ -136,6 +136,8 @@ class DualCameraRecordingRelay(
     private var eglPreviewSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
     private var eglSecondaryRecordSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
     private val secondaryRecordingEnabled = AtomicBoolean(false)
+    private val specialVideoRecordingTimeline = SpecialVideoRecordingTimeline()
+    private val hasLoggedSpecialVideoFrameWait = AtomicBoolean(false)
     @Volatile private var lastUltraWideOutputPtsNs: Long = -1L
     val ultraWideRecordedFrameCount = AtomicLong(0L)
     private var programId: Int = 0
@@ -207,7 +209,7 @@ class DualCameraRecordingRelay(
     @Volatile
     private var pendingClockSyncOnSwitch: Boolean = false
     private val isStreamingActive = AtomicBoolean(true)
-    private var recordingStartMonotonicNs: Long = 0L
+    @Volatile private var recordingStartMonotonicNs: Long = 0L
 
     @Volatile
     var isRelayReady: Boolean = false
@@ -228,6 +230,8 @@ class DualCameraRecordingRelay(
     fun startRecording() {
         lastOutputPtsNs = -1L
         recordingStartMonotonicNs = 0L
+        specialVideoRecordingTimeline.reset()
+        hasLoggedSpecialVideoFrameWait.set(false)
         streamClockOffsetNs = 0L
         pendingClockSyncOnSwitch = false
         totalPausedDurationNs = 0L
@@ -242,6 +246,8 @@ class DualCameraRecordingRelay(
         secondaryRecordingEnabled.set(false)
         isStreamingActive.set(false)
         recordingStartMonotonicNs = 0L
+        specialVideoRecordingTimeline.reset()
+        hasLoggedSpecialVideoFrameWait.set(false)
         Log.i(TAG, "[RECORDING_RELAY] Streaming to encoder stopped (relayedFrames=${relayedFrameCount.get()})")
     }
 
@@ -645,15 +651,40 @@ class DualCameraRecordingRelay(
         if (isPaused.get() || !isStreamingActive.get()) return
 
         val rawTimestampNs = st.timestamp.takeIf { it > 0L } ?: System.nanoTime()
-        if (recordingStartMonotonicNs <= 0L) {
-            recordingStartMonotonicNs = rawTimestampNs
+        val isSpecialDualRecording = secondaryRecordingEnabled.get()
+        val recordingStartNs = if (isSpecialDualRecording) {
+            // Do not let the first camera start its MP4 timeline alone. The main and ultra-wide
+            // Camera2 streams can become active at different times; starting on whichever frame
+            // arrives first makes one saved clip longer and shifts gallery lens handoff playback.
+            specialVideoRecordingTimeline.onFrameAvailable(isUltraWide, rawTimestampNs)
+        } else {
+            if (recordingStartMonotonicNs <= 0L) {
+                recordingStartMonotonicNs = rawTimestampNs
+            }
+            recordingStartMonotonicNs.takeIf { it > 0L }
+        } ?: run {
+            if (isSpecialDualRecording && hasLoggedSpecialVideoFrameWait.compareAndSet(false, true)) {
+                Log.i(TAG, "[SPECIAL_VIDEO] Waiting for first frame from both main and ultra-wide cameras")
+            }
+            return
+        }
+
+        if (recordingStartMonotonicNs != recordingStartNs) {
+            recordingStartMonotonicNs = recordingStartNs
+        }
+        // Frames captured before the slower camera became ready are pre-roll, not part of
+        // the synchronized clip. Drop them instead of clamping a negative PTS to zero.
+        if (rawTimestampNs < recordingStartNs) return
+
+        if (isSpecialDualRecording && hasLoggedSpecialVideoFrameWait.getAndSet(false)) {
+            Log.i(TAG, "[SPECIAL_VIDEO] Both camera streams are ready; shared timeline started at $recordingStartNs ns")
         }
 
         // Special Video records the ultra-wide camera as a separate, continuously updated
         // video track. It is rendered from the cached OES frame before the active-lens filter,
         // so it keeps recording even while the main encoder is using the 1x camera stream.
-        if (isUltraWide && secondaryRecordingEnabled.get()) {
-            renderUltraWideSecondaryFrame(rawTimestampNs)
+        if (isUltraWide && isSpecialDualRecording) {
+            renderUltraWideSecondaryFrame(rawTimestampNs, recordingStartNs)
         }
 
         val expectedSource = if (isUltraWide) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
@@ -667,7 +698,7 @@ class DualCameraRecordingRelay(
 
             // Monotonic hardware-aligned presentation timestamp pacing
             val frameIntervalNs = 1_000_000_000L / fps.coerceAtLeast(1)
-            var candidatePtsNs = rawTimestampNs - recordingStartMonotonicNs - totalPausedDurationNs
+            var candidatePtsNs = rawTimestampNs - recordingStartNs - totalPausedDurationNs
             if (pendingClockSyncOnSwitch) {
                 pendingClockSyncOnSwitch = false
                 if (lastOutputPtsNs > 0L) {
@@ -928,7 +959,7 @@ class DualCameraRecordingRelay(
      * Writes each ultra-wide OES frame to the independent Special Video encoder surface.
      * This is deliberately separate from the main encoder's active-source switching path.
      */
-    private fun renderUltraWideSecondaryFrame(rawTimestampNs: Long) {
+    private fun renderUltraWideSecondaryFrame(rawTimestampNs: Long, recordingStartNs: Long) {
         val display = eglDisplay ?: return
         val surface = eglSecondaryRecordSurface ?: return
         val context = eglContext ?: return
@@ -936,9 +967,8 @@ class DualCameraRecordingRelay(
         if (display == EGL14.EGL_NO_DISPLAY || surface == EGL14.EGL_NO_SURFACE ||
             context == EGL14.EGL_NO_CONTEXT || primarySurface == EGL14.EGL_NO_SURFACE) return
 
-        val baseTimestamp = recordingStartMonotonicNs.takeIf { it > 0L } ?: rawTimestampNs
         val frameIntervalNs = 1_000_000_000L / fps.coerceAtLeast(1)
-        var presentationTimeNs = rawTimestampNs - baseTimestamp - totalPausedDurationNs
+        var presentationTimeNs = rawTimestampNs - recordingStartNs - totalPausedDurationNs
         if (presentationTimeNs < 0L) presentationTimeNs = 0L
         if (lastUltraWideOutputPtsNs >= 0L && presentationTimeNs <= lastUltraWideOutputPtsNs) {
             presentationTimeNs = lastUltraWideOutputPtsNs + max(1_000_000L, frameIntervalNs / 4L)
