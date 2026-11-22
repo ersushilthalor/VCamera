@@ -1399,9 +1399,9 @@ class DualCameraRecordingRelay internal constructor(
         val displayMirror = if (isFront) -1f else 1f
         outMatrix.fill(0f)
         outMatrix[0] = displayMirror * cropX * cosine
-        outMatrix[4] = -cropX * sine
+        outMatrix[4] = -cropY * sine
         outMatrix[12] = 0.5f - 0.5f * outMatrix[0] - 0.5f * outMatrix[4]
-        outMatrix[1] = displayMirror * cropY * sine
+        outMatrix[1] = displayMirror * cropX * sine
         outMatrix[5] = cropY * cosine
         outMatrix[13] = 0.5f - 0.5f * outMatrix[1] - 0.5f * outMatrix[5]
         outMatrix[10] = 1f
