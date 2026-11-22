@@ -79,6 +79,7 @@ class MediaGalleryRepository(context: Context) {
                         uri.toString() in pairedUltraWideUris) continue
 
                     val name = if (nameCol >= 0) cursor.getString(nameCol).orEmpty() else ""
+                    if (name.endsWith("_ULTRAWIDE.mp4", ignoreCase = true)) continue
                     val description = if (descCol >= 0) cursor.getString(descCol).orEmpty() else ""
                     val owner = if (ownerCol >= 0) cursor.getString(ownerCol) else null
                     val specialClip = identity?.let { specialByMainIdentity[it] } ?: specialByMainUri[uri.toString()]
