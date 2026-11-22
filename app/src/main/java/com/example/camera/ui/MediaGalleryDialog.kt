@@ -383,7 +383,15 @@ private fun GalleryVideoTile(
     val thumbnail by produceState<Bitmap?>(initialValue = null, key1 = video.uri) {
         value = withContext(Dispatchers.IO) {
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                if (video.uri.scheme == "file") {
+                    val retriever = MediaMetadataRetriever()
+                    try {
+                        retriever.setDataSource(video.uri.path ?: return@withContext null)
+                        retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    } finally {
+                        retriever.release()
+                    }
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     context.contentResolver.loadThumbnail(video.uri, Size(360, 360), null)
                 } else {
                     val retriever = MediaMetadataRetriever()
