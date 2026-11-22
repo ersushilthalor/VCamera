@@ -549,11 +549,14 @@ fun CameraScreen(
 
         // 1g. Motorola Instant Camera Switching Picture-in-Picture Little Preview
         LittlePreviewOverlay(
-            showUltraWidePreview = instantSwitchState.isShowUltraWidePreview &&
+            // Special Video owns the full viewfinder/recording surface. Never expose
+            // either instant-switch mini window while Special Video is enabled,
+            // including the recording-start transition and active recording.
+            showUltraWidePreview = !instantSwitchState.isShowUltraWidePreview &&
+                instantSwitchState.isShowUltraWidePreview &&
                 isUsingRearMainLens && cameraMode == CameraMode.CINEMA,
-            showFrontPreview = instantSwitchState.isShowFrontCameraPreview && isUsingRearLens &&
-                !(instantSwitchState.isShowUltraWidePreview &&
-                    (cameraMode == CameraMode.PHOTO || cameraMode == CameraMode.VIDEO)),
+            showFrontPreview = !instantSwitchState.isShowUltraWidePreview &&
+                instantSwitchState.isShowFrontCameraPreview && isUsingRearLens,
             ultraWideStatus = instantSwitchState.ultraWideStatus,
             frontStatus = instantSwitchState.frontStatus,
             onUltraWideSurfaceTextureAvailable = { texture ->
