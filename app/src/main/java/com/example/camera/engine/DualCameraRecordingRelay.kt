@@ -88,6 +88,9 @@ class DualCameraRecordingRelay internal constructor(
         specialVideoPiPEnabled = enabled
     }
 
+    /** Camera stream whose YUV frames are processed by the EIS+ pipeline for this relay session. */
+    private val eisPlusSource: PreviewStreamSource = initialSource
+
     @Volatile
     var activeSource: PreviewStreamSource = initialSource
         private set
@@ -809,9 +812,10 @@ class DualCameraRecordingRelay internal constructor(
 
         if (isPaused.get() || !isStreamingActive.get()) return
 
-        // The OES callback only drains the camera surface. Timestamp-matched YUV frames
-        // drive the viewfinder and encoder while MGC EIS+ is running.
-        if (!isUltraWide && eisPlusPipeline?.isRunning == true) return
+        // While EIS+ is running, both OES callbacks only keep their textures current.
+        // The timestamp-matched YUV stream from the selected active lens is the sole
+        // source for both preview and encoder; never let either raw OES stream bypass it.
+        if (eisPlusPipeline?.isRunning == true) return
 
         val rawTimestampNs = st.timestamp.takeIf { it > 0L } ?: System.nanoTime()
         val isSpecialDualRecording = secondaryRecordingEnabled.get()
@@ -1147,10 +1151,11 @@ class DualCameraRecordingRelay internal constructor(
 
         while (true) {
             val pending = pipeline.dequeueFrame() ?: break
-            if (activeSource != PreviewStreamSource.MAIN || isPaused.get() || !isStreamingActive.get()) {
+            if (activeSource != eisPlusSource || isPaused.get() || !isStreamingActive.get()) {
                 EisPlusDiagnosticLog.event(
                     "RELAY", "FRAME_SKIPPED",
-                    "timestampNs=${pending.timestampNs} activeSource=$activeSource paused=${isPaused.get()} streaming=${isStreamingActive.get()}",
+                    "timestampNs=${pending.timestampNs} activeSource=$activeSource eisPlusSource=$eisPlusSource " +
+                        "paused=${isPaused.get()} streaming=${isStreamingActive.get()}",
                     "WARN",
                 )
                 pending.image.close()
