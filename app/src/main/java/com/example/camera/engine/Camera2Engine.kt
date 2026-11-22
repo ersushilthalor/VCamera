@@ -5277,7 +5277,7 @@ class Camera2Engine(private val context: Context) {
                 _actualEisHardwareActive.value = isActualEisHwActive
             }
 
-            // OIS is forced ON; there is deliberately no HAL force-OFF path.
+            // OIS follows the saved preference unless the active EIS+ session has no usable telemetry.
 
             if (_isAutoSwitchToUltraWide.value && !_isRecordingVideo.value && !isSwitchingLens.get()) {
                 checkAutoLensSwitch(result)
@@ -5285,9 +5285,9 @@ class Camera2Engine(private val context: Context) {
 
 
 
-            // EIS has been removed: never run gyro crop compensation or mutate the repeating
-            // request crop region from capture callbacks. Camera2 OIS remains independently
-            // controlled through LENS_OPTICAL_STABILIZATION_MODE.
+            // Legacy crop-region EIS has been removed. MGC EIS+ runs only in the GPU relay path;
+            // never mutate the Camera2 crop region from these capture callbacks. OIS remains
+            // independently controlled through LENS_OPTICAL_STABILIZATION_MODE.
 
             // The imported engine uses Camera2 crop-region compensation, not the GPU relay's
             // offset path; keeping those offsets neutral prevents applying stabilization twice.
@@ -5600,7 +5600,7 @@ class Camera2Engine(private val context: Context) {
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
             )
         } catch (t: Throwable) {
-            Log.d(TAG, "Camera2 EIS key unavailable; continuing with OIS-only stabilization", t)
+            Log.d(TAG, "Camera2 EIS key unavailable; continuing without hardware EIS", t)
         }
     }
 
