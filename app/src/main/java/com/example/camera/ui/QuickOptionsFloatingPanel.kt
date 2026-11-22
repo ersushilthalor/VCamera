@@ -58,6 +58,7 @@ fun QuickOptionsFloatingPanel(
     isAudioEnabled: Boolean,
     hasActiveVideoAdjustments: Boolean,
     isSpecialVideoEnabled: Boolean = false,
+    isSpecialPhotoEnabled: Boolean = false,
     // Cinema properties
     cinemaConfig: CinemaConfig = CinemaConfig(),
     isEvOpen: Boolean = false,
@@ -73,6 +74,7 @@ fun QuickOptionsFloatingPanel(
     onAudioToggle: () -> Unit,
     onVideoAdjustmentsClick: () -> Unit,
     onSpecialVideoToggle: () -> Unit = {},
+    onSpecialPhotoToggle: () -> Unit = {},
     onCinemaResolutionClick: () -> Unit = {},
     onCinemaAspectRatioClick: () -> Unit = {},
     onCinemaSettingsClick: () -> Unit = {},
@@ -408,6 +410,20 @@ fun QuickOptionsFloatingPanel(
                                     compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )
+
+                                if (cameraMode == CameraMode.PHOTO) {
+                                    QuickOptionCircleButton(
+                                        icon = Icons.Outlined.PhotoCamera,
+                                        label = "Special Photo",
+                                        statusText = if (isSpecialPhotoEnabled) "ON" else "OFF",
+                                        isActive = isSpecialPhotoEnabled,
+                                        activeColor = accentColor,
+                                        onClick = onSpecialPhotoToggle,
+                                        testTag = "panel_special_photo_button",
+                                        compact = false,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
 
                                 QuickOptionCircleButton(
                                     icon = Icons.Outlined.Settings,

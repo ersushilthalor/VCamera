@@ -159,9 +159,42 @@ class Camera2Engine(private val context: Context) {
     val isKeepUltraWideReady: StateFlow<Boolean> = _isKeepUltraWideReady.asStateFlow()
     @Volatile private var isSpecialVideoPreviewEnabled: Boolean = preferences.isShowUltraWidePreview
     @Volatile private var isSpecialVideoRecordingActive: Boolean = false
+    @Volatile private var isSpecialPhotoCaptureEnabled: Boolean = preferences.isSpecialPhotoEnabled
 
     private fun shouldKeepUltraWideStreamReady(): Boolean =
-        _isKeepUltraWideReady.value || ((isSpecialVideoPreviewEnabled || isSpecialVideoRecordingActive) && currentMode == CameraMode.VIDEO)
+        _isKeepUltraWideReady.value ||
+            ((isSpecialVideoPreviewEnabled || isSpecialVideoRecordingActive) && currentMode == CameraMode.VIDEO) ||
+            (isSpecialPhotoCaptureEnabled && currentMode == CameraMode.PHOTO)
+
+    /** Prepare the ultra-wide JPEG output before a paired photo shutter press. */
+    private fun ensureSpecialPhotoJpegReader(ultraWideLens: LensInfo): Boolean {
+        return try {
+            val photoSize = getOptimalPhotoSizeForLens(ultraWideLens, ultraWideLens.cameraId, forceFourThree = true)
+            val current = ultraWideStandbyJpegReader
+            if (current == null || current.width != photoSize.width ||
+                current.height != photoSize.height || !current.surface.isValid
+            ) {
+                try { current?.close() } catch (_: Throwable) {}
+                ultraWideStandbyJpegReader = ImageReader.newInstance(
+                    photoSize.width, photoSize.height, ImageFormat.JPEG, 3
+                )
+            }
+            ultraWideStandbyJpegReader?.surface?.isValid == true
+        } catch (t: Throwable) {
+            Log.e(TAG, "[SPECIAL_PHOTO] Unable to prepare ultra-wide JPEG output", t)
+            false
+        }
+    }
+
+    fun setSpecialPhotoCaptureEnabled(enabled: Boolean) {
+        if (isSpecialPhotoCaptureEnabled == enabled) return
+        isSpecialPhotoCaptureEnabled = enabled
+        if (_isCameraInitialized.value && currentMode == CameraMode.PHOTO) {
+            _ultraWideStreamStatus.value =
+                if (enabled) BackgroundCameraStatus.PREPARING else BackgroundCameraStatus.OFF
+            restartCamera()
+        }
+    }
 
     private val _isAutoSwitchToUltraWide = MutableStateFlow(preferences.isAutoSwitchToUltraWide)
     val isAutoSwitchToUltraWide: StateFlow<Boolean> = _isAutoSwitchToUltraWide.asStateFlow()
@@ -1147,7 +1180,11 @@ class Camera2Engine(private val context: Context) {
             val sessionSurfaces = mutableListOf<Surface>(standbyPreviewSurf)
             if (includeJpegReader) {
                 try {
-                    val photoSize = getOptimalPhotoSizeForLens(standbyLens, standbyLens.cameraId)
+                    val photoSize = getOptimalPhotoSizeForLens(
+                        standbyLens,
+                        standbyLens.cameraId,
+                        forceFourThree = isSpecialPhotoCaptureEnabled && currentMode == CameraMode.PHOTO
+                    )
                     val existingReader = ultraWideStandbyJpegReader
                     if (existingReader == null ||
                         existingReader.width != photoSize.width ||
@@ -1317,7 +1354,13 @@ class Camera2Engine(private val context: Context) {
             val camera = cameraDevice ?: return
             getOrCreateUltraWidePreviewSurface(ultraWideLens.cameraId)
             getOrCreateMainPreviewSurface(mainLens.cameraId, mainLens)
-            if (!activeLogicalMultiCamUltraWideConfigured && captureSession != null && !isConfiguringSession && !_isRecordingVideo.value && !isContinuousZoomTransitionActive) {
+            if (isSpecialPhotoCaptureEnabled && !ensureSpecialPhotoJpegReader(ultraWideLens)) {
+                _ultraWideStreamStatus.value = BackgroundCameraStatus.UNAVAILABLE
+                return
+            }
+            if (!activeLogicalMultiCamUltraWideConfigured && captureSession != null &&
+                !isConfiguringSession && !_isRecordingVideo.value && !isContinuousZoomTransitionActive
+            ) {
                 createCameraCaptureSession()
                 return
             }
@@ -1342,15 +1385,30 @@ class Camera2Engine(private val context: Context) {
                     max(standbyConfiguredPreviewSize!!.width, standbyConfiguredPreviewSize!!.height) == max(optimalStandbySize.width, optimalStandbySize.height) &&
                     min(standbyConfiguredPreviewSize!!.width, standbyConfiguredPreviewSize!!.height) == min(optimalStandbySize.width, optimalStandbySize.height)
 
+                val needsSpecialPhotoReader = isSpecialPhotoCaptureEnabled && currentMode == CameraMode.PHOTO
+                val specialPhotoReaderReady = !needsSpecialPhotoReader ||
+                    (ultraWideStandbyJpegReader?.surface?.isValid == true &&
+                        runCatching {
+                            val expected = getOptimalPhotoSizeForLens(
+                                standbyLens, standbyLens.cameraId, forceFourThree = true
+                            )
+                            ultraWideStandbyJpegReader?.width == expected.width &&
+                                ultraWideStandbyJpegReader?.height == expected.height
+                        }.getOrDefault(false))
                 if (ultraWideStandbyCaptureSession != null &&
                     sizeMatches &&
-                    standbyConfiguredForRecording == isRecordingNow) {
+                    standbyConfiguredForRecording == isRecordingNow &&
+                    specialPhotoReaderReady) {
                     isUltraWideStreaming.set(true)
                     _ultraWideStreamStatus.value = BackgroundCameraStatus.READY_QUIET
                     syncStandbyStreamSettings()
                     return
                 }
-                configureStandbySessionOnDevice(existingStandbyCam, standbyLens)
+                configureStandbySessionOnDevice(
+                    existingStandbyCam,
+                    standbyLens,
+                    includeJpegReader = needsSpecialPhotoReader
+                )
                 return
             } else {
                 // Close mismatched standby camera if any
@@ -1396,7 +1454,11 @@ class Camera2Engine(private val context: Context) {
                         try { ultraWideStandbyCameraDevice?.close() } catch (_: Throwable) {}
                     }
                     ultraWideStandbyCameraDevice = camera
-                    configureStandbySessionOnDevice(camera, standbyLens)
+                    configureStandbySessionOnDevice(
+                        camera,
+                        standbyLens,
+                        includeJpegReader = isSpecialPhotoCaptureEnabled && currentMode == CameraMode.PHOTO
+                    )
                 }
 
                 override fun onDisconnected(camera: CameraDevice) {
@@ -4297,7 +4359,11 @@ class Camera2Engine(private val context: Context) {
      * In 50MP mode, queries the real sensor-supported maximum-resolution output.
      * Never reuses the main camera resolution.
      */
-    fun getOptimalPhotoSizeForLens(lens: LensInfo?, cameraId: String): Size {
+    fun getOptimalPhotoSizeForLens(
+        lens: LensInfo?,
+        cameraId: String,
+        forceFourThree: Boolean = false
+    ): Size {
         val targetId = if (lens?.physicalCameraId != null && lens.supportsPhysicalStream) {
             lens.physicalCameraId
         } else {
@@ -4346,7 +4412,7 @@ class Camera2Engine(private val context: Context) {
             (it.width.toLong() * it.height.toLong()) <= maxStandardPixels
         }.ifEmpty { sixteenNineSizes }
 
-        val isPhotoOrPortrait = false
+        val isPhotoOrPortrait = forceFourThree
 
         return when {
             isPhotoOrPortrait -> {
@@ -4433,6 +4499,23 @@ class Camera2Engine(private val context: Context) {
         val caps = _capabilities.value
         val activeLens = _selectedLens.value
         val isVideoOrCinema = (currentMode == CameraMode.VIDEO || currentMode == CameraMode.CINEMA)
+        val backLensesForPhoto = _availableLenses.value.filter {
+            it.facing == CameraCharacteristics.LENS_FACING_BACK
+        }
+        val mainPhotoLens = backLensesForPhoto.firstOrNull { it.isPrimaryMain }
+            ?: backLensesForPhoto.firstOrNull { it.lensType == LensType.WIDE && !it.isZoomPreset }
+            ?: backLensesForPhoto.firstOrNull { it.lensType == LensType.WIDE }
+        val ultraWidePhotoLens = backLensesForPhoto.firstOrNull { it.lensType == LensType.ULTRAWIDE }
+        val isLogicalDualPhotoDevice = isSpecialPhotoCaptureEnabled &&
+            currentMode == CameraMode.PHOTO &&
+            mainPhotoLens != null && ultraWidePhotoLens != null &&
+            mainPhotoLens.cameraId == cameraId &&
+            ultraWidePhotoLens.cameraId == cameraId
+        // On one logical multi-camera device, the active JPEG reader is always
+        // the 1x output. The separate standby JPEG reader is explicitly routed
+        // to the physical ultra-wide sensor in createCameraCaptureSession().
+        val photoReaderLens = if (isLogicalDualPhotoDevice) mainPhotoLens else activeLens
+        val photoReaderCameraId = if (isLogicalDualPhotoDevice) mainPhotoLens!!.cameraId else cameraId
         val targetSize = if (isVideoOrCinema) {
             val targetRecRes = if (currentMode == CameraMode.CINEMA) {
                 _cinemaConfig.value.selectedResolution ?: userSelectedVideoResolution ?: _selectedVideoResolution.value ?: CameraResolution(1920, 1080)
@@ -4441,7 +4524,11 @@ class Camera2Engine(private val context: Context) {
             }
             Size(maxOf(targetRecRes.width, targetRecRes.height), minOf(targetRecRes.width, targetRecRes.height))
         } else {
-            getOptimalPhotoSizeForLens(activeLens, cameraId)
+            getOptimalPhotoSizeForLens(
+                photoReaderLens,
+                photoReaderCameraId,
+                forceFourThree = isSpecialPhotoCaptureEnabled && currentMode == CameraMode.PHOTO
+            )
         }
         if (!isVideoOrCinema) {
             _selectedPhotoResolution.value = CameraResolution(targetSize.width, targetSize.height, ImageFormat.JPEG)
@@ -4684,7 +4771,17 @@ class Camera2Engine(private val context: Context) {
                         outputConfigs.add(uwPreviewConfig)
 
                         imageReaderJpeg?.surface?.let {
-                            outputConfigs.add(android.hardware.camera2.params.OutputConfiguration(it))
+                            val mainJpegConfig = android.hardware.camera2.params.OutputConfiguration(it)
+                            if (mainPhysicalId != null) mainJpegConfig.setPhysicalCameraId(mainPhysicalId)
+                            outputConfigs.add(mainJpegConfig)
+                        }
+                        if (isSpecialPhotoCaptureEnabled && currentMode == CameraMode.PHOTO) {
+                            ensureSpecialPhotoJpegReader(ultraWideLens)
+                            ultraWideStandbyJpegReader?.surface?.takeIf { it.isValid }?.let { uwJpegSurface ->
+                                val uwJpegConfig = android.hardware.camera2.params.OutputConfiguration(uwJpegSurface)
+                                uwJpegConfig.setPhysicalCameraId(uwPhysId)
+                                outputConfigs.add(uwJpegConfig)
+                            }
                         }
 
                         val template = if (currentMode == CameraMode.VIDEO || currentMode == CameraMode.CINEMA) {
@@ -6356,6 +6453,405 @@ class Camera2Engine(private val context: Context) {
      * Take still photo (JPEG + optional RAW). In 50M mode, triggers single-frame computational 50MP capture.
      */
     private val photoCaptureInProgress = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * The standby preview normally keeps the ultra-wide sensor cropped to the 1x
+     * handoff FOV. Still photos must undo that crop: retain the full active array on
+     * the logical stream and, where supported, explicitly on the physical sensor too.
+     */
+    private fun applyFullFramePhysicalJpegCrop(builder: CaptureRequest.Builder, lens: LensInfo) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P ||
+            !lens.supportsPhysicalStream || lens.physicalCameraId == null
+        ) return
+        try {
+            val physicalId = lens.physicalCameraId ?: return
+            val physicalChars = getCharacteristics(physicalId) ?: return
+            val physicalArray = physicalChars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
+            builder.setPhysicalCameraKey(
+                CaptureRequest.SCALER_CROP_REGION,
+                Rect(physicalArray),
+                physicalId
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val zoomRange = physicalChars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+                if (zoomRange != null && zoomRange.contains(1f)) {
+                    builder.setPhysicalCameraKey(CaptureRequest.CONTROL_ZOOM_RATIO, 1f, physicalId)
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "[SPECIAL_PHOTO] Could not reset physical crop for ${lens.lensType}", t)
+        }
+    }
+
+    private fun applyFullFrameJpegCrop(builder: CaptureRequest.Builder, lens: LensInfo) {
+        try {
+            val logicalChars = getCharacteristics(lens.cameraId)
+            val logicalArray = logicalChars?.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            if (logicalArray != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val zoomRange = logicalChars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+                    if (zoomRange != null && zoomRange.contains(1f)) {
+                        builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, 1f)
+                    }
+                }
+                builder.set(CaptureRequest.SCALER_CROP_REGION, Rect(logicalArray))
+            }
+
+            val physicalId = lens.physicalCameraId?.takeIf {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && lens.supportsPhysicalStream
+            }
+            if (physicalId != null) {
+                val physicalChars = getCharacteristics(physicalId)
+                val physicalArray = physicalChars?.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+                if (physicalArray != null) {
+                    builder.setPhysicalCameraKey(
+                        CaptureRequest.SCALER_CROP_REGION,
+                        Rect(physicalArray),
+                        physicalId
+                    )
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        val physicalZoomRange = physicalChars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+                        if (physicalZoomRange != null && physicalZoomRange.contains(1f)) {
+                            builder.setPhysicalCameraKey(CaptureRequest.CONTROL_ZOOM_RATIO, 1f, physicalId)
+                        }
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "[SPECIAL_PHOTO] Could not force full-frame still crop for ${lens.lensType}", t)
+        }
+    }
+
+    /**
+     * Captures one paired Special Photo. A logical multi-camera device receives one
+     * STILL_CAPTURE request with both JPEG outputs; independent cameras receive
+     * back-to-back requests on the camera handler. Sensor timestamps record real skew.
+     */
+    fun takeSpecialPhoto(onComplete: (mainUri: Uri?, sensorTimestampSkewMs: Long?) -> Unit) {
+        if (!photoCaptureInProgress.compareAndSet(false, true)) return
+        _isCapturing.value = true
+        engineScope.launch {
+            val completed = java.util.concurrent.atomic.AtomicBoolean(false)
+            var timeoutRunnable: Runnable? = null
+            var mainReaderForCleanup: ImageReader? = null
+            var ultraReaderForCleanup: ImageReader? = null
+            val mainImage = java.util.concurrent.atomic.AtomicReference<Pair<ByteArray, Long>?>(null)
+            val ultraImage = java.util.concurrent.atomic.AtomicReference<Pair<ByteArray, Long>?>(null)
+            val saving = java.util.concurrent.atomic.AtomicBoolean(false)
+            val handler = backgroundHandler
+
+            fun finish(mainUri: Uri?, ultraUri: Uri?, skewNs: Long?, displayName: String) {
+                if (!completed.compareAndSet(false, true)) {
+                    // A failure/timeout may win a race with the asynchronous MediaStore save.
+                    // Remove any late pair so a half-finished photo never pollutes the gallery.
+                    try { mainUri?.let { context.contentResolver.delete(it, null, null) } } catch (_: Throwable) {}
+                    try { ultraUri?.let { context.contentResolver.delete(it, null, null) } } catch (_: Throwable) {}
+                    return
+                }
+                timeoutRunnable?.let { handler?.removeCallbacks(it) }
+                try { mainReaderForCleanup?.setOnImageAvailableListener(null, null) } catch (_: Throwable) {}
+                try { ultraReaderForCleanup?.setOnImageAvailableListener(null, null) } catch (_: Throwable) {}
+                if (mainUri == null || ultraUri == null) {
+                    try { mainUri?.let { context.contentResolver.delete(it, null, null) } } catch (_: Throwable) {}
+                    try { ultraUri?.let { context.contentResolver.delete(it, null, null) } } catch (_: Throwable) {}
+                    photoCaptureInProgress.set(false)
+                    _isCapturing.value = false
+                    updateStorageStats()
+                    onComplete(null, null)
+                    return
+                }
+                val now = System.currentTimeMillis()
+                val safeSkewNs = skewNs?.coerceAtLeast(0L) ?: -1L
+                try {
+                    com.example.camera.gallery.SpecialPhotoGalleryRepository(context).addPair(
+                        mainUri = mainUri,
+                        ultraWideUri = ultraUri,
+                        displayName = displayName,
+                        timestamp = now,
+                        sensorTimestampSkewNs = safeSkewNs
+                    )
+                } catch (t: Throwable) {
+                    Log.e(TAG, "[SPECIAL_PHOTO] Failed to persist pair metadata", t)
+                }
+                _lastCapturedMedia.value = CapturedMedia(
+                    uri = mainUri,
+                    isVideo = false,
+                    timestamp = now,
+                    displayName = displayName,
+                    isFrontCamera = false
+                )
+                photoCaptureInProgress.set(false)
+                _isCapturing.value = false
+                updateStorageStats()
+                onComplete(mainUri, if (safeSkewNs >= 0L) (safeSkewNs + 500_000L) / 1_000_000L else null)
+            }
+
+            try {
+                val initialLens = _selectedLens.value
+                if (initialLens == null || initialLens.facing != CameraCharacteristics.LENS_FACING_BACK) {
+                    finish(null, null, null, "")
+                    return@launch
+                }
+                val backLenses = _availableLenses.value.filter {
+                    it.facing == CameraCharacteristics.LENS_FACING_BACK
+                }
+                val ultraWideLens = backLenses.firstOrNull {
+                    it.lensType == LensType.ULTRAWIDE && it.isPhysical
+                } ?: backLenses.firstOrNull { it.lensType == LensType.ULTRAWIDE }
+                    ?: run {
+                        finish(null, null, null, "")
+                        return@launch
+                    }
+                val mainLens = backLenses.firstOrNull { it.isPrimaryMain }
+                    ?: backLenses.firstOrNull { it.lensType == LensType.WIDE && !it.isZoomPreset }
+                    ?: backLenses.firstOrNull { it.lensType == LensType.WIDE }
+                    ?: run {
+                        finish(null, null, null, "")
+                        return@launch
+                    }
+
+                // The Special Photo toggle recreates the camera sessions to add 4:3 JPEG
+                // surfaces. A shutter press immediately after enabling it waits for that
+                // reconfiguration rather than failing against the short not-ready window.
+                val activeSessionReady = withTimeoutOrNull(6000L) {
+                    while (cameraDevice == null || captureSession == null || !_isCameraReady.value) {
+                        if (isClosingCamera) break
+                        delay(40L)
+                    }
+                    cameraDevice != null && captureSession != null && _isCameraReady.value
+                } ?: false
+                if (!activeSessionReady) {
+                    finish(null, null, null, "")
+                    return@launch
+                }
+
+                if (_selectedLens.value?.id != mainLens.id) {
+                    switchLensSuspend(mainLens, preserveZoom = false, targetZoom = 1f)
+                }
+                if (!isRunningOnLens(mainLens) ||
+                    cameraDevice == null || captureSession == null || !_isCameraReady.value
+                ) {
+                    finish(null, null, null, "")
+                    return@launch
+                }
+                isSpecialPhotoCaptureEnabled = true
+                ensureUltraWideSimultaneousReady()
+                val ready = withTimeoutOrNull(5000L) {
+                    while (true) {
+                        val logicalReady = mainLens.cameraId == ultraWideLens.cameraId &&
+                            ultraWideLens.physicalCameraId != null &&
+                            activeLogicalMultiCamUltraWideConfigured &&
+                            ultraWideStandbyJpegReader?.surface?.isValid == true
+                        val independentReady = ultraWideStandbyCameraDevice != null &&
+                            ultraWideStandbyCaptureSession != null &&
+                            ultraWideStandbyJpegReader?.surface?.isValid == true &&
+                            !standbyRecordingSessionFailed
+                        if (logicalReady || independentReady) break
+                        if (isClosingCamera || cameraDevice == null || captureSession == null) break
+                        delay(40L)
+                    }
+                    val logicalReady = mainLens.cameraId == ultraWideLens.cameraId &&
+                        ultraWideLens.physicalCameraId != null &&
+                        activeLogicalMultiCamUltraWideConfigured
+                    val independentReady = ultraWideStandbyCameraDevice != null &&
+                        ultraWideStandbyCaptureSession != null &&
+                        !standbyRecordingSessionFailed
+                    logicalReady || independentReady
+                } ?: false
+                if (!ready) {
+                    finish(null, null, null, "")
+                    return@launch
+                }
+
+                val mainCamera = cameraDevice ?: run { finish(null, null, null, ""); return@launch }
+                val mainSession = captureSession ?: run { finish(null, null, null, ""); return@launch }
+                val mainJpegReader = imageReaderJpeg?.takeIf { it.surface.isValid }
+                    ?: run { finish(null, null, null, ""); return@launch }
+                val ultraJpegReader = ultraWideStandbyJpegReader?.takeIf { it.surface.isValid }
+                    ?: run { finish(null, null, null, ""); return@launch }
+                val cameraHandler = backgroundHandler ?: run { finish(null, null, null, ""); return@launch }
+                mainReaderForCleanup = mainJpegReader
+                ultraReaderForCleanup = ultraJpegReader
+                val displayName = "VCAM_SPECIAL_${System.currentTimeMillis()}.jpg"
+
+                val saveBothWhenReady: () -> Unit = {
+                    val mainFrame = mainImage.get()
+                    val ultraFrame = ultraImage.get()
+                    if (mainFrame != null && ultraFrame != null && saving.compareAndSet(false, true)) {
+                        engineScope.launch(Dispatchers.IO) {
+                            val timestampDomainsMatch = if (mainLens.cameraId == ultraWideLens.cameraId) {
+                                true
+                            } else {
+                                val mainTimestampSource = getCharacteristics(mainLens.cameraId)
+                                    ?.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
+                                val ultraTimestampSource = getCharacteristics(ultraWideLens.cameraId)
+                                    ?.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
+                                mainTimestampSource == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME &&
+                                    ultraTimestampSource == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+                            }
+                            val skew = if (timestampDomainsMatch) {
+                                kotlin.math.abs(mainFrame.second - ultraFrame.second)
+                            } else {
+                                -1L
+                            }
+                            val mainUri = try {
+                                saveJpegBytesToMediaStore(mainFrame.first, filePrefix = "VCAM_SPECIAL")
+                            } catch (t: Throwable) {
+                                Log.e(TAG, "[SPECIAL_PHOTO] Main JPEG save failed", t)
+                                null
+                            }
+                            val ultraUri = try {
+                                saveJpegBytesToMediaStore(ultraFrame.first, filePrefix = "VCAM_UW")
+                            } catch (t: Throwable) {
+                                Log.e(TAG, "[SPECIAL_PHOTO] Ultra-wide JPEG save failed", t)
+                                null
+                            }
+                            withContext(Dispatchers.Main) {
+                                finish(mainUri, ultraUri, skew, displayName)
+                            }
+                        }
+                    }
+                }
+
+                fun installReader(
+                    reader: ImageReader,
+                    destination: java.util.concurrent.atomic.AtomicReference<Pair<ByteArray, Long>?>
+                ) {
+                    reader.setOnImageAvailableListener({ availableReader ->
+                        val image = try {
+                            availableReader.acquireLatestImage()
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "[SPECIAL_PHOTO] Unable to acquire JPEG", t)
+                            null
+                        } ?: return@setOnImageAvailableListener
+                        val pair = try {
+                            val buffer = image.planes.firstOrNull()?.buffer
+                                ?: throw java.io.IOException("JPEG image has no data plane")
+                            val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
+                            bytes to image.timestamp
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "[SPECIAL_PHOTO] Unable to read JPEG image", t)
+                            null
+                        } finally {
+                            image.close()
+                        }
+                        if (pair != null) {
+                            destination.set(pair)
+                            saveBothWhenReady()
+                        }
+                    }, cameraHandler)
+                }
+                installReader(mainJpegReader, mainImage)
+                installReader(ultraJpegReader, ultraImage)
+                timeoutRunnable = Runnable {
+                    if (!completed.get()) {
+                        Log.e(TAG, "[SPECIAL_PHOTO] Timed out waiting for both sensor JPEGs")
+                        finish(null, null, null, "")
+                    }
+                }
+                cameraHandler.postDelayed(timeoutRunnable!!, 7000L)
+
+                val jpegOrientation = getCaptureJpegOrientation()
+                val jpegQuality = preferences.jpegQuality.coerceIn(90, 100).toByte()
+                val logicalDualCamera = mainLens.cameraId == ultraWideLens.cameraId &&
+                    ultraWideLens.physicalCameraId != null &&
+                    activeLogicalMultiCamUltraWideConfigured
+
+                if (logicalDualCamera) {
+                    val request = mainCamera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                        addTarget(mainJpegReader.surface)
+                        addTarget(ultraJpegReader.surface)
+                        applyCommonSettings(this, isStillCapture = true)
+                        applyFullFrameJpegCrop(this, mainLens)
+                        applyFullFramePhysicalJpegCrop(this, ultraWideLens)
+                        set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
+                        set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
+                        set(CaptureRequest.JPEG_QUALITY, jpegQuality)
+                    }.build()
+                    mainSession.capture(request, object : CameraCaptureSession.CaptureCallback() {
+                        override fun onCaptureCompleted(
+                            session: CameraCaptureSession,
+                            request: CaptureRequest,
+                            result: TotalCaptureResult
+                        ) {
+                            lastCaptureResult = result
+                            Log.i(TAG, "[SPECIAL_PHOTO] Single logical multi-camera STILL request completed")
+                        }
+                        override fun onCaptureFailed(
+                            session: CameraCaptureSession,
+                            request: CaptureRequest,
+                            failure: CaptureFailure
+                        ) {
+                            Log.e(TAG, "[SPECIAL_PHOTO] Logical paired capture failed: ${failure.reason}")
+                            finish(null, null, null, "")
+                        }
+                        override fun onCaptureSequenceAborted(session: CameraCaptureSession, sequenceId: Int) {
+                            finish(null, null, null, "")
+                        }
+                    }, cameraHandler)
+                } else {
+                    val ultraCamera = ultraWideStandbyCameraDevice
+                        ?: run { finish(null, null, null, ""); return@launch }
+                    val ultraSession = ultraWideStandbyCaptureSession
+                        ?: run { finish(null, null, null, ""); return@launch }
+                    val mainRequest = mainCamera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                        addTarget(mainJpegReader.surface)
+                        applyCommonSettings(this, isStillCapture = true)
+                        applyFullFrameJpegCrop(this, mainLens)
+                        set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
+                        set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
+                        set(CaptureRequest.JPEG_QUALITY, jpegQuality)
+                    }.build()
+                    val ultraRequest = ultraCamera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                        addTarget(ultraJpegReader.surface)
+                        applySynchronizedStandbySettings(this, ultraWideLens)
+                        applyFullFrameJpegCrop(this, ultraWideLens)
+                        applyFullFramePhysicalJpegCrop(this, ultraWideLens)
+                        set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
+                        set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
+                        set(CaptureRequest.JPEG_QUALITY, jpegQuality)
+                    }.build()
+                    // Queue both camera submissions on the same Camera2 handler in one runnable.
+                    // Separate physical devices still cannot promise identical exposure instants,
+                    // but this removes extra app-thread scheduling delay between their requests.
+                    val captureQueued = cameraHandler.post {
+                        if (completed.get()) return@post
+                        try {
+                            mainSession.capture(mainRequest, object : CameraCaptureSession.CaptureCallback() {
+                                override fun onCaptureFailed(
+                                    session: CameraCaptureSession,
+                                    request: CaptureRequest,
+                                    failure: CaptureFailure
+                                ) {
+                                    Log.e(TAG, "[SPECIAL_PHOTO] Main capture failed: ${failure.reason}")
+                                    finish(null, null, null, "")
+                                }
+                            }, cameraHandler)
+                            ultraSession.capture(ultraRequest, object : CameraCaptureSession.CaptureCallback() {
+                                override fun onCaptureFailed(
+                                    session: CameraCaptureSession,
+                                    request: CaptureRequest,
+                                    failure: CaptureFailure
+                                ) {
+                                    Log.e(TAG, "[SPECIAL_PHOTO] Ultra-wide capture failed: ${failure.reason}")
+                                    finish(null, null, null, "")
+                                }
+                            }, cameraHandler)
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "[SPECIAL_PHOTO] Unable to queue both sensor requests", t)
+                            finish(null, null, null, "")
+                        }
+                    }
+                    if (!captureQueued) {
+                        finish(null, null, null, "")
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "[SPECIAL_PHOTO] Dual-lens capture failed", t)
+                finish(null, null, null, "")
+            }
+        }
+    }
 
     fun takePhoto(onComplete: (Uri?) -> Unit) {
         val camera = cameraDevice

@@ -13,6 +13,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.camera.data.CameraPreferences
 import com.example.camera.gallery.SpecialVideoClip
 import com.example.camera.gallery.SpecialVideoGalleryRepository
+import com.example.camera.gallery.SpecialPhotoGalleryRepository
 import com.example.camera.gallery.MediaGalleryRepository
 import com.example.camera.gallery.MediaGalleryItem
 import com.example.camera.engine.Camera2Engine
@@ -48,7 +49,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     val lastCapturedMedia: StateFlow<CapturedMedia?> = engine.lastCapturedMedia
     private val specialVideoGalleryRepository = SpecialVideoGalleryRepository(application.applicationContext)
+    private val specialPhotoGalleryRepository = SpecialPhotoGalleryRepository(application.applicationContext)
     private val mediaGalleryRepository = MediaGalleryRepository(application.applicationContext)
+    private val _isSpecialPhotoEnabled = MutableStateFlow(preferences.isSpecialPhotoEnabled)
+    val isSpecialPhotoEnabled: StateFlow<Boolean> = _isSpecialPhotoEnabled.asStateFlow()
     private val _mediaGalleryItems = MutableStateFlow<List<MediaGalleryItem>>(emptyList())
     val mediaGalleryItems: StateFlow<List<MediaGalleryItem>> = _mediaGalleryItems.asStateFlow()
     private val _specialVideoClips = MutableStateFlow(specialVideoGalleryRepository.getClips())
@@ -532,6 +536,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _instantSwitchState.update { it.copy(isShowUltraWidePreview = enabled) }
         engine.setSpecialVideoPreviewEnabled(enabled)
         showToast(if (enabled) "Special Video: ON" else "Special Video: OFF")
+    }
+
+    fun setSpecialPhotoEnabled(enabled: Boolean) {
+        preferences.isSpecialPhotoEnabled = enabled
+        _isSpecialPhotoEnabled.value = enabled
+        engine.setSpecialPhotoCaptureEnabled(enabled)
+        showToast(if (enabled) "Special Photo: ON · Main + Ultra Wide" else "Special Photo: OFF")
     }
 
     fun setKeepFrontCameraReady(enabled: Boolean) {
@@ -1687,8 +1698,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun refreshMediaGallery() {
         viewModelScope.launch(Dispatchers.IO) {
             val clips = specialVideoGalleryRepository.getClips()
+            val photos = specialPhotoGalleryRepository.getPairs()
             _specialVideoClips.value = clips
-            _mediaGalleryItems.value = mediaGalleryRepository.getMedia(clips)
+            _mediaGalleryItems.value = mediaGalleryRepository.getMedia(clips, photos)
         }
     }
 
@@ -1836,8 +1848,22 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun executePhotoCapture() {
         com.example.camera.sound.CameraSoundManager.playShutter()
-        engine.takePhoto { uri ->
-            showToast(if (uri != null) "Photo saved to DCIM/Camera" else "Failed to save photo")
+        if (_isSpecialPhotoEnabled.value) {
+            engine.takeSpecialPhoto { uri, skewMs ->
+                showToast(
+                    when {
+                        uri == null -> "Special Photo failed · dual camera capture unavailable"
+                        skewMs == null -> "Special Photo saved · capture skew unavailable"
+                        else -> "Special Photo saved · sensor difference ${skewMs} ms"
+                    }
+                )
+                refreshMediaGallery()
+            }
+        } else {
+            engine.takePhoto { uri ->
+                showToast(if (uri != null) "Photo saved to DCIM/Camera" else "Failed to save photo")
+                if (uri != null) refreshMediaGallery()
+            }
         }
     }
 
