@@ -24,6 +24,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -88,8 +89,8 @@ class DualCameraRecordingRelay internal constructor(
         specialVideoPiPEnabled = enabled
     }
 
-    /** Camera stream whose YUV frames are processed by the EIS+ pipeline for this relay session. */
-    private val eisPlusSource: PreviewStreamSource = initialSource
+    /** Sensor-specific pipelines. Never share one lens' transform history with the other. */
+    private val eisPlusPipelinesBySource = ConcurrentHashMap<PreviewStreamSource, VideoEisPlusPipeline>()
     // Accessed only from the relay GL thread; prevents one warning per raw camera frame.
     private var loggedEisPlusSourceBypass: PreviewStreamSource? = null
 
@@ -259,16 +260,13 @@ class DualCameraRecordingRelay internal constructor(
         }
     }
 
-    /** Schedule a timestamp-matched MGC frame on the relay's owning GL thread. */
+    /** Drain sensor-matched MGC outputs from either camera on the relay's GL thread. */
     fun notifyEisPlusFrameAvailable() {
-        val pipeline = eisPlusPipeline ?: return
-        if (!pipeline.isRunning || isReleased.get()) return
+        if (isReleased.get() || eisPlusPipelinesBySource.values.none { it.isRunning }) return
         val handler = glHandler ?: run {
             EisPlusDiagnosticLog.event("RELAY", "GL_HANDLER_MISSING", "EIS+ frame callback has no GL handler", "ERROR")
             return
         }
-        // The GL task drains all currently available frames. Coalescing avoids queueing one
-        // redundant Runnable for every result when the camera callback outruns the GL thread.
         if (!eisPlusRenderTaskScheduled.compareAndSet(false, true)) return
         val accepted = handler.post {
             try {
@@ -278,10 +276,8 @@ class DualCameraRecordingRelay internal constructor(
                 Log.e(TAG, "MGC EIS+ relay render failed; keeping GL thread alive: ${t.message}", t)
             } finally {
                 eisPlusRenderTaskScheduled.set(false)
-                // Close the race where a result arrives after the drain sees an empty queue
-                // but before this task releases its scheduled flag. A callback in that window
-                // may have been coalesced; pendingFrameCount makes sure it is drained now.
-                if (!isReleased.get() && pipeline.isRunning && pipeline.pendingFrameCount > 0) {
+                // Close the lost-wakeup window after the queues have been drained.
+                if (!isReleased.get() && hasPendingEisPlusFrames()) {
                     notifyEisPlusFrameAvailable()
                 }
             }
@@ -366,6 +362,7 @@ class DualCameraRecordingRelay internal constructor(
             ?: throw IllegalStateException("Ultra-wide relay input surface is unavailable")
 
     init {
+        eisPlusPipeline?.let { eisPlusPipelinesBySource[initialSource] = it }
         prepare()
     }
 
@@ -506,10 +503,30 @@ class DualCameraRecordingRelay internal constructor(
             switchCount.incrementAndGet()
             cinemaRecorder?.setActiveStreamSource(source)
             Log.i(TAG, "[RECORDING_RELAY] Switched active recording stream to $source (switches=${switchCount.get()})")
+            EisPlusDiagnosticLog.event(
+                "RELAY", "EIS_PLUS_SOURCE_SWITCH",
+                "activeSource=$source pipelineReady=${eisPlusPipelinesBySource[source]?.isRunning == true}"
+            )
+            notifyEisPlusFrameAvailable()
         } else {
             cinemaRecorder?.setActiveStreamSource(source)
         }
     }
+
+    /** Attach/detach the EIS+ input for one camera without restarting encoder or GL relay. */
+    internal fun setEisPlusPipelineForSource(source: PreviewStreamSource, pipeline: VideoEisPlusPipeline?) {
+        if (pipeline != null && pipeline.isRunning) {
+            eisPlusPipelinesBySource[source] = pipeline
+            EisPlusDiagnosticLog.event("RELAY", "EIS_PLUS_PIPELINE_ATTACHED", "source=$source running=true")
+        } else {
+            eisPlusPipelinesBySource.remove(source)
+            EisPlusDiagnosticLog.event("RELAY", "EIS_PLUS_PIPELINE_DETACHED", "source=$source")
+        }
+        notifyEisPlusFrameAvailable()
+    }
+
+    private fun hasPendingEisPlusFrames(): Boolean =
+        eisPlusPipelinesBySource.values.any { it.isRunning && it.pendingFrameCount > 0 }
 
     fun getRecorderSurfaceForLens(lens: LensInfo?): Surface {
         val isUw = lens?.lensType == LensType.ULTRAWIDE
@@ -851,23 +868,20 @@ class DualCameraRecordingRelay internal constructor(
 
         if (isPaused.get() || !isStreamingActive.get()) return
 
-        // The EIS+ YUV pipeline is bound to the sensor selected when recording started.
-        // Keep OES callbacks suppressed only while that same sensor is active. If the user
-        // switches to the other camera device, its frames have no matching EIS+ transform
-        // stream/session; continue through the normal relay path instead of freezing/dropping
-        // the recording. Never apply the original sensor's transforms to the other lens.
-        val eisPlusRunning = eisPlusPipeline?.isRunning == true
-        if (eisPlusRunning && activeSource == eisPlusSource) {
+        // Do not let raw OES overwrite a stabilized frame for this exact sensor.
+        // If the selected lens has no live matching pipeline, preserve the safe raw fallback.
+        val activeEisPlusRunning = eisPlusPipelinesBySource[activeSource]?.isRunning == true
+        if (activeEisPlusRunning) {
             loggedEisPlusSourceBypass = null
             return
         }
-        if (eisPlusRunning && activeSource != eisPlusSource &&
+        if (eisPlusPipelinesBySource.values.any { it.isRunning } &&
             loggedEisPlusSourceBypass != activeSource
         ) {
             loggedEisPlusSourceBypass = activeSource
             EisPlusDiagnosticLog.event(
                 "RELAY", "EIS_PLUS_SOURCE_BYPASS",
-                "pipelineSource=$eisPlusSource activeSource=$activeSource; using active OES stream without EIS+ transform",
+                "activeSource=$activeSource has no matching EIS+ pipeline; using raw active OES fallback",
                 "WARN",
             )
         }
@@ -1196,93 +1210,118 @@ class DualCameraRecordingRelay internal constructor(
 
 
     private fun renderEisPlusFrames() {
-        val pipeline = eisPlusPipeline ?: return
         val display = eglDisplay ?: return
         val context = eglContext ?: return
         val encoderSurface = eglSurface
         val previewSurface = eglPreviewSurface
-        if (!pipeline.isRunning || isReleased.get() || display == EGL14.EGL_NO_DISPLAY ||
+        if (isReleased.get() || display == EGL14.EGL_NO_DISPLAY ||
             context == EGL14.EGL_NO_CONTEXT ||
             ((encoderSurface == null || encoderSurface == EGL14.EGL_NO_SURFACE) &&
                 (previewSurface == null || previewSurface == EGL14.EGL_NO_SURFACE))
         ) return
 
-        while (true) {
-            val pending = pipeline.dequeueFrame() ?: break
-            if (activeSource != eisPlusSource || isPaused.get() || !isStreamingActive.get()) {
-                EisPlusDiagnosticLog.event(
-                    "RELAY", "FRAME_SKIPPED",
-                    "timestampNs=${pending.timestampNs} activeSource=$activeSource eisPlusSource=$eisPlusSource " +
-                        "paused=${isPaused.get()} streaming=${isStreamingActive.get()}",
-                    "WARN",
-                )
-                pending.image.close()
-                continue
-            }
-            val renderer = eisPlusRenderer
-            if (renderer == null) {
-                EisPlusDiagnosticLog.event("RELAY", "RENDERER_MISSING", "matched timestampNs=${pending.timestampNs}", "ERROR")
-                pending.image.close()
-                Log.e(TAG, "MGC EIS+ renderer is unavailable; dropping matched frame")
-                continue
-            }
-            val frame = renderer.render(pending)
-            if (frame == null) {
-                eisPlusRenderFailureCount += 1L
-                if (eisPlusRenderFailureCount <= 3L || eisPlusRenderFailureCount % 30L == 0L) {
-                    EisPlusDiagnosticLog.event("RELAY", "YUV_RENDER_RETURNED_NULL", "count=$eisPlusRenderFailureCount timestampNs=${pending.timestampNs}", "ERROR")
+        // Both sensors keep independent Camera2 metadata, gyro timelines, look-ahead queues,
+        // calibration and native state. Drain both here; encode only the active source.
+        for ((source, pipeline) in eisPlusPipelinesBySource.entries.toList()) {
+            if (!pipeline.isRunning) continue
+            while (true) {
+                val pending = pipeline.dequeueFrame() ?: break
+                if (source != activeSource || isPaused.get() || !isStreamingActive.get()) {
+                    if (source == activeSource) {
+                        EisPlusDiagnosticLog.event(
+                            "RELAY", "FRAME_SKIPPED",
+                            "timestampNs=${pending.timestampNs} activeSource=$activeSource source=$source " +
+                                "paused=${isPaused.get()} streaming=${isStreamingActive.get()}",
+                            "WARN"
+                        )
+                    }
+                    // Release inactive queue entries so ImageReader never stalls while a lens
+                    // is in standby. Its next active frames continue from its own timeline.
+                    pending.image.close()
+                    continue
                 }
-                continue
-            }
+                val renderer = eisPlusRenderer
+                if (renderer == null) {
+                    EisPlusDiagnosticLog.event("RELAY", "RENDERER_MISSING", "matched timestampNs=${pending.timestampNs}", "ERROR")
+                    pending.image.close()
+                    Log.e(TAG, "MGC EIS+ renderer is unavailable; dropping matched frame")
+                    continue
+                }
+                val frame = renderer.render(pending) ?: run {
+                    eisPlusRenderFailureCount += 1L
+                    if (eisPlusRenderFailureCount <= 3L || eisPlusRenderFailureCount % 30L == 0L) {
+                        EisPlusDiagnosticLog.event(
+                            "RELAY", "YUV_RENDER_RETURNED_NULL",
+                            "count=$eisPlusRenderFailureCount timestampNs=${pending.timestampNs}", "ERROR"
+                        )
+                    }
+                    continue
+                }
 
-            val sourceTimestampNs = frame.timestampNs
-            if (recordingStartMonotonicNs <= 0L) recordingStartMonotonicNs = sourceTimestampNs
-            if (sourceTimestampNs < recordingStartMonotonicNs) continue
-            val frameIntervalNs = 1_000_000_000L / fps.coerceAtLeast(1)
-            var presentationNs = sourceTimestampNs - recordingStartMonotonicNs -
-                totalPausedDurationNs + streamClockOffsetNs
-            if (presentationNs < 0L) presentationNs = 0L
-            if (lastOutputPtsNs >= 0L && presentationNs <= lastOutputPtsNs) {
-                presentationNs = lastOutputPtsNs + 1_000_000L.coerceAtLeast(frameIntervalNs / 4)
-            }
+                val sourceTimestampNs = frame.timestampNs
+                if (recordingStartMonotonicNs <= 0L) recordingStartMonotonicNs = sourceTimestampNs
+                if (sourceTimestampNs < recordingStartMonotonicNs) continue
+                val frameIntervalNs = 1_000_000_000L / fps.coerceAtLeast(1)
+                var presentationNs = sourceTimestampNs - recordingStartMonotonicNs - totalPausedDurationNs
+                // OES callbacks are suppressed for a matched EIS+ source; consume the same
+                // PTS handoff here or a sensor switch can leave an old clock offset in place.
+                if (pendingClockSyncOnSwitch) {
+                    pendingClockSyncOnSwitch = false
+                    if (lastOutputPtsNs > 0L) {
+                        val expectedNext = lastOutputPtsNs + frameIntervalNs
+                        if (kotlin.math.abs(presentationNs - expectedNext) > 150_000_000L) {
+                            streamClockOffsetNs += expectedNext - presentationNs
+                            presentationNs = expectedNext
+                        }
+                    }
+                }
+                presentationNs += streamClockOffsetNs
+                if (presentationNs < 0L) presentationNs = 0L
+                if (lastOutputPtsNs >= 0L && presentationNs <= lastOutputPtsNs) {
+                    presentationNs = lastOutputPtsNs + max(1_000_000L, frameIntervalNs / 4)
+                }
 
-            val encoded = if (encoderSurface != null && encoderSurface != EGL14.EGL_NO_SURFACE) {
-                renderEisPlusOutput(
-                    display, context, encoderSurface, frame, presentationNs, bufferWidth, bufferHeight
-                )
-            } else {
-                true
-            }
-            if (!encoded) {
-                eisPlusRenderFailureCount += 1L
-                if (eisPlusRenderFailureCount <= 3L || eisPlusRenderFailureCount % 30L == 0L) {
+                val hasEncoder = encoderSurface != null && encoderSurface != EGL14.EGL_NO_SURFACE
+                val encoded = if (hasEncoder) {
+                    renderEisPlusOutput(
+                        display, context, encoderSurface!!, frame, presentationNs, bufferWidth, bufferHeight
+                    )
+                } else true
+                if (!encoded) {
+                    eisPlusRenderFailureCount += 1L
+                    if (eisPlusRenderFailureCount <= 3L || eisPlusRenderFailureCount % 30L == 0L) {
+                        EisPlusDiagnosticLog.event(
+                            "RELAY", "ENCODER_RENDER_FAILED",
+                            "count=$eisPlusRenderFailureCount source=$source sourceTsNs=$sourceTimestampNs ptsNs=$presentationNs " +
+                                "size=${frame.width}x${frame.height} glError=0x${GLES30.glGetError().toString(16)}",
+                            "ERROR"
+                        )
+                    }
+                    continue
+                }
+                lastOutputPtsNs = presentationNs
+                val renderedOutputCount = relayedFrameCount.incrementAndGet()
+                if (hasEncoder && (renderedOutputCount <= 3L || renderedOutputCount % 30L == 0L)) {
                     EisPlusDiagnosticLog.event(
-                        "RELAY", "ENCODER_RENDER_FAILED",
-                        "count=$eisPlusRenderFailureCount sourceTsNs=$sourceTimestampNs ptsNs=$presentationNs " +
-                            "size=${frame.width}x${frame.height} glError=0x${GLES30.glGetError().toString(16)}",
-                        "ERROR",
+                        "RELAY", "ENCODER_FRAME_PRESENTED",
+                        "count=$renderedOutputCount source=$source sourceTsNs=$sourceTimestampNs ptsNs=$presentationNs " +
+                            "frameSize=${frame.width}x${frame.height} outputSize=${bufferWidth}x$bufferHeight"
                     )
                 }
-                continue
-            }
-            lastOutputPtsNs = presentationNs
-            val renderedOutputCount = relayedFrameCount.incrementAndGet()
-            if (renderedOutputCount <= 3L || renderedOutputCount % 30L == 0L) {
-                EisPlusDiagnosticLog.event(
-                    "RELAY", "ENCODER_FRAME_PRESENTED",
-                    "count=$renderedOutputCount sourceTsNs=$sourceTimestampNs ptsNs=$presentationNs " +
-                        "frameSize=${frame.width}x${frame.height} outputSize=${bufferWidth}x$bufferHeight",
-                )
-            }
-            CameraPerformanceMonitor.onRecordingFrame()
+                if (hasEncoder) CameraPerformanceMonitor.onRecordingFrame()
 
-            val preview = eglPreviewSurface
-            if (preview != null && preview != EGL14.EGL_NO_SURFACE) {
-                val pw = if (previewWidth > 0) previewWidth else bufferWidth
-                val ph = if (previewHeight > 0) previewHeight else bufferHeight
-                val previewRendered = renderEisPlusOutput(display, context, preview, frame, presentationNs, pw, ph)
-                if (!previewRendered && renderedOutputCount <= 3L) {
-                    EisPlusDiagnosticLog.event("RELAY", "PREVIEW_RENDER_FAILED", "ptsNs=$presentationNs previewSize=${pw}x$ph", "WARN")
+                if (previewSurface != null && previewSurface != EGL14.EGL_NO_SURFACE) {
+                    val pw = if (previewWidth > 0) previewWidth else bufferWidth
+                    val ph = if (previewHeight > 0) previewHeight else bufferHeight
+                    val previewRendered = renderEisPlusOutput(
+                        display, context, previewSurface, frame, presentationNs, pw, ph
+                    )
+                    if (!previewRendered && renderedOutputCount <= 3L) {
+                        EisPlusDiagnosticLog.event(
+                            "RELAY", "PREVIEW_RENDER_FAILED",
+                            "ptsNs=$presentationNs previewSize=${pw}x$ph", "WARN"
+                        )
+                    }
                 }
             }
         }
