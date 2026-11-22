@@ -7003,6 +7003,7 @@ class Camera2Engine(private val context: Context) {
         physicalCameraId: String? = null,
         updateActivePhysicalId: Boolean = true,
         stabilizationSurface: Surface? = null,
+        stabilizationPhysicalCameraId: String? = physicalCameraId,
         previewViaRelay: Boolean = false,
         callback: CameraCaptureSession.StateCallback
     ) {
@@ -7018,6 +7019,10 @@ class Camera2Engine(private val context: Context) {
                 physicalCameraId != null &&
                 physicalCameraId != camera.id &&
                 physicalIds.contains(physicalCameraId)
+        val useStabilizationPhysicalRouting = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                stabilizationPhysicalCameraId != null &&
+                stabilizationPhysicalCameraId != camera.id &&
+                physicalIds.contains(stabilizationPhysicalCameraId)
 
         if (updateActivePhysicalId) {
             activeSessionPhysicalCameraId = if (usePhysicalRouting) physicalCameraId else null
@@ -7070,7 +7075,13 @@ class Camera2Engine(private val context: Context) {
 
         val stabilizationConfig = stabilizationSurface?.takeIf { it.isValid }?.let { surface ->
             OutputConfiguration(surface).apply {
-                if (usePhysicalRouting) setPhysicalCameraId(physicalCameraId)
+                // The stabilization reader can intentionally follow a different physical
+                // sensor from the preview/encoder when Keep Ultra Wide Ready uses logical zoom.
+                if (useStabilizationPhysicalRouting) {
+                    setPhysicalCameraId(stabilizationPhysicalCameraId)
+                } else if (usePhysicalRouting) {
+                    setPhysicalCameraId(physicalCameraId)
+                }
             }
         }
         val outputConfigs = mutableListOf<OutputConfiguration>().apply {
@@ -8367,6 +8378,9 @@ class Camera2Engine(private val context: Context) {
                                                     is10Bit = is10BitSession,
                                                     physicalCameraId = targetPhysId,
                                                     stabilizationSurface = if (eisPlusStarted) activeVideoEisPlusSurface else null,
+                                                     stabilizationPhysicalCameraId = eisPlusPhysicalId,
+                                                    physicalCameraId = targetPhysId,
+
                                                     previewViaRelay = false,
                                                     callback = sessionCallback
                                                         ?: run {
@@ -8512,6 +8526,9 @@ class Camera2Engine(private val context: Context) {
                             is10Bit = is10BitSession,
                             physicalCameraId = targetPhysId,
                             stabilizationSurface = if (eisPlusStarted) activeVideoEisPlusSurface else null,
+                                                     stabilizationPhysicalCameraId = eisPlusPhysicalId,
+                            physicalCameraId = targetPhysId,
+
                             previewViaRelay = eisPlusPreviewViaRelay,
                             callback = checkNotNull(sessionCallback) { "Recording session callback was unavailable" }
                         )
