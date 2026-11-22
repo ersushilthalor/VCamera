@@ -7783,7 +7783,7 @@ class Camera2Engine(private val context: Context) {
                     eisPlusYuvSize == null ->
                         "no matching YUV stream size for ${videoRes.width}x${videoRes.height}"
                     eisPlusSupportFailureReason != null -> eisPlusSupportFailureReason
-                    else -> "EIS+ pipeline could not be created"
+                    else -> "available"
                 }
                 if (preferences.videoEisPlusEnabled) {
                     EisPlusDiagnosticLog.beginIfNeeded(
