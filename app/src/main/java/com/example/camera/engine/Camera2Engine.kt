@@ -8061,8 +8061,11 @@ class Camera2Engine(private val context: Context) {
                         activeSessionPhysicalCameraId = targetPhysId
 
                         val recordBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                            addTarget(previewSurf)
+                            if (!eisPlusPreviewViaRelay) addTarget(previewSurf)
                             addTarget(activeLensRecorderSurface)
+                            if (eisPlusStarted) {
+                                activeVideoEisPlusSurface?.takeIf { it.isValid }?.let(::addTarget)
+                            }
                             applyCommonSettings(this)
                             set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
                             if (matchedFpsRange != null) {
@@ -8073,6 +8076,13 @@ class Camera2Engine(private val context: Context) {
                                 this,
                                 oisAllowed = isOisAllowed && isOisSupportedForActiveLens()
                             )
+                            if (activeVideoEisPlusPipeline?.shouldRequestOisSamples == true &&
+                                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                            ) {
+                                runCatching {
+                                    set(CaptureRequest.STATISTICS_OIS_DATA_MODE, CaptureRequest.STATISTICS_OIS_DATA_MODE_ON)
+                                }.onFailure { Log.d(TAG, "OIS motion telemetry request unsupported", it) }
+                            }
                         }
                         synchronized(previewRequestLock) {
                             previewRequestBuilder = recordBuilder
@@ -8091,6 +8101,16 @@ class Camera2Engine(private val context: Context) {
                                             recordBuilder,
                                             oisAllowed = isOisAllowed && isOisSupportedForActiveLens()
                                         )
+                                        if (activeVideoEisPlusPipeline?.shouldRequestOisSamples == true &&
+                                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                                        ) {
+                                            runCatching {
+                                                recordBuilder.set(
+                                                    CaptureRequest.STATISTICS_OIS_DATA_MODE,
+                                                    CaptureRequest.STATISTICS_OIS_DATA_MODE_ON
+                                                )
+                                            }
+                                        }
                                         session.setRepeatingRequest(recordBuilder.build(), captureCallback, backgroundHandler)
                                     }
                                     if (!isSoftwareCinema) {
@@ -8115,13 +8135,14 @@ class Camera2Engine(private val context: Context) {
 
                             override fun onConfigureFailed(session: CameraCaptureSession) {
                                 Log.w(TAG, "[RECORDING_SESSION] Video capture session configuration failed, trying safe standard fallback")
+                                stopActiveVideoEisPlus()
                                 activeSessionPhysicalCameraId = null
                                 if (!isFallbackActive) {
                                     isFallbackActive = true
                                     try {
                                         // Build safe fallback capture request: standard FPS, standard template
                                         val safeBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                                            addTarget(previewSurf)
+                                            if (!eisPlusPreviewViaRelay) addTarget(previewSurf)
                                             addTarget(activeLensRecorderSurface)
                                             applyCommonSettings(this)
                                             set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
@@ -8137,7 +8158,10 @@ class Camera2Engine(private val context: Context) {
                                         }
 
                                         @Suppress("DEPRECATION")
-                                        val fallbackSurfaces = listOf(previewSurf, activeLensRecorderSurface)
+                                        val fallbackSurfaces = mutableListOf<Surface>().apply {
+                                            if (!eisPlusPreviewViaRelay) add(previewSurf)
+                                            add(activeLensRecorderSurface)
+                                        }
                                         camera.createCaptureSession(fallbackSurfaces, object : CameraCaptureSession.StateCallback() {
                                             override fun onConfigured(fallbackSession: CameraCaptureSession) {
                                                 Log.i(TAG, "[RECORDING_SESSION] Fallback video recording session configured successfully")
@@ -8171,7 +8195,7 @@ class Camera2Engine(private val context: Context) {
                                                 // Extreme hardware compatibility fallback (e.g. LEGACY or budget devices)
                                                 try {
                                                     val previewTemplateBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                                                        addTarget(previewSurf)
+                                                        if (!eisPlusPreviewViaRelay) addTarget(previewSurf)
                                                         addTarget(activeLensRecorderSurface)
                                                         applyCommonSettings(this)
                                                     }
@@ -8228,6 +8252,8 @@ class Camera2Engine(private val context: Context) {
                             recorderSurface = activeLensRecorderSurface,
                             is10Bit = is10BitSession,
                             physicalCameraId = targetPhysId,
+                            stabilizationSurface = if (eisPlusStarted) activeVideoEisPlusSurface else null,
+                            previewViaRelay = eisPlusPreviewViaRelay,
                             callback = sessionCallback
                         )
                     } catch (e: Exception) {
