@@ -49,15 +49,9 @@ class MediaGalleryRepository(context: Context) {
             }
         }.toTypedArray()
 
-        val selection: String
-        val selectionArgs: Array<String>
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            selection = "(${MediaStore.Video.Media.RELATIVE_PATH} LIKE ? OR ${MediaStore.Video.Media.OWNER_PACKAGE_NAME} = ? OR ${MediaStore.Video.Media.DISPLAY_NAME} LIKE ?)"
-            selectionArgs = arrayOf("DCIM/Camera%", appContext.packageName, "VCAM%")
-        } else {
-            selection = "(${MediaStore.Video.Media.DATA} LIKE ? OR ${MediaStore.Video.Media.DISPLAY_NAME} LIKE ?)"
-            selectionArgs = arrayOf("%/DCIM/Camera/%", "VCAM%")
-        }
+        // Query the full shared video collection instead of filtering to DCIM/Camera.
+        // Older VCamera builds and imported/copied recordings may have different paths or names.
+
 
         // MediaStore can return one item under different volume aliases
         // ("external" while querying and "external_primary" while saving).
@@ -77,8 +71,8 @@ class MediaGalleryRepository(context: Context) {
             resolver.query(
                 collection,
                 projection,
-                selection,
-                selectionArgs,
+                null,
+                null,
                 "${MediaStore.Video.Media.DATE_TAKEN} DESC, ${MediaStore.Video.Media.DATE_ADDED} DESC"
             )?.use { cursor ->
                 val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
@@ -91,7 +85,7 @@ class MediaGalleryRepository(context: Context) {
                     cursor.getColumnIndex(MediaStore.Video.Media.OWNER_PACKAGE_NAME)
                 } else -1
 
-                while (cursor.moveToNext() && videos.size < MAX_ITEMS) {
+                while (cursor.moveToNext()) {
                     val mediaId = cursor.getLong(idColumn)
                     val uri = ContentUris.withAppendedId(collection, mediaId)
                     val mediaIdentity = mediaStoreIdentity(uri)
@@ -143,6 +137,5 @@ class MediaGalleryRepository(context: Context) {
 
     companion object {
         private const val TAG = "MediaGalleryRepository"
-        private const val MAX_ITEMS = 500
     }
 }
