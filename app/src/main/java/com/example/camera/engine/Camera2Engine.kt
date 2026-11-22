@@ -6455,6 +6455,50 @@ class Camera2Engine(private val context: Context) {
     private val photoCaptureInProgress = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /**
+     * The standby preview normally keeps the ultra-wide sensor cropped to the 1x
+     * handoff FOV. Still photos must undo that crop: retain the full active array on
+     * the logical stream and, where supported, explicitly on the physical sensor too.
+     */
+    private fun applyFullFrameJpegCrop(builder: CaptureRequest.Builder, lens: LensInfo) {
+        try {
+            val logicalChars = getCharacteristics(lens.cameraId)
+            val logicalArray = logicalChars?.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            if (logicalArray != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val zoomRange = logicalChars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+                    if (zoomRange != null && zoomRange.contains(1f)) {
+                        builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, 1f)
+                    }
+                }
+                builder.set(CaptureRequest.SCALER_CROP_REGION, Rect(logicalArray))
+            }
+
+            val physicalId = lens.physicalCameraId?.takeIf {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && lens.supportsPhysicalStream
+            }
+            if (physicalId != null) {
+                val physicalChars = getCharacteristics(physicalId)
+                val physicalArray = physicalChars?.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+                if (physicalArray != null) {
+                    builder.setPhysicalCameraKey(
+                        CaptureRequest.SCALER_CROP_REGION,
+                        Rect(physicalArray),
+                        physicalId
+                    )
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        val physicalZoomRange = physicalChars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+                        if (physicalZoomRange != null && physicalZoomRange.contains(1f)) {
+                            builder.setPhysicalCameraKey(CaptureRequest.CONTROL_ZOOM_RATIO, 1f, physicalId)
+                        }
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "[SPECIAL_PHOTO] Could not force full-frame still crop for ${lens.lensType}", t)
+        }
+    }
+
+    /**
      * Captures one paired Special Photo. A logical multi-camera device receives one
      * STILL_CAPTURE request with both JPEG outputs; independent cameras receive
      * back-to-back requests on the camera handler. Sensor timestamps record real skew.
@@ -6694,6 +6738,8 @@ class Camera2Engine(private val context: Context) {
                         addTarget(mainJpegReader.surface)
                         addTarget(ultraJpegReader.surface)
                         applyCommonSettings(this, isStillCapture = true)
+                        applyFullFrameJpegCrop(this, mainLens)
+                        applyFullFramePhysicalJpegCrop(this, ultraWideLens)
                         set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
                         set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
                         set(CaptureRequest.JPEG_QUALITY, jpegQuality)
@@ -6727,6 +6773,7 @@ class Camera2Engine(private val context: Context) {
                     val mainRequest = mainCamera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                         addTarget(mainJpegReader.surface)
                         applyCommonSettings(this, isStillCapture = true)
+                        applyFullFrameJpegCrop(this, mainLens)
                         set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
                         set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
                         set(CaptureRequest.JPEG_QUALITY, jpegQuality)
@@ -6734,6 +6781,7 @@ class Camera2Engine(private val context: Context) {
                     val ultraRequest = ultraCamera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                         addTarget(ultraJpegReader.surface)
                         applySynchronizedStandbySettings(this, ultraWideLens)
+                        applyFullFrameJpegCrop(this, ultraWideLens)
                         set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
                         set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
                         set(CaptureRequest.JPEG_QUALITY, jpegQuality)
