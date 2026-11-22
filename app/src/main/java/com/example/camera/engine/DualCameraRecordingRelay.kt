@@ -504,7 +504,7 @@ class DualCameraRecordingRelay internal constructor(
     }
 
     /** Attach or replace a sensor-specific pipeline without restarting the encoder or relay. */
-    fun setEisPlusPipelineForSource(source: PreviewStreamSource, pipeline: VideoEisPlusPipeline?) {
+    internal fun setEisPlusPipelineForSource(source: PreviewStreamSource, pipeline: VideoEisPlusPipeline?) {
         if (pipeline != null && pipeline.isRunning) {
             eisPlusPipelinesBySource[source] = pipeline
             EisPlusDiagnosticLog.event("RELAY", "EIS_PLUS_PIPELINE_ATTACHED", "source=$source running=true")
