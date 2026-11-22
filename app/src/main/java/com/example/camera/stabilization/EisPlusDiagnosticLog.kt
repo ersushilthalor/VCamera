@@ -10,7 +10,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /** Persistent asynchronous event log for one Photon EIS+ recording attempt. */
 internal object EisPlusDiagnosticLog {
@@ -112,7 +114,19 @@ internal object EisPlusDiagnosticLog {
         }
     }
 
+    /** Wait for queued writes before the viewer reads the completed session. Call from an IO thread. */
+    fun flush() {
+        val latch = CountDownLatch(1)
+        writer.execute { latch.countDown() }
+        try {
+            latch.await(2, TimeUnit.SECONDS)
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
+
     fun listFiles(context: Context): List<File> {
+        flush()
         val directory = File(context.applicationContext.filesDir, LOG_DIRECTORY_NAME)
         return directory.listFiles().orEmpty()
             .filter { it.isFile && (it.extension.equals("log", true) || it.extension.equals("csv", true)) }
