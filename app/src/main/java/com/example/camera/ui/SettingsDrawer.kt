@@ -84,6 +84,7 @@ fun SettingsDrawer(
     isVideoStabilizationEnabled: Boolean = false,
     isHardwareEisActive: Boolean = false,
     videoEisPlusEnabled: Boolean = false,
+    videoEisPlusStatus: String = "Disabled",
     onVideoEisPlusToggle: (Boolean) -> Unit = {},
     videoEisPlusStrength: Float = 1.0f,
     onVideoEisPlusStrengthChange: (Float) -> Unit = {},
@@ -315,6 +316,7 @@ fun SettingsDrawer(
                             onStabilizationToggle = onStabilizationToggle,
                             isHardwareEisActive = isHardwareEisActive,
                             videoEisPlusEnabled = videoEisPlusEnabled,
+                            videoEisPlusStatus = videoEisPlusStatus,
                             onVideoEisPlusToggle = onVideoEisPlusToggle,
                             videoEisPlusStrength = videoEisPlusStrength,
                             onVideoEisPlusStrengthChange = onVideoEisPlusStrengthChange,
@@ -863,6 +865,7 @@ private fun VideoSettingsPage(
     onStabilizationToggle: (Boolean) -> Unit,
     isHardwareEisActive: Boolean = false,
     videoEisPlusEnabled: Boolean = false,
+    videoEisPlusStatus: String = "Disabled",
     onVideoEisPlusToggle: (Boolean) -> Unit = {},
     videoEisPlusStrength: Float = 1.0f,
     onVideoEisPlusStrengthChange: (Float) -> Unit = {},
@@ -919,13 +922,24 @@ private fun VideoSettingsPage(
             SettingsSwitchCard(
                 title = "Photon EIS+ (Gyro Stabilization)",
                 description = if (videoEisPlusEnabled) {
-                    "MGC rolling-shutter correction is enabled for supported standard SDR single-camera video. Uses gyro samples and timestamp-matched camera frames."
+                    "MGC rolling-shutter correction for supported SDR single-camera video. Requires a realtime sensor clock, gyro and matching YUV frames."
                 } else {
-                    "Gyro-based MGC stabilization for supported SDR single-camera video. Adds look-ahead latency; unavailable on unsupported camera timestamp pipelines."
+                    "Gyro-based MGC stabilization for supported SDR single-camera video. Adds look-ahead latency and requires a compatible camera timestamp pipeline."
                 },
                 isChecked = videoEisPlusEnabled,
                 onCheckedChange = onVideoEisPlusToggle,
                 tag = "toggle_photon_eis_plus"
+            )
+        }
+
+        item {
+            Text(
+                text = "Status: $videoEisPlusStatus",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp),
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = 11.sp
             )
         }
 
@@ -974,13 +988,13 @@ private fun VideoSettingsPage(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("Look-ahead Frames", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                    Text(videoEisPlusLookahead.coerceIn(0, 10).toString(), color = Color(0xFFFF8A32), fontSize = 12.sp)
+                    Text(videoEisPlusLookahead.coerceIn(3, 10).toString(), color = Color(0xFFFF8A32), fontSize = 12.sp)
                 }
                 Slider(
-                    value = videoEisPlusLookahead.coerceIn(0, 10).toFloat(),
+                    value = videoEisPlusLookahead.coerceIn(3, 10).toFloat(),
                     onValueChange = { onVideoEisPlusLookaheadChange(it.roundToInt()) },
-                    valueRange = 0f..10f,
-                    steps = 9,
+                    valueRange = 3f..10f,
+                    steps = 6,
                     colors = SliderDefaults.colors(
                         thumbColor = Color(0xFFFF8A32),
                         activeTrackColor = Color(0xFFFF8A32),
@@ -988,7 +1002,7 @@ private fun VideoSettingsPage(
                     )
                 )
                 Text(
-                    "0 uses no future-frame look-ahead; higher values smooth motion more but add delay.",
+                    "3–10 future frames; higher values smooth motion more but add queue latency.",
                     color = Color.White.copy(alpha = 0.55f),
                     fontSize = 11.sp
                 )
@@ -2916,6 +2930,7 @@ fun CameraSettingsScreen(
     val videoBitrate by viewModel.videoBitrateOption.collectAsStateWithLifecycle()
     val isVideoStabilizationEnabled by viewModel.isVideoStabilizationEnabled.collectAsStateWithLifecycle()
     val videoEisPlusEnabled by viewModel.videoEisPlusEnabled.collectAsStateWithLifecycle()
+    val videoEisPlusStatus by viewModel.videoEisPlusStatus.collectAsStateWithLifecycle()
     val videoEisPlusStrength by viewModel.videoEisPlusStrength.collectAsStateWithLifecycle()
     val videoEisPlusLookahead by viewModel.videoEisPlusLookahead.collectAsStateWithLifecycle()
     val actualEisHardwareActive by viewModel.actualEisHardwareActive.collectAsStateWithLifecycle()
@@ -2975,6 +2990,7 @@ fun CameraSettingsScreen(
         isVideoStabilizationEnabled = false,
         isHardwareEisActive = false,
         videoEisPlusEnabled = videoEisPlusEnabled,
+        videoEisPlusStatus = videoEisPlusStatus,
         onVideoEisPlusToggle = { viewModel.setVideoEisPlusEnabled(it) },
         videoEisPlusStrength = videoEisPlusStrength,
         onVideoEisPlusStrengthChange = { viewModel.setVideoEisPlusStrength(it) },
