@@ -5198,7 +5198,8 @@ class Camera2Engine(private val context: Context) {
                 outputPhysicalCameraId = activeSessionPhysicalCameraId
             )
 
-            // Verify OIS using the HAL's CaptureResult, not just the preference toggle.
+            // Verify the per-session OIS decision using CaptureResult. EIS+ stays alive when
+            // optical telemetry is missing; only the OIS request is changed for this recording.
             val actualOisMode = result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE)
             val requestedOisMode = request.get(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE)
             val isActualOisHwActive = (actualOisMode == CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_ON)
@@ -5212,11 +5213,26 @@ class Camera2Engine(private val context: Context) {
                 )
             }
 
+            val eisPlusPipeline = activeVideoEisPlusPipeline
+            if (eisPlusPipeline?.shouldDisableOisForMissingTelemetry == true &&
+                !videoEisPlusOisDisabledForSession
+            ) {
+                videoEisPlusOisDisabledForSession = true
+                Log.w(
+                    TAG,
+                    "Photon EIS+ OIS decision: no usable OIS/lens-intrinsics telemetry after " +
+                        "5 CaptureResults; requesting OIS OFF for this recording",
+                )
+            }
+
+            val desiredOis = isOisAllowedForCurrentSession()
+            val desiredOisMode = if (desiredOis) {
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+            } else {
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
+            }
             val nowMs = android.os.SystemClock.uptimeMillis()
-            // A legacy request builder or a session transition can leave OIS OFF even after the
-            // user enables it. Repair the live repeating request once, without reopening camera.
-            if (isOisAllowed &&
-                requestedOisMode != CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON &&
+            if (requestedOisMode != desiredOisMode &&
                 nowMs - lastOisForceOnTimeMs >= 500L
             ) {
                 lastOisForceOnTimeMs = nowMs
@@ -5224,25 +5240,31 @@ class Camera2Engine(private val context: Context) {
                     synchronized(previewRequestLock) {
                         previewRequestBuilder?.let { builder ->
                             applyCommonSettings(builder)
-                            applyHardwareOisRequest(builder, oisAllowed = true)
                             captureSession?.setRepeatingRequest(builder.build(), this, backgroundHandler)
                         }
                     }
-                    Log.w(TAG, "OIS self-heal: repeating request was not ON; re-applied native OIS ON")
+                    Log.i(TAG, "OIS request reconciled with session policy: requested=$desiredOisMode")
                 } catch (t: Throwable) {
-                    Log.w(TAG, "OIS self-heal request failed", t)
+                    Log.w(TAG, "OIS request reconciliation failed", t)
                 }
             } else if (
-                isOisAllowed &&
-                requestedOisMode == CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON &&
+                desiredOis &&
                 actualOisMode != CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_ON &&
+                nowMs - lastOisIgnoredWarningTimeMs >= 2000L
+            ) {
+                lastOisIgnoredWarningTimeMs = nowMs
+                Log.w(TAG, "OIS was requested ON but HAL reports actualMode=$actualOisMode")
+            } else if (
+                !desiredOis &&
+                eisPlusPipeline?.isRunning == true &&
+                actualOisMode != CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_OFF &&
                 nowMs - lastOisIgnoredWarningTimeMs >= 2000L
             ) {
                 lastOisIgnoredWarningTimeMs = nowMs
                 Log.w(
                     TAG,
-                    "OIS was requested ON but HAL reports actualMode=$actualOisMode; " +
-                        "check camera/lens OIS capability metadata and vendor HAL behavior"
+                    "Photon EIS+ requested OIS OFF but CaptureResult still reports actualMode=$actualOisMode; " +
+                        "keeping EIS+ active because this is not a video-stabilization conflict",
                 )
             }
 
@@ -7091,6 +7113,7 @@ class Camera2Engine(private val context: Context) {
      */
     private fun stopActiveVideoEisPlus(closeCameraSession: Boolean = false) {
         val pipeline = activeVideoEisPlusPipeline
+        val wasOisForcedOff = videoEisPlusOisDisabledForSession
         if (pipeline != null && closeCameraSession) {
             try { captureSession?.stopRepeating() } catch (_: Throwable) {}
             try { captureSession?.abortCaptures() } catch (_: Throwable) {}
@@ -7099,9 +7122,31 @@ class Camera2Engine(private val context: Context) {
         }
         activeVideoEisPlusPipeline = null
         activeVideoEisPlusSurface = null
+        videoEisPlusOisDisabledForSession = false
         videoEisPlusCaptureGeneration += 1L
         try { pipeline?.stop() } catch (t: Throwable) {
             Log.w(TAG, "Failed to stop Photon EIS+ input pipeline", t)
+        }
+        if (_videoEisPlusStatus.value == "Active") {
+            _videoEisPlusStatus.value = "Ready for supported SDR video"
+        }
+
+        // When the session remains open, immediately restore the saved OIS preference.
+        // Session-close paths build a fresh preview request through applyCommonSettings instead.
+        if (wasOisForcedOff && !closeCameraSession) {
+            try {
+                synchronized(previewRequestLock) {
+                    val builder = previewRequestBuilder
+                    val session = captureSession
+                    if (builder != null && session != null) {
+                        applyCommonSettings(builder)
+                        session.setRepeatingRequest(builder.build(), captureCallback, backgroundHandler)
+                        Log.i(TAG, "Restored normal OIS behavior after Photon EIS+ stopped")
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not restore normal OIS request after Photon EIS+ stopped", t)
+            }
         }
     }
 
