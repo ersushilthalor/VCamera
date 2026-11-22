@@ -1,7 +1,6 @@
 package com.example.camera.ui
 
-import android.media.MediaController
-import android.net.Uri
+import android.widget.MediaController
 import android.widget.VideoView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -33,7 +32,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -265,7 +263,7 @@ private fun SpecialVideoPlayer(
                             (player.duration - 250).coerceAtLeast(0)
                         )
                         if (safePosition > 0) videoView.seekTo(safePosition)
-                        if (wasPlaying || previousPosition == 0) videoView.start()
+                        if (wasPlaying) videoView.start()
                     }
                     videoView.setVideoURI(currentUri)
                     videoView.tag = newKey
