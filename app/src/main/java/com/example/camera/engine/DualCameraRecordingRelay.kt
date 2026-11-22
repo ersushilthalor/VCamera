@@ -55,7 +55,8 @@ class DualCameraRecordingRelay(
     private val previewWidth: Int = 0,
     private val previewHeight: Int = 0,
     initialAdjustments: com.example.camera.model.VideoAdjustments? = null,
-    private val initialSpecialVideoPiPEnabled: Boolean = false
+    private val initialSpecialVideoPiPEnabled: Boolean = false,
+    private val secondaryEncoderTargetSurface: Surface? = null
 ) {
     companion object {
         private const val TAG = "DualCamRecRelay"
@@ -132,6 +133,10 @@ class DualCameraRecordingRelay(
     private var eglContext: EGLContext? = EGL14.EGL_NO_CONTEXT
     private var eglSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
     private var eglPreviewSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
+    private var eglSecondaryRecordSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
+    private val secondaryRecordingEnabled = AtomicBoolean(false)
+    @Volatile private var lastUltraWideOutputPtsNs: Long = -1L
+    val ultraWideRecordedFrameCount = AtomicLong(0L)
     private var programId: Int = 0
     private var passthroughProgramId: Int = 0
     private var vadjHandles: VideoAdjustmentsPipeline.VideoAdjustmentsShaderHandles? = null
@@ -144,6 +149,11 @@ class DualCameraRecordingRelay(
         get() = (eglPreviewSurface != null && eglPreviewSurface != EGL14.EGL_NO_SURFACE)
 
     fun hasPreviewSurface(): Boolean = isRelayPreviewActive
+
+    fun hasSecondaryRecordingSurface(): Boolean {
+        val surface = eglSecondaryRecordSurface
+        return secondaryEncoderTargetSurface?.isValid == true && surface != null && surface != EGL14.EGL_NO_SURFACE
+    }
 
     private var uMVPMatrixHandle: Int = -1
     private var uSTMatrixHandle: Int = -1
@@ -220,11 +230,15 @@ class DualCameraRecordingRelay(
         streamClockOffsetNs = 0L
         pendingClockSyncOnSwitch = false
         totalPausedDurationNs = 0L
+        lastUltraWideOutputPtsNs = -1L
+        ultraWideRecordedFrameCount.set(0L)
+        secondaryRecordingEnabled.set(secondaryEncoderTargetSurface?.isValid == true)
         isStreamingActive.set(true)
         Log.i(TAG, "[RECORDING_RELAY] Streaming to encoder active")
     }
 
     fun stopRecording() {
+        secondaryRecordingEnabled.set(false)
         isStreamingActive.set(false)
         recordingStartMonotonicNs = 0L
         Log.i(TAG, "[RECORDING_RELAY] Streaming to encoder stopped (relayedFrames=${relayedFrameCount.get()})")
@@ -455,6 +469,14 @@ class DualCameraRecordingRelay(
         }
         eglSurface = surface
 
+        if (secondaryEncoderTargetSurface != null && secondaryEncoderTargetSurface.isValid) {
+            val secondarySurface = EGL14.eglCreateWindowSurface(display, chosenConfig, secondaryEncoderTargetSurface, surfaceAttribs, 0)
+            if (secondarySurface == null || secondarySurface == EGL14.EGL_NO_SURFACE) {
+                throw IllegalStateException("eglCreateWindowSurface failed for Special Video ultra-wide encoder")
+            }
+            eglSecondaryRecordSurface = secondarySurface
+        }
+
         if (previewTargetSurface != null && previewTargetSurface.isValid) {
             try {
                 val prevSurf = EGL14.eglCreateWindowSurface(display, chosenConfig, previewTargetSurface, surfaceAttribs, 0)
@@ -612,6 +634,18 @@ class DualCameraRecordingRelay(
 
         if (isPaused.get() || !isStreamingActive.get()) return
 
+        val rawTimestampNs = st.timestamp.takeIf { it > 0L } ?: System.nanoTime()
+        if (recordingStartMonotonicNs <= 0L) {
+            recordingStartMonotonicNs = rawTimestampNs
+        }
+
+        // Special Video records the ultra-wide camera as a separate, continuously updated
+        // video track. It is rendered from the cached OES frame before the active-lens filter,
+        // so it keeps recording even while the main encoder is using the 1x camera stream.
+        if (isUltraWide && secondaryRecordingEnabled.get()) {
+            renderUltraWideSecondaryFrame(rawTimestampNs)
+        }
+
         val expectedSource = if (isUltraWide) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
         if (activeSource != expectedSource) {
             return
@@ -620,10 +654,6 @@ class DualCameraRecordingRelay(
         if (!encoderTargetSurface.isValid) return
 
         try {
-            val rawTimestampNs = st.timestamp.takeIf { it > 0L } ?: System.nanoTime()
-            if (recordingStartMonotonicNs <= 0L) {
-                recordingStartMonotonicNs = rawTimestampNs
-            }
 
             // Monotonic hardware-aligned presentation timestamp pacing
             val frameIntervalNs = 1_000_000_000L / fps.coerceAtLeast(1)
@@ -884,6 +914,118 @@ class DualCameraRecordingRelay(
         }
     }
 
+    /**
+     * Writes each ultra-wide OES frame to the independent Special Video encoder surface.
+     * This is deliberately separate from the main encoder's active-source switching path.
+     */
+    private fun renderUltraWideSecondaryFrame(rawTimestampNs: Long) {
+        val display = eglDisplay ?: return
+        val surface = eglSecondaryRecordSurface ?: return
+        val context = eglContext ?: return
+        val primarySurface = eglSurface ?: EGL14.EGL_NO_SURFACE
+        if (display == EGL14.EGL_NO_DISPLAY || surface == EGL14.EGL_NO_SURFACE ||
+            context == EGL14.EGL_NO_CONTEXT || primarySurface == EGL14.EGL_NO_SURFACE) return
+
+        val baseTimestamp = recordingStartMonotonicNs.takeIf { it > 0L } ?: rawTimestampNs
+        val frameIntervalNs = 1_000_000_000L / fps.coerceAtLeast(1)
+        var presentationTimeNs = rawTimestampNs - baseTimestamp - totalPausedDurationNs
+        if (presentationTimeNs < 0L) presentationTimeNs = 0L
+        if (lastUltraWideOutputPtsNs >= 0L && presentationTimeNs <= lastUltraWideOutputPtsNs) {
+            presentationTimeNs = lastUltraWideOutputPtsNs + max(1_000_000L, frameIntervalNs / 4L)
+        }
+
+        try {
+            if (!EGL14.eglMakeCurrent(display, surface, surface, context)) {
+                Log.w(TAG, "Unable to make Special Video ultra-wide encoder surface current")
+                return
+            }
+
+            val outW = bufferWidth.coerceAtLeast(2)
+            val outH = bufferHeight.coerceAtLeast(2)
+            GLES20.glViewport(0, 0, outW, outH)
+
+            val isDefaultAdjustments = currentVideoAdjustments.isDefault
+            val activeProgram = if (isDefaultAdjustments && passthroughProgramId != 0) passthroughProgramId else programId
+            GLES20.glUseProgram(activeProgram)
+
+            computeCameraTexMatrix(
+                stMatrix = ultraWideStMatrix,
+                isFront = false,
+                sensorOrientation = cameraSensorOrientation,
+                deviceRotation = activeDeviceRotation,
+                viewportWidth = outW,
+                viewportHeight = outH,
+                camBufferWidth = ultraWideBufferW,
+                camBufferHeight = ultraWideBufferH,
+                outMatrix = renderTexMatrix
+            )
+
+            val uMvp = if (activeProgram == passthroughProgramId) ptUMVPMatrixHandle else uMVPMatrixHandle
+            val uSt = if (activeProgram == passthroughProgramId) ptUSTMatrixHandle else uSTMatrixHandle
+            val aPos = if (activeProgram == passthroughProgramId) ptAPositionHandle else aPositionHandle
+            val aTex = if (activeProgram == passthroughProgramId) ptATextureCoordHandle else aTextureCoordHandle
+            val sTex = if (activeProgram == passthroughProgramId) ptSTextureHandle else sTextureHandle
+
+            GLES20.glUniformMatrix4fv(uMvp, 1, false, mvpMatrix, 0)
+            GLES20.glUniformMatrix4fv(uSt, 1, false, renderTexMatrix, 0)
+            GLES20.glUniform1i(sTex, 0)
+
+            val frameTimeSec = presentationTimeNs.toFloat() / 1_000_000_000f
+            val handles = vadjHandles
+            if (activeProgram == programId && handles != null) {
+                VideoAdjustmentsPipeline.bindUniforms(
+                    handles = handles,
+                    adjustments = currentVideoAdjustments,
+                    width = outW,
+                    height = outH,
+                    timeSec = frameTimeSec
+                )
+            }
+
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, ultraWideOesTexId)
+
+            val vb = vertexBuffer
+            val tb = texCoordBuffer
+            if (vboVertexBufferId != 0 && vboTexCoordBufferId != 0 && aPos >= 0 && aTex >= 0) {
+                GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboVertexBufferId)
+                GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, 0)
+                GLES20.glEnableVertexAttribArray(aPos)
+                GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboTexCoordBufferId)
+                GLES20.glVertexAttribPointer(aTex, 2, GLES20.GL_FLOAT, false, 0, 0)
+                GLES20.glEnableVertexAttribArray(aTex)
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                GLES20.glDisableVertexAttribArray(aPos)
+                GLES20.glDisableVertexAttribArray(aTex)
+                GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+            } else if (vb != null && tb != null && aPos >= 0 && aTex >= 0) {
+                vb.position(0)
+                GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 0, vb)
+                GLES20.glEnableVertexAttribArray(aPos)
+                tb.position(0)
+                GLES20.glVertexAttribPointer(aTex, 2, GLES20.GL_FLOAT, false, 0, tb)
+                GLES20.glEnableVertexAttribArray(aTex)
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                GLES20.glDisableVertexAttribArray(aPos)
+                GLES20.glDisableVertexAttribArray(aTex)
+            }
+
+            EGLExt.eglPresentationTimeANDROID(display, surface, presentationTimeNs)
+            if (EGL14.eglSwapBuffers(display, surface)) {
+                lastUltraWideOutputPtsNs = presentationTimeNs
+                ultraWideRecordedFrameCount.incrementAndGet()
+            } else {
+                Log.w(TAG, "Special Video ultra-wide encoder eglSwapBuffers failed")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Special Video ultra-wide frame render failed: ${t.message}")
+        } finally {
+            try {
+                EGL14.eglMakeCurrent(display, primarySurface, primarySurface, context)
+            } catch (_: Throwable) {}
+        }
+    }
+
     internal fun computeCameraTexMatrix(
         stMatrix: FloatArray,
         isFront: Boolean,
@@ -1048,6 +1190,11 @@ class DualCameraRecordingRelay(
                         if (surface != null && surface != EGL14.EGL_NO_SURFACE) {
                             try { EGL14.eglDestroySurface(display, surface) } catch (_: Throwable) {}
                             eglSurface = EGL14.EGL_NO_SURFACE
+                        }
+                        val secondarySurface = eglSecondaryRecordSurface
+                        if (secondarySurface != null && secondarySurface != EGL14.EGL_NO_SURFACE) {
+                            try { EGL14.eglDestroySurface(display, secondarySurface) } catch (_: Throwable) {}
+                            eglSecondaryRecordSurface = EGL14.EGL_NO_SURFACE
                         }
                         val prevSurface = eglPreviewSurface
                         if (prevSurface != null && prevSurface != EGL14.EGL_NO_SURFACE) {
