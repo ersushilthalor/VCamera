@@ -661,6 +661,12 @@ class DualCameraRecordingRelay(
         } else {
             null
         }
+
+        // Ultra-wide callbacks only refresh the cached texture. The MAIN stream is the
+        // master clock and drives both encoder surfaces, so both MP4s receive the same
+        // frame sequence and exactly the same presentation timestamps.
+        if (isSpecialDualRecording && isUltraWide) return
+
         val recordingStartNs = if (isSpecialDualRecording) {
             specialVideoRecordingTimeline.getRecordingStartTimestampNs()
         } else {
@@ -679,8 +685,6 @@ class DualCameraRecordingRelay(
         if (recordingStartMonotonicNs != recordingStartNs) {
             recordingStartMonotonicNs = recordingStartNs
         }
-        // Non-dual recording uses one shared raw timestamp origin. Special Video instead
-        // gives each lens its own zero-PTS first output frame after both streams are ready.
         if (!isSpecialDualRecording && rawTimestampNs < recordingStartNs) return
 
         if (isSpecialDualRecording && hasLoggedSpecialVideoFrameWait.getAndSet(false)) {
@@ -692,13 +696,6 @@ class DualCameraRecordingRelay(
             } catch (t: Throwable) {
                 Log.w(TAG, "[SPECIAL_VIDEO] Shared timeline callback failed: ${t.message}", t)
             }
-        }
-
-        // Special Video records the ultra-wide camera as a separate, continuously updated
-        // video track. It is rendered from the cached OES frame before the active-lens filter,
-        // so it keeps recording even while the main encoder is using the 1x camera stream.
-        if (isUltraWide && isSpecialDualRecording) {
-            renderUltraWideSecondaryFrame(specialFramePtsNs ?: 0L)
         }
 
         val expectedSource = if (isUltraWide) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
@@ -903,6 +900,12 @@ class DualCameraRecordingRelay(
                 if (swapped) {
                     relayedFrameCount.incrementAndGet()
                     CameraPerformanceMonitor.onRecordingFrame()
+
+                    // Mirror the SAME cached ultra-wide frame on every accepted MAIN frame.
+                    // Passing the already-normalized primary PTS avoids a second, drifting clock.
+                    if (isSpecialDualRecording && hasUltraWideFrame && ultraWideOesTexId != 0) {
+                        renderUltraWideSecondaryFrame(candidatePtsNs)
+                    }
                 } else {
                     Log.w(TAG, "eglSwapBuffers returned false")
                 }
@@ -985,11 +988,12 @@ class DualCameraRecordingRelay(
         if (display == EGL14.EGL_NO_DISPLAY || surface == EGL14.EGL_NO_SURFACE ||
             context == EGL14.EGL_NO_CONTEXT || primarySurface == EGL14.EGL_NO_SURFACE) return
 
-        val frameIntervalNs = 1_000_000_000L / fps.coerceAtLeast(1)
-        var presentationTimeNs = framePresentationTimeNs - totalPausedDurationNs
-        if (presentationTimeNs < 0L) presentationTimeNs = 0L
+        // This is already the primary encoder's normalized PTS. Never independently
+        // clamp or offset the companion stream: both encoders must receive the exact same value.
+        val presentationTimeNs = framePresentationTimeNs.coerceAtLeast(0L)
         if (lastUltraWideOutputPtsNs >= 0L && presentationTimeNs <= lastUltraWideOutputPtsNs) {
-            presentationTimeNs = lastUltraWideOutputPtsNs + max(1_000_000L, frameIntervalNs / 4L)
+            Log.w(TAG, "[SPECIAL_VIDEO] Skipping non-monotonic companion PTS=$presentationTimeNs last=$lastUltraWideOutputPtsNs")
+            return
         }
 
         try {
