@@ -83,6 +83,12 @@ fun SettingsDrawer(
     // Legacy EIS values are retained only for source compatibility; the UI never exposes EIS.
     isVideoStabilizationEnabled: Boolean = false,
     isHardwareEisActive: Boolean = false,
+    videoEisPlusEnabled: Boolean = false,
+    onVideoEisPlusToggle: (Boolean) -> Unit = {},
+    videoEisPlusStrength: Float = 1.0f,
+    onVideoEisPlusStrengthChange: (Float) -> Unit = {},
+    videoEisPlusLookahead: Int = 7,
+    onVideoEisPlusLookaheadChange: (Int) -> Unit = {},
     isOisEnabled: Boolean = true,
     isOisHardwareActive: Boolean = false,
     isHorizontalLockSettingEnabled: Boolean = true,
@@ -308,6 +314,12 @@ fun SettingsDrawer(
                             isVideoStabilizationEnabled = isVideoStabilizationEnabled,
                             onStabilizationToggle = onStabilizationToggle,
                             isHardwareEisActive = isHardwareEisActive,
+                            videoEisPlusEnabled = videoEisPlusEnabled,
+                            onVideoEisPlusToggle = onVideoEisPlusToggle,
+                            videoEisPlusStrength = videoEisPlusStrength,
+                            onVideoEisPlusStrengthChange = onVideoEisPlusStrengthChange,
+                            videoEisPlusLookahead = videoEisPlusLookahead,
+                            onVideoEisPlusLookaheadChange = onVideoEisPlusLookaheadChange,
                             isOisPreferred = isOisEnabled,
                             onOisToggle = onOisToggle,
                             isHorizontalLockSettingEnabled = isHorizontalLockSettingEnabled,
@@ -850,6 +862,12 @@ private fun VideoSettingsPage(
     isVideoStabilizationEnabled: Boolean,
     onStabilizationToggle: (Boolean) -> Unit,
     isHardwareEisActive: Boolean = false,
+    videoEisPlusEnabled: Boolean = false,
+    onVideoEisPlusToggle: (Boolean) -> Unit = {},
+    videoEisPlusStrength: Float = 1.0f,
+    onVideoEisPlusStrengthChange: (Float) -> Unit = {},
+    videoEisPlusLookahead: Int = 7,
+    onVideoEisPlusLookaheadChange: (Int) -> Unit = {},
     isOisPreferred: Boolean = true,
     onOisToggle: (Boolean) -> Unit = {},
     isHorizontalLockSettingEnabled: Boolean = true,
@@ -894,6 +912,63 @@ private fun VideoSettingsPage(
                 options = listOf(24 to "24 fps", 30 to "30 fps", 60 to "60 fps"),
                 selectedOption = videoFps,
                 onOptionSelected = onVideoFpsSelected
+            )
+        }
+
+        item {
+            SettingsSwitchCard(
+                title = "Photon EIS+ (Gyro Stabilization)",
+                description = if (videoEisPlusEnabled) {
+                    "MGC rolling-shutter correction is enabled for supported standard SDR single-camera video. Uses gyro samples and timestamp-matched camera frames."
+                } else {
+                    "Gyro-based MGC stabilization for supported SDR single-camera video. Adds look-ahead latency; unavailable on unsupported camera timestamp pipelines."
+                },
+                isChecked = videoEisPlusEnabled,
+                onCheckedChange = onVideoEisPlusToggle,
+                tag = "toggle_photon_eis_plus"
+            )
+        }
+
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("EIS+ Strength", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    Text("${(videoEisPlusStrength * 100f).roundToInt()}%", color = Color(0xFFFF8A32), fontSize = 12.sp)
+                }
+                Slider(
+                    value = videoEisPlusStrength.coerceIn(0f, 1f),
+                    onValueChange = onVideoEisPlusStrengthChange,
+                    valueRange = 0f..1f,
+                    steps = 19,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFFFF8A32),
+                        activeTrackColor = Color(0xFFFF8A32),
+                        inactiveTrackColor = Color.White.copy(alpha = 0.15f)
+                    )
+                )
+                Text(
+                    "Higher strength crops more aggressively to compensate for motion.",
+                    color = Color.White.copy(alpha = 0.55f),
+                    fontSize = 11.sp
+                )
+            }
+        }
+
+        item {
+            SettingsSegmentedCard(
+                title = "Look-ahead Frames",
+                description = "MGC buffers future gyro/frame timing to smooth motion. More frames improve prediction but increase delay.",
+                options = listOf(0, 3, 5, 7, 10).map { it to "$it" },
+                selectedOption = videoEisPlusLookahead.coerceIn(0, 10),
+                onOptionSelected = onVideoEisPlusLookaheadChange
             )
         }
 
@@ -2817,6 +2892,9 @@ fun CameraSettingsScreen(
     val videoFps by viewModel.videoFps.collectAsStateWithLifecycle()
     val videoBitrate by viewModel.videoBitrateOption.collectAsStateWithLifecycle()
     val isVideoStabilizationEnabled by viewModel.isVideoStabilizationEnabled.collectAsStateWithLifecycle()
+    val videoEisPlusEnabled by viewModel.videoEisPlusEnabled.collectAsStateWithLifecycle()
+    val videoEisPlusStrength by viewModel.videoEisPlusStrength.collectAsStateWithLifecycle()
+    val videoEisPlusLookahead by viewModel.videoEisPlusLookahead.collectAsStateWithLifecycle()
     val actualEisHardwareActive by viewModel.actualEisHardwareActive.collectAsStateWithLifecycle()
     val isOisEnabled by viewModel.isOisEnabled.collectAsStateWithLifecycle()
     val actualOisHardwareActive by viewModel.actualOisHardwareActive.collectAsStateWithLifecycle()
@@ -2873,6 +2951,12 @@ fun CameraSettingsScreen(
         videoBitrate = videoBitrate,
         isVideoStabilizationEnabled = false,
         isHardwareEisActive = false,
+        videoEisPlusEnabled = videoEisPlusEnabled,
+        onVideoEisPlusToggle = { viewModel.setVideoEisPlusEnabled(it) },
+        videoEisPlusStrength = videoEisPlusStrength,
+        onVideoEisPlusStrengthChange = { viewModel.setVideoEisPlusStrength(it) },
+        videoEisPlusLookahead = videoEisPlusLookahead,
+        onVideoEisPlusLookaheadChange = { viewModel.setVideoEisPlusLookahead(it) },
         isOisEnabled = isOisEnabled,
         isOisHardwareActive = actualOisHardwareActive,
         isAudioEnabled = isAudioEnabled,

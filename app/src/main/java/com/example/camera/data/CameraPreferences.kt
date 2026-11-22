@@ -25,6 +25,9 @@ class CameraPreferences(context: Context) {
         private const val KEY_VIDEO_FPS = "pref_video_fps"
         private const val KEY_VIDEO_BITRATE = "pref_video_bitrate"
         private const val KEY_VIDEO_STABILIZATION = "pref_video_stabilization"
+        private const val KEY_VIDEO_EIS_PLUS_ENABLED = "pref_video_eis_plus_enabled"
+        private const val KEY_VIDEO_EIS_PLUS_STRENGTH = "pref_video_eis_plus_strength"
+        private const val KEY_VIDEO_EIS_PLUS_LOOKAHEAD = "pref_video_eis_plus_lookahead"
         private const val KEY_AUDIO_ENABLED = "pref_audio_enabled"
         private const val KEY_COLOR_PROFILE = "pref_color_profile"
         private const val KEY_WHITE_BALANCE = "pref_white_balance"
@@ -330,6 +333,19 @@ class CameraPreferences(context: Context) {
                 .putString("key_video_stabilization_mode", com.example.camera.model.VideoStabilizationMode.OFF.name)
                 .apply()
         }
+
+    // Separate software MGC EIS+ settings; legacy Camera2 EIS remains hard-OFF.
+    var videoEisPlusEnabled: Boolean
+        get() = prefs.getBoolean(KEY_VIDEO_EIS_PLUS_ENABLED, false)
+        set(value) = prefs.edit().putBoolean(KEY_VIDEO_EIS_PLUS_ENABLED, value).apply()
+
+    var videoEisPlusStrength: Float
+        get() = prefs.getFloat(KEY_VIDEO_EIS_PLUS_STRENGTH, 1.0f).coerceIn(0f, 1f)
+        set(value) = prefs.edit().putFloat(KEY_VIDEO_EIS_PLUS_STRENGTH, value.coerceIn(0f, 1f)).apply()
+
+    var videoEisPlusLookahead: Int
+        get() = prefs.getInt(KEY_VIDEO_EIS_PLUS_LOOKAHEAD, 7).coerceIn(0, 10)
+        set(value) = prefs.edit().putInt(KEY_VIDEO_EIS_PLUS_LOOKAHEAD, value.coerceIn(0, 10)).apply()
 
     var isAudioEnabled: Boolean
         get() = prefs.getBoolean(KEY_AUDIO_ENABLED, true)
