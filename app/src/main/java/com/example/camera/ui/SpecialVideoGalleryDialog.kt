@@ -1,6 +1,7 @@
 package com.example.camera.ui
 
 import android.media.MediaPlayer
+import android.os.Build
 import android.widget.MediaController
 import android.widget.VideoView
 import androidx.activity.compose.BackHandler
@@ -49,8 +50,9 @@ import com.example.camera.gallery.SpecialVideoClip
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 
-internal const val SPECIAL_VIDEO_GALLERY_LENS_SWITCH_DURATION_MS = 3_000
+internal const val SPECIAL_VIDEO_GALLERY_LENS_SWITCH_DURATION_MS = 300
 
 private class GalleryVideoPlayerState(
     val uri: String,
@@ -58,6 +60,15 @@ private class GalleryVideoPlayerState(
     var wasActive: Boolean = false,
     var mediaPlayer: MediaPlayer? = null
 )
+
+/** Uses the closest video frame on API 26+, with the legacy seek API as a fallback. */
+private fun MediaPlayer.seekToClosest(positionMs: Int) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        seekTo(positionMs.toLong(), MediaPlayer.SEEK_CLOSEST)
+    } else {
+        seekTo(positionMs)
+    }
+}
 
 @Composable
 fun SpecialVideoGalleryDialog(
@@ -203,8 +214,10 @@ private fun SpecialVideoPlayer(
     var shouldResumePlayback by rememberSaveable(clip.id) { mutableStateOf(true) }
     val videoViewState = remember(clip.id) { mutableStateOf<VideoView?>(null) }
     
-    // Snapshot and pause the current player before changing its source. VideoView otherwise
-    // keeps a PLAYING target state and may briefly autoplay the replacement from time zero.
+    // Keep the outgoing player running while the replacement prepares and seeks.
+    // Its live position is sampled again in OnSeekComplete to compensate for preparation delay.
+    val outgoingVideoViewState = remember(clip.id) { mutableStateOf<VideoView?>(null) }
+
     val selectLens: (Boolean) -> Unit = { useUltraWide ->
         if (isUltraWide != useUltraWide) {
             videoViewState.value?.let { videoView ->
@@ -212,7 +225,9 @@ private fun SpecialVideoPlayer(
                 if (viewState?.isPrepared == true) {
                     playbackPosition = videoView.currentPosition.coerceAtLeast(0)
                     shouldResumePlayback = videoView.isPlaying
-                    videoView.pause()
+                    outgoingVideoViewState.value = videoView
+                } else {
+                    outgoingVideoViewState.value = null
                 }
                 viewState?.wasActive = false
             }
@@ -257,34 +272,86 @@ private fun SpecialVideoPlayer(
         ) { targetIsUltraWide ->
             val targetUri = if (targetIsUltraWide) clip.ultraWideUri else clip.mainUri
 
-            // Each lens keeps its own prepared player during the crossfade. The outgoing
-            // player is paused at the saved timestamp; the incoming player seeks first and
-            // only then resumes, so switching never restarts the clip from zero.
+            // Keep the outgoing decoder alive until the incoming decoder has completed
+            // its seek and started. The outgoing player's live timestamp is the sync reference.
             val restorePlayback: (VideoView, GalleryVideoPlayerState) -> Unit = { videoView, viewState ->
                 val lastSafePosition = (videoView.duration - 250).coerceAtLeast(0)
-                val targetPosition = playbackPosition.coerceAtMost(lastSafePosition)
-                val resumeAfterSeek = shouldResumePlayback
                 val mediaPlayer = viewState.mediaPlayer
-                if (targetPosition > 0 && mediaPlayer != null) {
-                    mediaPlayer.setOnSeekCompleteListener { seekedPlayer ->
-                        seekedPlayer.setOnSeekCompleteListener(null)
-                        if (targetIsUltraWide == isUltraWide && viewState.wasActive) {
-                            playbackPosition = seekedPlayer.currentPosition.coerceAtLeast(0)
-                            videoViewState.value = videoView
-                            if (resumeAfterSeek) videoView.start() else videoView.pause()
+                val outgoingVideoView = outgoingVideoViewState.value?.takeIf { it !== videoView }
+                val outgoingState = outgoingVideoView?.tag as? GalleryVideoPlayerState
+                val livePositionAtPrepare = if (outgoingState?.isPrepared == true) {
+                    outgoingVideoView.currentPosition.coerceAtLeast(0)
+                } else {
+                    null
+                }
+                val targetPosition = (livePositionAtPrepare ?: playbackPosition)
+                    .coerceAtMost(lastSafePosition)
+                val resumeAfterSeek = shouldResumePlayback
+
+                fun finishHandoff(seekedPlayer: MediaPlayer?) {
+                    if (targetIsUltraWide == isUltraWide && viewState.wasActive) {
+                        playbackPosition = (seekedPlayer?.currentPosition ?: targetPosition)
+                            .coerceAtLeast(0)
+                        videoViewState.value = videoView
+
+                        // Start the incoming player before pausing and releasing the outgoing one.
+                        if (resumeAfterSeek) {
+                            videoView.start()
                         } else {
                             videoView.pause()
                         }
-                    }
-                    mediaPlayer.seekTo(targetPosition)
-                } else {
-                    playbackPosition = 0
-                    if (targetIsUltraWide == isUltraWide && viewState.wasActive) {
-                        videoViewState.value = videoView
-                        if (resumeAfterSeek) videoView.start() else videoView.pause()
+
+                        if (outgoingVideoView != null) {
+                            outgoingVideoView.pause()
+                            outgoingState?.wasActive = false
+                            outgoingState?.mediaPlayer?.setOnSeekCompleteListener(null)
+                            outgoingVideoView.stopPlayback()
+                            outgoingState?.mediaPlayer = null
+                            outgoingState?.isPrepared = false
+                        }
+                        if (outgoingVideoViewState.value === outgoingVideoView) {
+                            outgoingVideoViewState.value = null
+                        }
                     } else {
                         videoView.pause()
                     }
+                }
+
+                if (mediaPlayer == null) {
+                    finishHandoff(null)
+                } else {
+                    var correctionIssued = false
+                    mediaPlayer.setOnSeekCompleteListener { seekedPlayer ->
+                        val latestOutgoingPosition = if (
+                            outgoingVideoView != null &&
+                            outgoingState?.isPrepared == true
+                        ) {
+                            outgoingVideoView.currentPosition.coerceAtLeast(0)
+                                .coerceAtMost(lastSafePosition)
+                        } else {
+                            null
+                        }
+                        val incomingPosition = seekedPlayer.currentPosition.coerceAtLeast(0)
+
+                        // Preparing and seeking can take 100–300 ms. Correct once if the
+                        // outgoing clip advanced by more than 40 ms during that interval.
+                        if (
+                            !correctionIssued &&
+                            latestOutgoingPosition != null &&
+                            abs(latestOutgoingPosition - incomingPosition) > 40
+                        ) {
+                            correctionIssued = true
+                            seekedPlayer.setOnSeekCompleteListener { correctedPlayer ->
+                                correctedPlayer.setOnSeekCompleteListener(null)
+                                finishHandoff(correctedPlayer)
+                            }
+                            seekedPlayer.seekToClosest(latestOutgoingPosition)
+                        } else {
+                            seekedPlayer.setOnSeekCompleteListener(null)
+                            finishHandoff(seekedPlayer)
+                        }
+                    }
+                    mediaPlayer.seekToClosest(targetPosition)
                 }
             }
 
@@ -310,7 +377,6 @@ private fun SpecialVideoPlayer(
                             viewState.isPrepared = true
                             if (targetIsUltraWide == isUltraWide) {
                                 viewState.wasActive = true
-                                videoViewState.value = this
                                 restorePlayback(this, viewState)
                             } else {
                                 viewState.wasActive = false
@@ -326,11 +392,8 @@ private fun SpecialVideoPlayer(
                         val shouldBeActive = targetIsUltraWide == isUltraWide
                         if (shouldBeActive && !viewState.wasActive) {
                             viewState.wasActive = true
-                            videoViewState.value = videoView
                             if (viewState.isPrepared) restorePlayback(videoView, viewState)
-                        } else if (shouldBeActive) {
-                            videoViewState.value = videoView
-                        } else {
+                        } else if (!shouldBeActive) {
                             viewState.wasActive = false
                         }
                     }
@@ -338,9 +401,34 @@ private fun SpecialVideoPlayer(
                 onRelease = { videoView ->
                     if (videoViewState.value === videoView) videoViewState.value = null
                     videoView.setOnPreparedListener(null)
-                    (videoView.tag as? GalleryVideoPlayerState)?.mediaPlayer?.setOnSeekCompleteListener(null)
                     videoView.setMediaController(null)
-                    videoView.stopPlayback()
+
+                    val isPendingOutgoing = outgoingVideoViewState.value === videoView
+                    if (!isPendingOutgoing) {
+                        (videoView.tag as? GalleryVideoPlayerState)?.let { viewState ->
+                            viewState.mediaPlayer?.setOnSeekCompleteListener(null)
+                            viewState.mediaPlayer = null
+                            viewState.isPrepared = false
+                            viewState.wasActive = false
+                        }
+                        videoView.stopPlayback()
+
+                        // If the incoming view is released before handoff completion,
+                        // release the retained outgoing decoder as part of dialog cleanup.
+                        outgoingVideoViewState.value?.let { outgoingVideoView ->
+                            if (outgoingVideoView !== videoView) {
+                                outgoingVideoView.pause()
+                                (outgoingVideoView.tag as? GalleryVideoPlayerState)?.let { outgoingState ->
+                                    outgoingState.mediaPlayer?.setOnSeekCompleteListener(null)
+                                    outgoingState.mediaPlayer = null
+                                    outgoingState.isPrepared = false
+                                    outgoingState.wasActive = false
+                                }
+                                outgoingVideoView.stopPlayback()
+                            }
+                            outgoingVideoViewState.value = null
+                        }
+                    }
                 }
             )
         }
