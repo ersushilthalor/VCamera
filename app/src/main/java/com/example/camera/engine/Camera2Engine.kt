@@ -1646,7 +1646,7 @@ class Camera2Engine(private val context: Context) {
         // capture using the highest suitable supported 4:3 sensor stream (e.g. 3264x2448) which will be cropped to 9:16 for
         // live preview and final video while keeping encoder output at 4K (2160x3840).
         if (reqW >= 3840 && isUltraWide) {
-            val allStreamSizes = ((map?.getOutputSizes(SurfaceTexture::class.java) ?: emptyArray()).toList() +
+            val allStreamSizes = (getCachedOutputSizes(cameraId, SurfaceTexture::class.java).toList() +
                     supportedSizes.toList()).distinctBy { "${it.width}x${it.height}" }
             val fourThreeSizes = allStreamSizes.filter {
                 val r = maxOf(it.width, it.height).toFloat() / minOf(it.width, it.height).toFloat()
