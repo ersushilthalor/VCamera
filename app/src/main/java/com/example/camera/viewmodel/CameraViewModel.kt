@@ -1686,6 +1686,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun refreshMediaGallery() {
         viewModelScope.launch(Dispatchers.IO) {
+            specialVideoGalleryRepository.migrateLegacyUltraWideClipsToPrivateStorage()
             val clips = specialVideoGalleryRepository.getClips()
             _specialVideoClips.value = clips
             _mediaGalleryItems.value = mediaGalleryRepository.getMedia(clips)
