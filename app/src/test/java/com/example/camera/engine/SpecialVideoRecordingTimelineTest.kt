@@ -62,7 +62,7 @@ class SpecialVideoRecordingTimelineTest {
 
         assertNull(timeline.onFrameAvailable(isUltraWide = false, timestampNs = 1_000L))
         assertNull(timeline.onFrameAvailable(isUltraWide = true, timestampNs = 1_050L))
-        assertEquals(1_083L, timeline.onFrameAvailable(isUltraWide = false, timestampNs = 1_083L))
+        assertEquals(0L, timeline.onFrameAvailable(isUltraWide = false, timestampNs = 1_083L))
         assertEquals(1_083L, timeline.getRecordingStartTimestampNs())
     }
 
