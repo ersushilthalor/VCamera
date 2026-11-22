@@ -38,7 +38,7 @@ import com.example.camera.ui.components.FloatingWindowCard
  * Compact, rounded, dark translucent floating options panel that expands downward
  * over the viewfinder when tapping the 6-dot menu icon in the top control bar.
  * Matches the reference design with circular icons, clear status labels, spacing, and layout:
- * - Photo mode: Timer, Hi-Res (50MP), RAW, Motion Photo, Grid, Flash, Filters, Settings
+ * - Photo mode: Timer, Grid, Flash, Special Photo, Settings
  * - Video mode: Dolly Zoom, Horizontal Lock, Stabilization, Resolution/FPS, Torch, Audio, Video Adjustments, Settings
  * - Cinema mode: LOG, LUT, Aspect Ratio, Resolution, EV, Tuning, Audio, Settings
  */
@@ -52,6 +52,7 @@ fun QuickOptionsFloatingPanel(
     gridType: GridType,
     isRawEnabled: Boolean,
     isPipelineActive: Boolean,
+    isSpecialPhotoEnabled: Boolean = false,
     // Video properties
     videoResolution: CameraResolution?,
     videoFps: Int,
@@ -69,7 +70,8 @@ fun QuickOptionsFloatingPanel(
     onGridClick: () -> Unit,
     onToggleMegapixelMode: () -> Unit = {},
     onRawClick: () -> Unit,
-        onVideoSettingsClick: () -> Unit,
+    onSpecialPhotoToggle: () -> Unit = {},
+    onVideoSettingsClick: () -> Unit,
     onAudioToggle: () -> Unit,
     onVideoAdjustmentsClick: () -> Unit,
     onSpecialVideoToggle: () -> Unit = {},
@@ -362,7 +364,8 @@ fun QuickOptionsFloatingPanel(
                         }
 
                         else -> {
-                            // Standard Video Quick Options
+                            // Photo quick options. Place Special Photo on a dedicated row
+                            // so the toggle remains easy to find and tap on narrow screens.
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
@@ -375,7 +378,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onTimerClick,
                                     testTag = "panel_timer_button",
-                                    compact = isCompactVideoPanel,
+                                    compact = false,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -387,7 +390,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onGridClick,
                                     testTag = "panel_grid_button",
-                                    compact = isCompactVideoPanel,
+                                    compact = false,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -405,7 +408,7 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onFlashClick,
                                     testTag = "panel_flash_button",
-                                    compact = isCompactVideoPanel,
+                                    compact = false,
                                     modifier = Modifier.weight(1f)
                                 )
 
@@ -417,8 +420,27 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onSettingsClick,
                                     testTag = "panel_settings_button",
-                                    compact = isCompactVideoPanel,
+                                    compact = false,
                                     modifier = Modifier.weight(1f)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                QuickOptionCircleButton(
+                                    icon = Icons.Outlined.CameraAlt,
+                                    label = "Special Photo",
+                                    statusText = if (isSpecialPhotoEnabled) "ON" else "OFF",
+                                    isActive = isSpecialPhotoEnabled,
+                                    activeColor = accentColor,
+                                    onClick = onSpecialPhotoToggle,
+                                    testTag = "panel_special_photo_button",
+                                    compact = false,
+                                    modifier = Modifier.widthIn(min = 112.dp)
                                 )
                             }
                         }
