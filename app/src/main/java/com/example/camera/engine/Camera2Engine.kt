@@ -7727,15 +7727,26 @@ class Camera2Engine(private val context: Context) {
                     uwLensForRec != null &&
                     mainLensForRec != null
 
-                // Photon EIS+ supports standard SDR main-camera Video recording.
-                // Keep Ultra-Wide Ready stays enabled: logical multi-camera sessions attach
-                // the EIS+ YUV reader to the main sensor alongside the ultra-wide outputs.
-                // Special Video, Cinema, 10-bit/HDR, and ultra-wide recording keep their own paths.
+                // Photon EIS+ supports standard SDR Video recording from the active sensor.
+                // Keep Ultra-Wide Ready stays enabled: on logical multi-camera devices the EIS+
+                // YUV reader is routed to whichever physical lens is actively being recorded.
+                // Special Video, Cinema, and 10-bit/HDR recording keep their own paths.
                 val eisPlusLogicalZoom = canUseLogicalZoomForLens(camera.id, lens, currentZoom)
                 val preferredEisPlusPhysicalId = when {
                     Build.VERSION.SDK_INT < Build.VERSION_CODES.P -> null
-                    isKeepUwReadyBack ->
-                        mainLensForRec?.takeIf { it.supportsPhysicalStream }?.physicalCameraId
+                    isKeepUwReadyBack -> {
+                        // The EIS+ image, gyro calibration and CaptureResult must belong to
+                        // the same physical sensor as the active recording source. Do not keep
+                        // feeding main-camera YUV while the relay is recording ultra-wide.
+                        val activePhysicalLens = if (lens.lensType == LensType.ULTRAWIDE) {
+                            uwLensForRec
+                        } else {
+                            mainLensForRec
+                        }
+                        activePhysicalLens
+                            ?.takeIf { it.supportsPhysicalStream }
+                            ?.physicalCameraId
+                    }
                     !eisPlusLogicalZoom -> lens.physicalCameraId
                     else -> null
                 }
@@ -7755,7 +7766,6 @@ class Camera2Engine(private val context: Context) {
                     isSpecialVideoRecording -> "Special Video recording is not supported"
                     isSoftwareCinema -> "Cinema recording is not supported"
                     is10BitSession -> "10-bit/HDR recording is not supported"
-                    lens.lensType == LensType.ULTRAWIDE -> "ultra-wide lens is not supported"
                     else -> null
                 }
                 val eisPlusEligible = preferences.videoEisPlusEnabled &&
@@ -7794,7 +7804,9 @@ class Camera2Engine(private val context: Context) {
                     EisPlusDiagnosticLog.event(
                         "CAMERA2", "ELIGIBILITY",
                         "eligible=$eisPlusEligible reason=$eisPlusUnavailableReason yuvSize=${eisPlusYuvSize?.width}x${eisPlusYuvSize?.height} " +
-                            "logicalZoomRequested=$eisPlusLogicalZoom pipelineLogicalStream=${eisPlusPhysicalId == null} physicalCameraId=$eisPlusPhysicalId",
+                            "logicalZoomRequested=$eisPlusLogicalZoom pipelineLogicalStream=${eisPlusPhysicalId == null} " +
+                                "pipelineCameraId=$eisPlusCameraId activeLensCameraId=${lens.cameraId} activeLensPhysicalId=${lens.physicalCameraId} " +
+                                "physicalCameraId=$eisPlusPhysicalId",
                         if (eisPlusCandidate == null) "WARN" else "INFO",
                     )
                 }
@@ -8003,7 +8015,9 @@ class Camera2Engine(private val context: Context) {
                                 EisPlusDiagnosticLog.event(
                                     "CAMERA2",
                                     "KEEP_ULTRAWIDE_EIS_PLUS_OUTPUT",
-                                    "surfaceValid=${eisPlusSessionSurface.isValid} physicalCameraId=$eisPlusOutputPhysicalId yuvSize=${eisPlusYuvSize?.width}x${eisPlusYuvSize?.height}",
+                                    "surfaceValid=${eisPlusSessionSurface.isValid} activeLens=${lens.lensType} " +
+                                        "pipelineCameraId=$eisPlusCameraId physicalCameraId=$eisPlusOutputPhysicalId " +
+                                        "yuvSize=${eisPlusYuvSize?.width}x${eisPlusYuvSize?.height}",
                                 )
                             }
                             val isUwSelected = (lens.lensType == LensType.ULTRAWIDE)
