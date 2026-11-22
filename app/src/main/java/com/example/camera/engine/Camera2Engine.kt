@@ -4499,6 +4499,23 @@ class Camera2Engine(private val context: Context) {
         val caps = _capabilities.value
         val activeLens = _selectedLens.value
         val isVideoOrCinema = (currentMode == CameraMode.VIDEO || currentMode == CameraMode.CINEMA)
+        val backLensesForPhoto = _availableLenses.value.filter {
+            it.facing == CameraCharacteristics.LENS_FACING_BACK
+        }
+        val mainPhotoLens = backLensesForPhoto.firstOrNull { it.isPrimaryMain }
+            ?: backLensesForPhoto.firstOrNull { it.lensType == LensType.WIDE && !it.isZoomPreset }
+            ?: backLensesForPhoto.firstOrNull { it.lensType == LensType.WIDE }
+        val ultraWidePhotoLens = backLensesForPhoto.firstOrNull { it.lensType == LensType.ULTRAWIDE }
+        val isLogicalDualPhotoDevice = isSpecialPhotoCaptureEnabled &&
+            currentMode == CameraMode.PHOTO &&
+            mainPhotoLens != null && ultraWidePhotoLens != null &&
+            mainPhotoLens.cameraId == cameraId &&
+            ultraWidePhotoLens.cameraId == cameraId
+        // On one logical multi-camera device, the active JPEG reader is always
+        // the 1x output. The separate standby JPEG reader is explicitly routed
+        // to the physical ultra-wide sensor in createCameraCaptureSession().
+        val photoReaderLens = if (isLogicalDualPhotoDevice) mainPhotoLens else activeLens
+        val photoReaderCameraId = if (isLogicalDualPhotoDevice) mainPhotoLens!!.cameraId else cameraId
         val targetSize = if (isVideoOrCinema) {
             val targetRecRes = if (currentMode == CameraMode.CINEMA) {
                 _cinemaConfig.value.selectedResolution ?: userSelectedVideoResolution ?: _selectedVideoResolution.value ?: CameraResolution(1920, 1080)
@@ -4508,8 +4525,8 @@ class Camera2Engine(private val context: Context) {
             Size(maxOf(targetRecRes.width, targetRecRes.height), minOf(targetRecRes.width, targetRecRes.height))
         } else {
             getOptimalPhotoSizeForLens(
-                activeLens,
-                cameraId,
+                photoReaderLens,
+                photoReaderCameraId,
                 forceFourThree = isSpecialPhotoCaptureEnabled && currentMode == CameraMode.PHOTO
             )
         }
