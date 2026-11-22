@@ -2,10 +2,14 @@ package com.example.camera.gallery
 
 import android.content.ContentUris
 import android.content.Context
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
+import java.io.File
+import java.util.Locale
 
 data class MediaGalleryVideo(
     val id: String,
@@ -124,7 +128,64 @@ class MediaGalleryRepository(context: Context) {
             Log.e(TAG, "Unable to query the video library", exception)
         }
 
+        // Older fallback saves can live under Android/data/<package>/files/Movies,
+        // which is app-private and therefore is not indexed in the shared MediaStore.
+        val knownUris = videos.mapTo(HashSet()) { it.uri.toString() }
+        getAppSpecificVideos().forEach { appVideo ->
+            if (knownUris.add(appVideo.uri.toString())) videos += appVideo
+        }
+
         return videos.sortedByDescending { it.timestamp }
+    }
+
+    private fun getAppSpecificVideos(): List<MediaGalleryVideo> {
+        val directories = buildList {
+            try {
+                addAll(appContext.getExternalFilesDirs(Environment.DIRECTORY_MOVIES).filterNotNull())
+            } catch (exception: Exception) {
+                Log.w(TAG, "Unable to inspect app-specific external Movies directories", exception)
+            }
+            add(File(appContext.filesDir, "Movies"))
+        }.distinctBy { it.absolutePath }
+
+        val discovered = LinkedHashMap<String, MediaGalleryVideo>()
+        directories.forEach { directory ->
+            val files = try {
+                directory.listFiles().orEmpty()
+            } catch (exception: Exception) {
+                Log.w(TAG, "Unable to list app-specific video directory: " + directory, exception)
+                emptyArray()
+            }
+            files.forEach { file ->
+                val extension = file.extension.lowercase(Locale.ROOT)
+                if (!file.isFile || file.length() <= 0L || extension !in VIDEO_EXTENSIONS) return@forEach
+
+                val duration = readVideoDuration(file)
+                val uri = Uri.fromFile(file)
+                discovered[file.absolutePath] = MediaGalleryVideo(
+                    id = "file:" + file.absolutePath,
+                    displayName = file.name,
+                    uri = uri,
+                    timestamp = file.lastModified(),
+                    durationMs = duration,
+                    isVCameraRecording = true
+                )
+            }
+        }
+        return discovered.values.toList()
+    }
+
+    private fun readVideoDuration(file: File): Long {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+        } catch (exception: Exception) {
+            Log.w(TAG, "Unable to read duration for app-specific video: " + file.name, exception)
+            0L
+        } finally {
+            try { retriever.release() } catch (_: Exception) {}
+        }
     }
 
     private fun mediaStoreIdentity(uri: Uri): String? {
@@ -137,5 +198,6 @@ class MediaGalleryRepository(context: Context) {
 
     companion object {
         private const val TAG = "MediaGalleryRepository"
+        private val VIDEO_EXTENSIONS = setOf("mp4", "m4v", "mov", "3gp", "mkv", "webm")
     }
 }
