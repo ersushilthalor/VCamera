@@ -2,14 +2,18 @@ package com.example.camera.ui
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Matrix
+import android.graphics.RectF
+import android.graphics.SurfaceTexture
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.os.Build
 import android.util.Size
+import android.view.Surface
+import android.view.TextureView
 import android.widget.MediaController
-import android.widget.VideoView
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Animatable
@@ -82,13 +86,10 @@ import java.util.Locale
 internal const val GALLERY_LENS_SWITCH_DURATION_MS = 300
 
 /**
- * Calculates the actual crop applied to the ultra-wide player while the two gallery sources
- * are handed off. A nominal 0.5x ultra-wide view needs a 2x crop to match the main 1x view.
- *
- * Main -> ultra-wide: crop 2x down to 1x (zoom out).
- * Ultra-wide -> main: crop 1x up to 2x (zoom in), then hand off to the 1x main source.
+ * Returns the lens handoff zoom applied inside the fixed video viewport.
+ * Both axes use the same magnification, preserving each source frame's aspect ratio.
  */
-internal fun calculateGalleryLensSwitchCropScale(
+internal fun calculateGalleryLensSwitchZoomScale(
     isUltraWidePlayer: Boolean,
     transitionFromUltraWide: Boolean,
     progress: Float,
@@ -96,11 +97,7 @@ internal fun calculateGalleryLensSwitchCropScale(
 ): Float {
     if (!isUltraWidePlayer || !isTransitionRunning) return 1f
     val normalizedProgress = progress.coerceIn(0f, 1f)
-    return if (transitionFromUltraWide) {
-        1f + normalizedProgress
-    } else {
-        2f - normalizedProgress
-    }
+    return if (transitionFromUltraWide) 1f + normalizedProgress else 2f - normalizedProgress
 }
 
 private val galleryBackground = Color(0xFF0D1413)
@@ -114,8 +111,57 @@ private data class GalleryMediaSection(
 private class GalleryPlayerState(
     var isPrepared: Boolean = false,
     var wasActive: Boolean = false,
-    var mediaPlayer: MediaPlayer? = null
+    var mediaPlayer: MediaPlayer? = null,
+    var outputSurface: Surface? = null,
+    var mediaController: MediaController? = null,
+    var videoWidth: Int = 0,
+    var videoHeight: Int = 0
 )
+
+private class GalleryMediaPlayerControl(
+    private val state: GalleryPlayerState
+) : MediaController.MediaPlayerControl {
+    override fun start() { if (state.isPrepared) runCatching { state.mediaPlayer?.start() } }
+    override fun pause() { if (state.isPrepared) runCatching { state.mediaPlayer?.pause() } }
+    override fun getDuration(): Int = runCatching { state.mediaPlayer?.duration ?: 0 }.getOrDefault(0)
+    override fun getCurrentPosition(): Int = runCatching { state.mediaPlayer?.currentPosition ?: 0 }.getOrDefault(0)
+    override fun isPlaying(): Boolean =
+        state.isPrepared && runCatching { state.mediaPlayer?.isPlaying == true }.getOrDefault(false)
+    override fun seekTo(position: Int) { if (state.isPrepared) runCatching { state.mediaPlayer?.seekTo(position) } }
+    override fun getBufferPercentage(): Int = 0
+    override fun canPause(): Boolean = true
+    override fun canSeekBackward(): Boolean = true
+    override fun canSeekForward(): Boolean = true
+    override fun getAudioSessionId(): Int = runCatching { state.mediaPlayer?.audioSessionId ?: 0 }.getOrDefault(0)
+}
+
+/**
+ * Fits the decoded frame into the fixed gallery viewport, then zooms uniformly around its
+ * center. The player bounds never change and the source's aspect ratio is not distorted.
+ */
+private fun applyGalleryVideoZoom(view: TextureView, state: GalleryPlayerState, zoomScale: Float) {
+    val width = view.width.toFloat()
+    val height = view.height.toFloat()
+    val videoWidth = state.videoWidth.toFloat()
+    val videoHeight = state.videoHeight.toFloat()
+    if (width <= 0f || height <= 0f || videoWidth <= 0f || videoHeight <= 0f) return
+
+    val viewRect = RectF(0f, 0f, width, height)
+    val videoRatio = videoWidth / videoHeight
+    val viewRatio = width / height
+    val fittedRect = if (videoRatio > viewRatio) {
+        val fittedHeight = width / videoRatio
+        RectF(0f, (height - fittedHeight) / 2f, width, (height + fittedHeight) / 2f)
+    } else {
+        val fittedWidth = height * videoRatio
+        RectF((width - fittedWidth) / 2f, 0f, (width + fittedWidth) / 2f, height)
+    }
+    val matrix = Matrix()
+    matrix.setRectToRect(viewRect, fittedRect, Matrix.ScaleToFit.FILL)
+    val scale = zoomScale.coerceAtLeast(0.01f)
+    matrix.postScale(scale, scale, width / 2f, height / 2f)
+    view.setTransform(matrix)
+}
 
 @Composable
 fun MediaGalleryDialog(
@@ -515,11 +561,11 @@ private fun MediaGalleryPlayer(
     var isUltraWide by rememberSaveable(video.id) { mutableStateOf(false) }
     var playbackPosition by rememberSaveable(video.id) { mutableStateOf(0) }
     var shouldResumePlayback by rememberSaveable(video.id) { mutableStateOf(true) }
-    val activeVideoView = remember(video.id) { mutableStateOf<VideoView?>(null) }
+    val activeTextureView = remember(video.id) { mutableStateOf<TextureView?>(null) }
     val hasLensPair = video.ultraWideUri != null
     val switchScope = rememberCoroutineScope()
-    val cropProgress = remember(video.id) { Animatable(1f) }
-    val currentCropProgress = cropProgress.value
+    val zoomProgress = remember(video.id) { Animatable(1f) }
+    val currentZoomProgress = zoomProgress.value
     var transitionFromUltraWide by rememberSaveable(video.id) { mutableStateOf(false) }
     var isLensTransitionRunning by rememberSaveable(video.id) { mutableStateOf(false) }
     var isLensSwitchLocked by remember(video.id) { mutableStateOf(false) }
@@ -530,10 +576,11 @@ private fun MediaGalleryPlayer(
             val sourceWasUltraWide = isUltraWide
             activeVideoView.value?.let { view ->
                 val state = view.tag as? GalleryPlayerState
-                if (state?.isPrepared == true) {
-                    playbackPosition = view.currentPosition.coerceAtLeast(0)
-                    shouldResumePlayback = view.isPlaying
-                    view.pause()
+                val player = state?.mediaPlayer
+                if (state?.isPrepared == true && player != null) {
+                    playbackPosition = runCatching { player.currentPosition }.getOrDefault(0).coerceAtLeast(0)
+                    shouldResumePlayback = runCatching { player.isPlaying }.getOrDefault(false)
+                    runCatching { player.pause() }
                 }
                 state?.wasActive = false
             }
@@ -541,11 +588,11 @@ private fun MediaGalleryPlayer(
             switchScope.launch {
                 // Reset the crop before changing the target player so the first visible frame
                 // starts at the matching field of view instead of flashing at the final scale.
-                cropProgress.snapTo(0f)
+                zoomProgress.snapTo(0f)
                 transitionFromUltraWide = sourceWasUltraWide
                 isLensTransitionRunning = true
                 isUltraWide = useUltraWide
-                cropProgress.animateTo(
+                zoomProgress.animateTo(
                     targetValue = 1f,
                     animationSpec = tween(
                         durationMillis = GALLERY_LENS_SWITCH_DURATION_MS,
@@ -604,96 +651,167 @@ private fun MediaGalleryPlayer(
                 label = "gallery-video-lens-switch"
             ) { targetIsUltraWide ->
                 val targetUri = if (targetIsUltraWide) video.ultraWideUri ?: video.uri else video.uri
-                val cropScale = calculateGalleryLensSwitchCropScale(
+                val zoomScale = calculateGalleryLensSwitchZoomScale(
                     isUltraWidePlayer = targetIsUltraWide,
                     transitionFromUltraWide = transitionFromUltraWide,
-                    progress = currentCropProgress,
+                    progress = currentZoomProgress,
                     isTransitionRunning = isLensTransitionRunning
                 )
 
-                val restorePlayback: (VideoView, GalleryPlayerState) -> Unit = { view, state ->
-                    val lastSafePosition = (view.duration - 250).coerceAtLeast(0)
-                    val targetPosition = playbackPosition.coerceAtMost(lastSafePosition)
-                    val resumeAfterSeek = shouldResumePlayback
+                val restorePlayback: (TextureView, GalleryPlayerState) -> Unit = { view, state ->
                     val player = state.mediaPlayer
-                    if (targetPosition > 0 && player != null) {
-                        player.setOnSeekCompleteListener { seekedPlayer ->
-                            seekedPlayer.setOnSeekCompleteListener(null)
-                            if (targetIsUltraWide == isUltraWide && state.wasActive) {
-                                playbackPosition = seekedPlayer.currentPosition.coerceAtLeast(0)
-                                activeVideoView.value = view
-                                if (resumeAfterSeek) view.start() else view.pause()
-                            } else {
-                                view.pause()
+                    if (state.isPrepared && player != null) {
+                        val lastSafePosition = (player.duration - 250).coerceAtLeast(0)
+                        val targetPosition = playbackPosition.coerceAtMost(lastSafePosition)
+                        val resumeAfterSeek = shouldResumePlayback
+                        if (targetPosition > 0) {
+                            player.setOnSeekCompleteListener { seekedPlayer ->
+                                seekedPlayer.setOnSeekCompleteListener(null)
+                                if (targetIsUltraWide == isUltraWide && state.wasActive) {
+                                    playbackPosition = seekedPlayer.currentPosition.coerceAtLeast(0)
+                                    activeTextureView.value = view
+                                    if (resumeAfterSeek) seekedPlayer.start() else seekedPlayer.pause()
+                                } else {
+                                    seekedPlayer.pause()
+                                }
                             }
+                            player.seekTo(targetPosition)
+                        } else if (targetIsUltraWide == isUltraWide && state.wasActive) {
+                            activeTextureView.value = view
+                            if (resumeAfterSeek) player.start() else player.pause()
+                        } else {
+                            player.pause()
                         }
-                        player.seekTo(targetPosition)
-                    } else if (targetIsUltraWide == isUltraWide && state.wasActive) {
-                        activeVideoView.value = view
-                        if (resumeAfterSeek) view.start() else view.pause()
-                    } else {
-                        view.pause()
                     }
                 }
 
                 AndroidView(
                     modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
                     factory = { viewContext ->
-                        VideoView(viewContext).apply {
-                            val state = GalleryPlayerState(
-                                wasActive = targetIsUltraWide == isUltraWide
-                            )
-                            tag = state
-                            if (state.wasActive) activeVideoView.value = this
+                        TextureView(viewContext).apply {
+                            val viewState = GalleryPlayerState(wasActive = targetIsUltraWide == isUltraWide)
+                            tag = viewState
+                            isOpaque = false
+                            if (viewState.wasActive) activeTextureView.value = this
 
                             val controller = MediaController(viewContext)
+                            viewState.mediaController = controller
                             controller.setAnchorView(this)
-                            setMediaController(controller)
-                            setOnPreparedListener { player ->
-                                player.isLooping = false
-                                state.mediaPlayer = player
-                                state.isPrepared = true
-                                if (targetIsUltraWide == isUltraWide) {
-                                    state.wasActive = true
-                                    activeVideoView.value = this
-                                    restorePlayback(this, state)
-                                } else {
-                                    state.wasActive = false
-                                    pause()
-                                }
+                            controller.setMediaPlayer(GalleryMediaPlayerControl(viewState))
+                            controller.isEnabled = false
+                            setOnClickListener {
+                                if (controller.isShowing) controller.hide() else controller.show(3_000)
                             }
-                            setVideoURI(targetUri)
+
+                            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                override fun onSurfaceTextureAvailable(
+                                    surfaceTexture: SurfaceTexture,
+                                    width: Int,
+                                    height: Int
+                                ) {
+                                    val outputSurface = Surface(surfaceTexture)
+                                    viewState.outputSurface = outputSurface
+                                    val player = MediaPlayer()
+                                    viewState.mediaPlayer = player
+                                    try {
+                                        player.setSurface(outputSurface)
+                                        player.setOnVideoSizeChangedListener { _, videoWidth, videoHeight ->
+                                            viewState.videoWidth = videoWidth
+                                            viewState.videoHeight = videoHeight
+                                            applyGalleryVideoZoom(this@apply, viewState, zoomScale)
+                                        }
+                                        player.setOnPreparedListener { preparedPlayer ->
+                                            preparedPlayer.isLooping = false
+                                            viewState.isPrepared = true
+                                            viewState.videoWidth = preparedPlayer.videoWidth
+                                            viewState.videoHeight = preparedPlayer.videoHeight
+                                            applyGalleryVideoZoom(this@apply, viewState, zoomScale)
+                                            controller.isEnabled = true
+
+                                            if (targetIsUltraWide == isUltraWide) {
+                                                viewState.wasActive = true
+                                                activeTextureView.value = this@apply
+                                                restorePlayback(this@apply, viewState)
+                                            } else {
+                                                viewState.wasActive = false
+                                                preparedPlayer.pause()
+                                            }
+                                        }
+                                        player.setOnErrorListener { _, _, _ ->
+                                            viewState.isPrepared = false
+                                            true
+                                        }
+                                        player.setDataSource(viewContext, targetUri)
+                                        player.prepareAsync()
+                                    } catch (_: Exception) {
+                                        viewState.isPrepared = false
+                                        viewState.mediaPlayer = null
+                                        runCatching { player.release() }
+                                    }
+                                }
+
+                                override fun onSurfaceTextureSizeChanged(
+                                    surfaceTexture: SurfaceTexture,
+                                    width: Int,
+                                    height: Int
+                                ) {
+                                    applyGalleryVideoZoom(this@apply, viewState, zoomScale)
+                                }
+
+                                override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
+                                    viewState.mediaPlayer?.let { player ->
+                                        runCatching { player.setOnSeekCompleteListener(null) }
+                                        runCatching { player.setOnPreparedListener(null) }
+                                        runCatching { player.setOnVideoSizeChangedListener(null) }
+                                        runCatching { player.setSurface(null) }
+                                        runCatching { player.release() }
+                                    }
+                                    viewState.mediaPlayer = null
+                                    viewState.isPrepared = false
+                                    viewState.outputSurface?.release()
+                                    viewState.outputSurface = null
+                                    return true
+                                }
+
+                                override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) = Unit
+                            }
                         }
                     },
                     update = { view ->
-                        // VideoView is backed by SurfaceView. API 26+ supports synchronized
-                        // SurfaceView scaling, so this changes the actual displayed crop,
-                        // not merely the gallery controls or the player container.
-                        view.pivotX = view.width / 2f
-                        view.pivotY = view.height / 2f
-                        view.scaleX = cropScale
-                        view.scaleY = cropScale
-
-                        val state = view.tag as? GalleryPlayerState
-                        if (state != null) {
+                        val viewState = view.tag as? GalleryPlayerState
+                        if (viewState != null) {
+                            applyGalleryVideoZoom(view, viewState, zoomScale)
                             val shouldBeActive = targetIsUltraWide == isUltraWide
-                            if (shouldBeActive && !state.wasActive) {
-                                state.wasActive = true
-                                activeVideoView.value = view
-                                if (state.isPrepared) restorePlayback(view, state)
+                            if (shouldBeActive && !viewState.wasActive) {
+                                viewState.wasActive = true
+                                activeTextureView.value = view
+                                if (viewState.isPrepared) restorePlayback(view, viewState)
                             } else if (shouldBeActive) {
-                                activeVideoView.value = view
+                                activeTextureView.value = view
                             } else {
-                                state.wasActive = false
+                                viewState.wasActive = false
                             }
                         }
                     },
                     onRelease = { view ->
-                        if (activeVideoView.value === view) activeVideoView.value = null
-                        view.setOnPreparedListener(null)
-                        (view.tag as? GalleryPlayerState)?.mediaPlayer?.setOnSeekCompleteListener(null)
-                        view.setMediaController(null)
-                        view.stopPlayback()
+                        if (activeTextureView.value === view) activeTextureView.value = null
+                        view.surfaceTextureListener = null
+                        view.setOnClickListener(null)
+                        (view.tag as? GalleryPlayerState)?.let { viewState ->
+                            viewState.mediaController?.hide()
+                            viewState.mediaPlayer?.let { player ->
+                                runCatching { player.setOnSeekCompleteListener(null) }
+                                runCatching { player.setOnPreparedListener(null) }
+                                runCatching { player.setOnVideoSizeChangedListener(null) }
+                                runCatching { player.setSurface(null) }
+                                runCatching { player.release() }
+                            }
+                            viewState.mediaPlayer = null
+                            viewState.outputSurface?.release()
+                            viewState.outputSurface = null
+                            viewState.mediaController = null
+                            viewState.isPrepared = false
+                        }
                     }
                 )
             }
