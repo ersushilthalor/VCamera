@@ -23,6 +23,7 @@ internal class VideoEisPlusPipeline(private val context: android.content.Context
         private set
 
     val surface get() = imageReader?.surface
+    val shouldRequestOisSamples get() = coordinator.shouldRequestOisSamples
     val isRunning get() = session?.isOperational == true
 
     fun isSupported(
