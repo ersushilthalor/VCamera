@@ -1833,9 +1833,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         engine.videoStabilizationMode = VideoStabilizationMode.OFF
     }
 
-    fun setMainCameraStabilizationMode(@Suppress("UNUSED_PARAMETER") mode: MainCameraStabilizationMode) {
-        // The legacy OFF option is ignored: OIS remains permanently enabled.
-        setOisEnabled(true)
+    fun setMainCameraStabilizationMode(mode: MainCameraStabilizationMode) {
+        setOisEnabled(mode == MainCameraStabilizationMode.OIS_ONLY)
     }
 
     fun cycleStabilizationMode() {
@@ -1848,16 +1847,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         setHybridStabilizationConfig(hybridStabilizationConfig.value)
     }
 
-    fun setOisEnabled(@Suppress("UNUSED_PARAMETER") enabled: Boolean) {
-        _isOisEnabled.value = true
-        preferences.isOisEnabled = true
-        preferences.isOisPreferred = true
-        engine.isOisEnabled = true
+    fun setOisEnabled(enabled: Boolean) {
+        _isOisEnabled.value = enabled
+        preferences.isOisEnabled = enabled
+        preferences.isOisPreferred = enabled
+        engine.isOisEnabled = enabled
 
         val updated = hybridStabilizationConfig.value.copy(
             isHybridEnabled = false,
-            isOisPreferred = true,
-            isOisEnabled = true,
+            isOisPreferred = enabled,
+            isOisEnabled = enabled,
             isEisPreferred = false,
             isAdaptiveFpsLens = false,
             isUltraStabilizationEnabled = false,
@@ -1865,7 +1864,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         )
         setHybridStabilizationConfig(updated)
         engine.updatePreviewSettings()
-        showToast("Optical Image Stabilization (OIS): ON")
+        showToast(if (enabled) "Optical Image Stabilization (OIS): ON" else "Optical Image Stabilization (OIS): OFF")
     }
 
     fun setOisPreferred(enabled: Boolean) {
