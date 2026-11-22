@@ -90,6 +90,8 @@ class DualCameraRecordingRelay internal constructor(
 
     /** Camera stream whose YUV frames are processed by the EIS+ pipeline for this relay session. */
     private val eisPlusSource: PreviewStreamSource = initialSource
+    // Accessed only from the relay GL thread; prevents one warning per raw camera frame.
+    private var loggedEisPlusSourceBypass: PreviewStreamSource? = null
 
     @Volatile
     var activeSource: PreviewStreamSource = initialSource
@@ -812,10 +814,26 @@ class DualCameraRecordingRelay internal constructor(
 
         if (isPaused.get() || !isStreamingActive.get()) return
 
-        // While EIS+ is running, both OES callbacks only keep their textures current.
-        // The timestamp-matched YUV stream from the selected active lens is the sole
-        // source for both preview and encoder; never let either raw OES stream bypass it.
-        if (eisPlusPipeline?.isRunning == true) return
+        // The EIS+ YUV pipeline is bound to the sensor selected when recording started.
+        // Keep OES callbacks suppressed only while that same sensor is active. If the user
+        // switches to the other camera device, its frames have no matching EIS+ transform
+        // stream/session; continue through the normal relay path instead of freezing/dropping
+        // the recording. Never apply the original sensor's transforms to the other lens.
+        val eisPlusRunning = eisPlusPipeline?.isRunning == true
+        if (eisPlusRunning && activeSource == eisPlusSource) {
+            loggedEisPlusSourceBypass = null
+            return
+        }
+        if (eisPlusRunning && activeSource != eisPlusSource &&
+            loggedEisPlusSourceBypass != activeSource
+        ) {
+            loggedEisPlusSourceBypass = activeSource
+            EisPlusDiagnosticLog.event(
+                "RELAY", "EIS_PLUS_SOURCE_BYPASS",
+                "pipelineSource=$eisPlusSource activeSource=$activeSource; using active OES stream without EIS+ transform",
+                "WARN",
+            )
+        }
 
         val rawTimestampNs = st.timestamp.takeIf { it > 0L } ?: System.nanoTime()
         val isSpecialDualRecording = secondaryRecordingEnabled.get()
