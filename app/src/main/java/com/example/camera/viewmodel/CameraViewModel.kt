@@ -674,6 +674,20 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _videoEisPlusEnabled = MutableStateFlow(preferences.videoEisPlusEnabled)
     val videoEisPlusEnabled: StateFlow<Boolean> = _videoEisPlusEnabled.asStateFlow()
+    val videoEisPlusStatus: StateFlow<String> = combine(
+        _videoEisPlusEnabled,
+        engine.videoEisPlusStatus
+    ) { enabled, status ->
+        when {
+            !enabled -> "Disabled"
+            status == "Disabled" -> "Ready for supported SDR video"
+            else -> status
+        }
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000L),
+        if (preferences.videoEisPlusEnabled) "Ready for supported SDR video" else "Disabled"
+    )
     private val _videoEisPlusStrength = MutableStateFlow(preferences.videoEisPlusStrength)
     val videoEisPlusStrength: StateFlow<Float> = _videoEisPlusStrength.asStateFlow()
     private val _videoEisPlusLookahead = MutableStateFlow(preferences.videoEisPlusLookahead)
@@ -1627,7 +1641,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setVideoEisPlusLookahead(frames: Int) {
-        val value = frames.coerceIn(0, 10)
+        val value = frames.coerceIn(3, 10)
         _videoEisPlusLookahead.value = value
         preferences.videoEisPlusLookahead = value
     }
