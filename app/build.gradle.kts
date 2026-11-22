@@ -18,6 +18,11 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    externalNativeBuild {
+      cmake {
+        cppFlags += "-std=c++17"
+      }
+    }
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
@@ -66,8 +71,14 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+      version = "3.22.1"
+    }
+  }
 }
-
+ 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
 // to match the convention used in Web projects.
 secrets {

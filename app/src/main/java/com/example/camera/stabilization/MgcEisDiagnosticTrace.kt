@@ -1,6 +1,6 @@
 package com.example.camera.stabilization
 
-import com.hinnka.mycamera.BuildConfig
+import com.example.BuildConfig
 import android.util.Log
 import java.io.File
 import java.util.Locale
