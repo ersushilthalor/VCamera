@@ -147,7 +147,7 @@ class Camera2Engine(private val context: Context) {
     @Volatile private var isSpecialVideoPreviewEnabled: Boolean = preferences.isShowUltraWidePreview
 
     private fun shouldKeepUltraWideStreamReady(): Boolean =
-        shouldKeepUltraWideStreamReady() || (isSpecialVideoPreviewEnabled && currentMode == CameraMode.VIDEO)
+        _isKeepUltraWideReady.value || (isSpecialVideoPreviewEnabled && currentMode == CameraMode.VIDEO)
 
     private val _isAutoSwitchToUltraWide = MutableStateFlow(preferences.isAutoSwitchToUltraWide)
     val isAutoSwitchToUltraWide: StateFlow<Boolean> = _isAutoSwitchToUltraWide.asStateFlow()
