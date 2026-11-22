@@ -8021,7 +8021,7 @@ class Camera2Engine(private val context: Context) {
                                 mainLensForRec.supportsPhysicalStream && physIds.contains(it) && it != camera.id
                             }
                             // The EIS+ reader must be an actual output in the same Camera2 session.
-                            // Route it to the same main physical sensor used by the EIS+ gyro/timing pipeline.
+                            // Route it to the active physical sensor selected for the EIS+ gyro/timing pipeline.
                             val eisPlusSessionSurface = activeVideoEisPlusSurface?.takeIf {
                                 eisPlusStarted && it.isValid
                             }
@@ -8387,7 +8387,7 @@ class Camera2Engine(private val context: Context) {
                                                     is10Bit = is10BitSession,
                                                     physicalCameraId = targetPhysId,
                                                     stabilizationSurface = if (eisPlusStarted) activeVideoEisPlusSurface else null,
-                                                     stabilizationPhysicalCameraId = eisPlusPhysicalId,
+                                                    stabilizationPhysicalCameraId = eisPlusPhysicalId,
 
                                                     previewViaRelay = false,
                                                     callback = sessionCallback
