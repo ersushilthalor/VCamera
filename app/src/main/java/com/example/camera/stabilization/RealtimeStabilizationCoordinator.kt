@@ -252,6 +252,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
     private var consecutiveHalStabilizationConflictCount = 0
     private var rawGyroCallbackCount = 0L
     private var opticalCorrectionSourceActive = false
+    private var opticalCorrectionSourceUsable = false
     private var dynamicLensIntrinsicsSourceActive = false
     private var lastLoggedBoundaryCount = -1L
     private var lastLoggedGateBoundaryCount = -1L
@@ -283,7 +284,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
             supportsOpticalTelemetry &&
                 activeSessionCount > 0 &&
                 captureResultCount >= HAL_OPTICAL_CORRECTION_PROBE_FRAME_COUNT &&
-                !opticalCorrectionSourceActive
+                !opticalCorrectionSourceUsable
         }
 
     /** True after this acquisition has received its first monotonic calibrated gyro sample. */
@@ -579,6 +580,9 @@ class RealtimeStabilizationCoordinator(context: Context) {
             }
             val opticalCorrectionAccepted = acceptedOpticalCorrectionSamples >=
                 MIN_OPTICAL_CORRECTION_SAMPLES_PER_FRAME
+            if (opticalCorrectionAccepted) {
+                opticalCorrectionSourceUsable = true
+            }
             if (acceptedOpticalCorrectionSamples > 0 &&
                 (captureResultCount <= 5L || captureResultCount % 30L == 0L)
             ) {
@@ -848,6 +852,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
         rawGyroCallbackCount = 0L
         gyroSourceReady = false
         opticalCorrectionSourceActive = false
+        opticalCorrectionSourceUsable = false
         dynamicLensIntrinsicsSourceActive = false
         lastLoggedBoundaryCount = -1L
         lastLoggedGateBoundaryCount = -1L
