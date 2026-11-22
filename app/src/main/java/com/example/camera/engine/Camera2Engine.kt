@@ -8379,7 +8379,6 @@ class Camera2Engine(private val context: Context) {
                                                     physicalCameraId = targetPhysId,
                                                     stabilizationSurface = if (eisPlusStarted) activeVideoEisPlusSurface else null,
                                                      stabilizationPhysicalCameraId = eisPlusPhysicalId,
-                                                    physicalCameraId = targetPhysId,
 
                                                     previewViaRelay = false,
                                                     callback = sessionCallback
@@ -8527,7 +8526,6 @@ class Camera2Engine(private val context: Context) {
                             physicalCameraId = targetPhysId,
                             stabilizationSurface = if (eisPlusStarted) activeVideoEisPlusSurface else null,
                                                      stabilizationPhysicalCameraId = eisPlusPhysicalId,
-                            physicalCameraId = targetPhysId,
 
                             previewViaRelay = eisPlusPreviewViaRelay,
                             callback = checkNotNull(sessionCallback) { "Recording session callback was unavailable" }
