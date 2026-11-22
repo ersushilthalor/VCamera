@@ -1,6 +1,7 @@
 package com.example.camera.ui
 
 import android.Manifest
+import android.os.Build
 import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -64,7 +65,33 @@ fun CameraScreen(
 ) {
     val context = LocalContext.current
 
-    
+    val hasMediaVideoAccess: () -> Boolean = {
+        when {
+            Build.VERSION.SDK_INT >= 34 ->
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED ||
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
+            Build.VERSION.SDK_INT >= 33 ->
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
+            else ->
+                ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+    val mediaVideoPermissions = when {
+        Build.VERSION.SDK_INT >= 34 -> arrayOf(
+            Manifest.permission.READ_MEDIA_VIDEO,
+            Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+        )
+        Build.VERSION.SDK_INT >= 33 -> arrayOf(Manifest.permission.READ_MEDIA_VIDEO)
+        else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+    }
+    var hasMediaVideoPermission by remember { mutableStateOf(hasMediaVideoAccess()) }
+    val mediaVideoPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        hasMediaVideoPermission = hasMediaVideoAccess()
+        if (hasMediaVideoPermission) viewModel.refreshMediaGallery()
+    }
+
     // Permission handling
     var hasCameraPermission by remember {
         mutableStateOf(
@@ -190,6 +217,7 @@ fun CameraScreen(
     val focusRingPoint by viewModel.focusRingPoint.collectAsStateWithLifecycle()
     val toastMessage by viewModel.toastMessage.collectAsStateWithLifecycle()
     val specialVideoClips by viewModel.specialVideoClips.collectAsStateWithLifecycle()
+    val mediaGalleryVideos by viewModel.mediaGalleryVideos.collectAsStateWithLifecycle()
     val isSpecialVideoGalleryOpen by viewModel.isSpecialVideoGalleryOpen.collectAsStateWithLifecycle()
     var isQuickOptionsOpen by rememberSaveable { mutableStateOf(false) }
 
@@ -226,8 +254,12 @@ fun CameraScreen(
         BackHandler {
             viewModel.closeSpecialVideoGallery()
         }
-        SpecialVideoGalleryDialog(
-            clips = specialVideoClips,
+        MediaGalleryDialog(
+            videos = mediaGalleryVideos,
+            hasVideoPermission = hasMediaVideoPermission,
+            onRequestVideoPermission = {
+                mediaVideoPermissionLauncher.launch(mediaVideoPermissions)
+            },
             onDismiss = { viewModel.closeSpecialVideoGallery() },
             onOpenSystemGallery = { viewModel.openSystemGallery(context) }
         )
@@ -320,7 +352,7 @@ fun CameraScreen(
     val isAnyWindowOpen = isCinemaSettingsOpen || isLogProfileWindowOpen || isLutWindowOpen ||
             isManualProOpen ||
             isVideoSettingsPanelOpen ||
-            isVideoAdjustmentsOpen || isSettingsOpen || isGallerySelectionDialogOpen ||
+            isVideoAdjustmentsOpen || isSettingsOpen || isGallerySelectionDialogOpen || isSpecialVideoGalleryOpen ||
             isCustomUiStudioOpen ||
             isQuickOptionsOpen
 

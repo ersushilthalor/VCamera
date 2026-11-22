@@ -6698,7 +6698,8 @@ class Camera2Engine(private val context: Context) {
             val isSoftwareCinema = isCinema
 
             val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-            val prefix = if (isCinema) "CINEMA_" else "VID_"
+            // Stable filename marker lets the in-app gallery identify recordings made by VCamera.
+            val prefix = if (isCinema) "VCAM_CINEMA_" else "VCAM_VID_"
             val isVp9 = isCinema && cinemaCodec == CinemaCodec.VP9
             val isProRes = isCinema && cinemaCodec == CinemaCodec.PRORES
             val extension = when {
