@@ -1,24 +1,26 @@
 package com.example.camera.engine
 
 /**
- * Waits until both Special Video camera streams have delivered a valid frame, then assigns
- * each stream its own first encoded frame timestamp as PTS zero.
+ * Creates one shared presentation timeline for Special Video.
  *
- * The first camera can begin delivering frames before the second camera is ready. Those
- * early frames are only used to establish readiness; the first frame from each camera
- * that is actually sent to its encoder starts at zero. This prevents the earlier stream
- * from beginning one frame late after the common readiness barrier.
+ * Both cameras must produce at least one valid frame before recording starts. The first
+ * MAIN frame after that readiness barrier becomes PTS zero and is the master clock for
+ * both encoders. Ultra-wide callbacks only refresh its cached OES texture; they never
+ * advance an independent output clock.
  *
- * Calls are synchronized because recording start/stop can be initiated off the relay GL thread.
+ * Calls are synchronized because Camera2 callbacks and recording lifecycle operations can
+ * arrive from different threads.
  */
 internal class SpecialVideoRecordingTimeline {
 
     private var firstMainReadyTimestampNs = 0L
     private var firstUltraWideReadyTimestampNs = 0L
     private var recordingStartTimestampNs = 0L
-    private var firstMainOutputTimestampNs = 0L
-    private var firstUltraWideOutputTimestampNs = 0L
 
+    /**
+     * Marks the incoming camera as ready. Returns a PTS only for main-camera frames.
+     * The caller must use that returned PTS for BOTH the main and ultra-wide encoders.
+     */
     @Synchronized
     fun onFrameAvailable(isUltraWide: Boolean, timestampNs: Long): Long? {
         if (timestampNs <= 0L) return null
@@ -27,34 +29,24 @@ internal class SpecialVideoRecordingTimeline {
             if (firstUltraWideReadyTimestampNs == 0L) {
                 firstUltraWideReadyTimestampNs = timestampNs
             }
-        } else if (firstMainReadyTimestampNs == 0L) {
+            return null
+        }
+
+        if (firstMainReadyTimestampNs == 0L) {
             firstMainReadyTimestampNs = timestampNs
         }
 
-        if (
-            recordingStartTimestampNs == 0L &&
-            firstMainReadyTimestampNs > 0L &&
-            firstUltraWideReadyTimestampNs > 0L
-        ) {
-            recordingStartTimestampNs = maxOf(
-                firstMainReadyTimestampNs,
-                firstUltraWideReadyTimestampNs
-            )
+        if (firstMainReadyTimestampNs == 0L || firstUltraWideReadyTimestampNs == 0L) {
+            return null
         }
 
-        if (recordingStartTimestampNs == 0L) return null
-
-        return if (isUltraWide) {
-            if (firstUltraWideOutputTimestampNs == 0L) {
-                firstUltraWideOutputTimestampNs = timestampNs
-            }
-            (timestampNs - firstUltraWideOutputTimestampNs).coerceAtLeast(0L)
-        } else {
-            if (firstMainOutputTimestampNs == 0L) {
-                firstMainOutputTimestampNs = timestampNs
-            }
-            (timestampNs - firstMainOutputTimestampNs).coerceAtLeast(0L)
+        // Start on a MAIN frame, not on the ultra-wide callback that completes readiness.
+        // This makes the very first frame sent to both encoders exactly PTS 0.
+        if (recordingStartTimestampNs == 0L) {
+            recordingStartTimestampNs = timestampNs
         }
+
+        return (timestampNs - recordingStartTimestampNs).coerceAtLeast(0L)
     }
 
     @Synchronized
@@ -66,7 +58,5 @@ internal class SpecialVideoRecordingTimeline {
         firstMainReadyTimestampNs = 0L
         firstUltraWideReadyTimestampNs = 0L
         recordingStartTimestampNs = 0L
-        firstMainOutputTimestampNs = 0L
-        firstUltraWideOutputTimestampNs = 0L
     }
 }
