@@ -90,6 +90,8 @@ class Camera2Engine(private val context: Context) {
     private var activeRecordingSurface: Surface? = null
     private var activeVideoEisPlusPipeline: VideoEisPlusPipeline? = null
     private var activeVideoEisPlusSurface: Surface? = null
+    /** Physical sensor that produces the EIS+ YUV stream, independent of the active preview route. */
+    private var activeVideoEisPlusPhysicalCameraId: String? = null
     @Volatile private var videoEisPlusOisDisabledForSession: Boolean = false
     @Volatile private var videoEisPlusCaptureGeneration: Long = 0L
     private var videoRecordingFileDescriptor: ParcelFileDescriptor? = null
@@ -5198,7 +5200,8 @@ class Camera2Engine(private val context: Context) {
                 result = result,
                 request = request,
                 generation = videoEisPlusCaptureGeneration,
-                outputPhysicalCameraId = activeSessionPhysicalCameraId
+                outputPhysicalCameraId = activeVideoEisPlusPhysicalCameraId
+                    ?: activeSessionPhysicalCameraId
             )
 
             // Verify the per-session OIS decision using CaptureResult. EIS+ stays alive when
@@ -7136,6 +7139,7 @@ class Camera2Engine(private val context: Context) {
         }
         activeVideoEisPlusPipeline = null
         activeVideoEisPlusSurface = null
+        activeVideoEisPlusPhysicalCameraId = null
         videoEisPlusOisDisabledForSession = false
         videoEisPlusCaptureGeneration += 1L
         try { pipeline?.stop() } catch (t: Throwable) {
@@ -7899,10 +7903,15 @@ class Camera2Engine(private val context: Context) {
                     if (started && eisPlusCandidate.surface?.isValid == true) {
                         activeVideoEisPlusPipeline = eisPlusCandidate
                         activeVideoEisPlusSurface = eisPlusCandidate.surface
+                        activeVideoEisPlusPhysicalCameraId = eisPlusPhysicalId
                         videoEisPlusCaptureGeneration += 1L
                         eisPlusStarted = true
                         _videoEisPlusStatus.value = "Active"
-                        EisPlusDiagnosticLog.event("CAMERA2", "PIPELINE_READY", "camera=$eisPlusCameraId outputYuv=${eisPlusYuvSize.width}x${eisPlusYuvSize.height}")
+                        EisPlusDiagnosticLog.event(
+                            "CAMERA2", "PIPELINE_READY",
+                            "camera=$eisPlusCameraId physicalCameraId=$eisPlusPhysicalId activeLens=${lens.lensType} " +
+                                "outputYuv=${eisPlusYuvSize.width}x${eisPlusYuvSize.height}"
+                        )
                         Log.i(
                             TAG,
                             "Photon EIS+ started: camera=$eisPlusCameraId yuv=${eisPlusYuvSize.width}x${eisPlusYuvSize.height} " +
