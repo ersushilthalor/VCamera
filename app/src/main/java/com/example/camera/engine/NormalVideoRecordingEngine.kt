@@ -502,7 +502,8 @@ class NormalVideoRecordingEngine(private val context: Context) {
                                     if (
                                         videoTrackIndex >= 0 &&
                                         (System.currentTimeMillis() - videoFormatStartTime > 350L) &&
-                                        !expectsMirroredAudioTrack
+                                        !expectsMirroredAudioTrack &&
+                                        !deferAudioStartUntilSpecialTimeline
                                     ) {
                                         checkAndStartMuxerLocked(forceWithoutAudio = true)
                                     }
