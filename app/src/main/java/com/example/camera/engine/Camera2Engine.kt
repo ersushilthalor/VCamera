@@ -5605,8 +5605,8 @@ class Camera2Engine(private val context: Context) {
     }
 
     /**
-     * Force vendor-specific OIS controls ON as well as the standard Android OIS key.
-     * Restrict this to vendor keys so Android noise-reduction keys are never modified.
+     * Mirror the requested OIS state to vendor-specific aliases as well as the standard Android
+     * key. Restrict this to vendor keys so Android noise-reduction keys are never modified.
      */
     private fun applyVendorOisControls(
         builder: CaptureRequest.Builder,
@@ -8268,6 +8268,11 @@ class Camera2Engine(private val context: Context) {
 
                             override fun onConfigureFailed(session: CameraCaptureSession) {
                                 Log.w(TAG, "[RECORDING_SESSION] Video capture session configuration failed, trying safe standard fallback")
+                                if (activeVideoEisPlusPipeline != null) {
+                                    val reason = "Camera2 rejected the recording session with the MGC EIS+ YUV output"
+                                    _videoEisPlusStatus.value = "Unavailable: $reason"
+                                    Log.w(TAG, "Photon EIS+ fallback reason: $reason")
+                                }
                                 stopActiveVideoEisPlus()
                                 activeSessionPhysicalCameraId = null
                                 if (!isFallbackActive) {
