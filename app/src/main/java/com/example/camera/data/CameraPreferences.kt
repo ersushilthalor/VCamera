@@ -296,6 +296,10 @@ class CameraPreferences(context: Context) {
         get() = prefs.getInt(KEY_VIDEO_HEIGHT, 2160)
         set(value) = prefs.edit().putInt(KEY_VIDEO_HEIGHT, value).apply()
 
+    /** True only after the user or app explicitly saved a video resolution. */
+    fun hasExplicitVideoResolution(): Boolean =
+        prefs.contains(KEY_VIDEO_WIDTH) || prefs.contains(KEY_VIDEO_HEIGHT)
+
     var videoFps: Int
         get() = prefs.getInt(KEY_VIDEO_FPS, 30)
         set(value) = prefs.edit().putInt(KEY_VIDEO_FPS, value).apply()

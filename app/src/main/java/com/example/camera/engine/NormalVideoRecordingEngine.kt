@@ -78,6 +78,8 @@ class NormalVideoRecordingEngine(private val context: Context) {
     private var audioSampleRate = 48_000
     private val audioCaptureStarted = AtomicBoolean(false)
     @Volatile private var deferAudioStartUntilSpecialTimeline = false
+    @Volatile private var expectsMirroredAudioTrack = false
+    @Volatile private var mirroredAudioTarget: NormalVideoRecordingEngine? = null
 
     // Pause tracking
     private var pauseStartNs = 0L
@@ -122,12 +124,14 @@ class NormalVideoRecordingEngine(private val context: Context) {
         sensorOrientation: Int = 90,
         deviceRotation: Int = 0,
         preserveInputPresentationTimestamps: Boolean = false,
-        deferAudioStartUntilSpecialTimeline: Boolean = false
+        deferAudioStartUntilSpecialTimeline: Boolean = false,
+        expectExternalAudioTrack: Boolean = false
     ): Surface {
         activeCodec = codec
         outputFile = destFile
         this.preserveInputPresentationTimestamps = preserveInputPresentationTimestamps
         this.deferAudioStartUntilSpecialTimeline = deferAudioStartUntilSpecialTimeline
+        this.expectsMirroredAudioTrack = expectExternalAudioTrack
         audioCaptureStarted.set(false)
 
         isRecording.set(true)
@@ -142,7 +146,7 @@ class NormalVideoRecordingEngine(private val context: Context) {
         videoTrackIndex = -1
         audioTrackIndex = -1
         isMuxerStarted = false
-        isAudioRequested = isAudioEnabled
+        isAudioRequested = isAudioEnabled || expectExternalAudioTrack
         videoFormatStartTime = System.currentTimeMillis()
 
         synchronized(muxerLock) {
@@ -495,7 +499,11 @@ class NormalVideoRecordingEngine(private val context: Context) {
                                     pendingVideoSamples.add(QueuedSample(copyBuf, infoCopy))
 
                                     // Timeout check: if audio is delayed by >350ms, start muxer with video-only
-                                    if (videoTrackIndex >= 0 && (System.currentTimeMillis() - videoFormatStartTime > 350L)) {
+                                    if (
+                                        videoTrackIndex >= 0 &&
+                                        (System.currentTimeMillis() - videoFormatStartTime > 350L) &&
+                                        !expectsMirroredAudioTrack
+                                    ) {
                                         checkAndStartMuxerLocked(forceWithoutAudio = true)
                                     }
                                 }
@@ -623,6 +631,69 @@ class NormalVideoRecordingEngine(private val context: Context) {
         }
     }
 
+    /** True when this recorder owns a prepared microphone/AAC pipeline. */
+    fun hasPreparedAudioPipeline(): Boolean =
+        isAudioRequested && audioRecord != null && audioCodec != null
+
+    /** Route this recorder's encoded AAC samples to a paired video-only recorder. */
+    fun setMirroredAudioTarget(target: NormalVideoRecordingEngine?) {
+        mirroredAudioTarget = target
+    }
+
+    /** Register the main recorder's AAC format on the paired MP4 muxer. */
+    fun registerMirroredAudioTrack(format: MediaFormat) {
+        synchronized(muxerLock) {
+            if ((!isRecording.get() && !isStopping.get()) || mediaMuxer == null || audioTrackIndex >= 0) {
+                return
+            }
+            try {
+                audioTrackIndex = mediaMuxer!!.addTrack(format)
+                expectsMirroredAudioTrack = false
+                Log.i(TAG, "Registered mirrored Special Video AAC track: $audioTrackIndex")
+                checkAndStartMuxerLocked()
+            } catch (t: Throwable) {
+                Log.e(TAG, "Could not register mirrored Special Video AAC track", t)
+            }
+        }
+    }
+
+    /** Copy a codec-owned AAC buffer before it is released by the source encoder. */
+    fun writeMirroredAudioSample(source: ByteBuffer, sourceInfo: MediaCodec.BufferInfo) {
+        if (sourceInfo.size <= 0 ||
+            (sourceInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+        ) return
+
+        val start = sourceInfo.offset.coerceAtLeast(0)
+        val end = start.toLong() + sourceInfo.size.toLong()
+        val sourceCopy = source.duplicate()
+        if (end > sourceCopy.limit().toLong()) {
+            Log.w(TAG, "Skipping mirrored AAC sample with invalid buffer range")
+            return
+        }
+
+        val copiedBuffer = ByteBuffer.allocateDirect(sourceInfo.size)
+        sourceCopy.position(start)
+        sourceCopy.limit(end.toInt())
+        copiedBuffer.put(sourceCopy)
+        copiedBuffer.flip()
+
+        val copiedInfo = MediaCodec.BufferInfo().apply {
+            set(0, sourceInfo.size, sourceInfo.presentationTimeUs, sourceInfo.flags)
+        }
+        synchronized(muxerLock) {
+            val muxer = mediaMuxer ?: return
+            if (audioTrackIndex < 0 || !isMuxerStarted) {
+                pendingAudioSamples.add(QueuedSample(copiedBuffer, copiedInfo))
+            } else {
+                try {
+                    muxer.writeSampleData(audioTrackIndex, copiedBuffer, copiedInfo)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Could not write mirrored AAC sample", t)
+                }
+            }
+        }
+    }
+
     private fun startAudioThreads(
         record: AudioRecord,
         encoder: MediaCodec,
@@ -705,6 +776,7 @@ class NormalVideoRecordingEngine(private val context: Context) {
                             }
                         }
                     }
+                    mirroredAudioTarget?.registerMirroredAudioTrack(newFormat)
                 } else if (outputBufferIndex >= 0) {
                     val encodedData = encoder.getOutputBuffer(outputBufferIndex)
                     if (encodedData != null) {
@@ -713,6 +785,7 @@ class NormalVideoRecordingEngine(private val context: Context) {
                         }
 
                         if (bufferInfo.size > 0) {
+                            mirroredAudioTarget?.writeMirroredAudioSample(encodedData, bufferInfo)
                             synchronized(muxerLock) {
                                 if (isMuxerStarted && mediaMuxer != null && audioTrackIndex >= 0) {
                                     try {

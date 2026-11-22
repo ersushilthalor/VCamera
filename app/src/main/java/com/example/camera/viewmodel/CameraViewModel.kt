@@ -525,6 +525,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setShowUltraWidePreview(enabled: Boolean) {
+        if (enabled && !preferences.hasExplicitVideoResolution()) {
+            selectVideoResolution(CameraResolution(1920, 1080))
+        }
         preferences.isShowUltraWidePreview = enabled
         _instantSwitchState.update { it.copy(isShowUltraWidePreview = enabled) }
         engine.setSpecialVideoPreviewEnabled(enabled)

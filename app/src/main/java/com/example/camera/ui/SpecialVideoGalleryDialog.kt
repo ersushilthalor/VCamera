@@ -275,7 +275,7 @@ private fun SpecialVideoPlayer(
             // Keep the outgoing decoder alive until the incoming decoder has completed
             // its seek and started. The outgoing player's live timestamp is the sync reference.
             val restorePlayback: (VideoView, GalleryVideoPlayerState) -> Unit = { videoView, viewState ->
-                val lastSafePosition = (videoView.duration - 250).coerceAtLeast(0)
+                val lastSafePosition = (videoView.duration - 50).coerceAtLeast(0)
                 val mediaPlayer = viewState.mediaPlayer
                 val outgoingVideoView = outgoingVideoViewState.value?.takeIf { it !== videoView }
                 val outgoingState = outgoingVideoView?.tag as? GalleryVideoPlayerState
@@ -320,36 +320,42 @@ private fun SpecialVideoPlayer(
                 if (mediaPlayer == null) {
                     finishHandoff(null)
                 } else {
-                    var correctionIssued = false
-                    mediaPlayer.setOnSeekCompleteListener { seekedPlayer ->
-                        val latestOutgoingPosition = if (
-                            outgoingVideoView != null &&
-                            outgoingState?.isPrepared == true
-                        ) {
-                            outgoingVideoView.currentPosition.coerceAtLeast(0)
-                                .coerceAtMost(lastSafePosition)
-                        } else {
-                            null
-                        }
+                    var outgoingFrozenPosition: Int? = null
+                    var correctionAttempts = 0
+
+                    fun finishWhenAligned(seekedPlayer: MediaPlayer) {
+                        val handoffTarget = (outgoingFrozenPosition ?: playbackPosition)
+                            .coerceAtMost(lastSafePosition)
                         val incomingPosition = seekedPlayer.currentPosition.coerceAtLeast(0)
 
-                        // Preparing and seeking can take 100–300 ms. Correct once if the
-                        // outgoing clip advanced by more than 40 ms during that interval.
-                        if (
-                            !correctionIssued &&
-                            latestOutgoingPosition != null &&
-                            abs(latestOutgoingPosition - incomingPosition) > 40
-                        ) {
-                            correctionIssued = true
+                        // Once the old decoder is paused, align the new decoder to that exact
+                        // frozen playhead. Retry within a frame-sized tolerance, not 40 ms.
+                        if (abs(handoffTarget - incomingPosition) > 20 && correctionAttempts < 3) {
+                            correctionAttempts++
                             seekedPlayer.setOnSeekCompleteListener { correctedPlayer ->
-                                correctedPlayer.setOnSeekCompleteListener(null)
-                                finishHandoff(correctedPlayer)
+                                finishWhenAligned(correctedPlayer)
                             }
-                            seekedPlayer.seekToClosest(latestOutgoingPosition)
+                            seekedPlayer.seekToClosest(handoffTarget)
                         } else {
                             seekedPlayer.setOnSeekCompleteListener(null)
                             finishHandoff(seekedPlayer)
                         }
+                    }
+
+                    mediaPlayer.setOnSeekCompleteListener { seekedPlayer ->
+                        if (outgoingFrozenPosition == null) {
+                            if (
+                                outgoingVideoView != null &&
+                                outgoingState?.isPrepared == true
+                            ) {
+                                outgoingVideoView.pause()
+                                outgoingFrozenPosition = outgoingVideoView.currentPosition
+                                    .coerceAtLeast(0)
+                            } else {
+                                outgoingFrozenPosition = playbackPosition.coerceAtLeast(0)
+                            }
+                        }
+                        finishWhenAligned(seekedPlayer)
                     }
                     mediaPlayer.seekToClosest(targetPosition)
                 }

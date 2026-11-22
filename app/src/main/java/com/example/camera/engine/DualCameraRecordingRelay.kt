@@ -656,11 +656,13 @@ class DualCameraRecordingRelay(
 
         val rawTimestampNs = st.timestamp.takeIf { it > 0L } ?: System.nanoTime()
         val isSpecialDualRecording = secondaryRecordingEnabled.get()
-        val recordingStartNs = if (isSpecialDualRecording) {
-            // Do not let the first camera start its MP4 timeline alone. The main and ultra-wide
-            // Camera2 streams can become active at different times; starting on whichever frame
-            // arrives first makes one saved clip longer and shifts gallery lens handoff playback.
+        val specialFramePtsNs = if (isSpecialDualRecording) {
             specialVideoRecordingTimeline.onFrameAvailable(isUltraWide, rawTimestampNs)
+        } else {
+            null
+        }
+        val recordingStartNs = if (isSpecialDualRecording) {
+            specialVideoRecordingTimeline.getRecordingStartTimestampNs()
         } else {
             if (recordingStartMonotonicNs <= 0L) {
                 recordingStartMonotonicNs = rawTimestampNs
@@ -672,13 +674,14 @@ class DualCameraRecordingRelay(
             }
             return
         }
+        if (isSpecialDualRecording && specialFramePtsNs == null) return
 
         if (recordingStartMonotonicNs != recordingStartNs) {
             recordingStartMonotonicNs = recordingStartNs
         }
-        // Frames captured before the slower camera became ready are pre-roll, not part of
-        // the synchronized clip. Drop them instead of clamping a negative PTS to zero.
-        if (rawTimestampNs < recordingStartNs) return
+        // Non-dual recording uses one shared raw timestamp origin. Special Video instead
+        // gives each lens its own zero-PTS first output frame after both streams are ready.
+        if (!isSpecialDualRecording && rawTimestampNs < recordingStartNs) return
 
         if (isSpecialDualRecording && hasLoggedSpecialVideoFrameWait.getAndSet(false)) {
             Log.i(TAG, "[SPECIAL_VIDEO] Both camera streams are ready; shared timeline started at $recordingStartNs ns")
@@ -695,7 +698,7 @@ class DualCameraRecordingRelay(
         // video track. It is rendered from the cached OES frame before the active-lens filter,
         // so it keeps recording even while the main encoder is using the 1x camera stream.
         if (isUltraWide && isSpecialDualRecording) {
-            renderUltraWideSecondaryFrame(rawTimestampNs, recordingStartNs)
+            renderUltraWideSecondaryFrame(specialFramePtsNs ?: 0L)
         }
 
         val expectedSource = if (isUltraWide) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
@@ -709,8 +712,12 @@ class DualCameraRecordingRelay(
 
             // Monotonic hardware-aligned presentation timestamp pacing
             val frameIntervalNs = 1_000_000_000L / fps.coerceAtLeast(1)
-            var candidatePtsNs = rawTimestampNs - recordingStartNs - totalPausedDurationNs
-            if (pendingClockSyncOnSwitch) {
+            var candidatePtsNs = if (isSpecialDualRecording) {
+                (specialFramePtsNs ?: 0L) - totalPausedDurationNs
+            } else {
+                rawTimestampNs - recordingStartNs - totalPausedDurationNs
+            }
+            if (!isSpecialDualRecording && pendingClockSyncOnSwitch) {
                 pendingClockSyncOnSwitch = false
                 if (lastOutputPtsNs > 0L) {
                     val expectedNext = lastOutputPtsNs + frameIntervalNs
@@ -720,7 +727,7 @@ class DualCameraRecordingRelay(
                     }
                 }
             }
-            candidatePtsNs += streamClockOffsetNs
+            if (!isSpecialDualRecording) candidatePtsNs += streamClockOffsetNs
             if (candidatePtsNs < 0L) candidatePtsNs = 0L
 
             if (lastOutputPtsNs >= 0L && candidatePtsNs <= lastOutputPtsNs) {
@@ -970,7 +977,7 @@ class DualCameraRecordingRelay(
      * Writes each ultra-wide OES frame to the independent Special Video encoder surface.
      * This is deliberately separate from the main encoder's active-source switching path.
      */
-    private fun renderUltraWideSecondaryFrame(rawTimestampNs: Long, recordingStartNs: Long) {
+    private fun renderUltraWideSecondaryFrame(framePresentationTimeNs: Long) {
         val display = eglDisplay ?: return
         val surface = eglSecondaryRecordSurface ?: return
         val context = eglContext ?: return
@@ -979,7 +986,7 @@ class DualCameraRecordingRelay(
             context == EGL14.EGL_NO_CONTEXT || primarySurface == EGL14.EGL_NO_SURFACE) return
 
         val frameIntervalNs = 1_000_000_000L / fps.coerceAtLeast(1)
-        var presentationTimeNs = rawTimestampNs - recordingStartNs - totalPausedDurationNs
+        var presentationTimeNs = framePresentationTimeNs - totalPausedDurationNs
         if (presentationTimeNs < 0L) presentationTimeNs = 0L
         if (lastUltraWideOutputPtsNs >= 0L && presentationTimeNs <= lastUltraWideOutputPtsNs) {
             presentationTimeNs = lastUltraWideOutputPtsNs + max(1_000_000L, frameIntervalNs / 4L)

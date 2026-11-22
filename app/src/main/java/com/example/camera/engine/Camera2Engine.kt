@@ -6670,6 +6670,7 @@ class Camera2Engine(private val context: Context) {
         if (specialVideoUltraWideTempFile != null) {
             try { specialVideoUltraWideRecorder.stopRecording() } catch (ignored: Throwable) {}
         }
+        normalVideoRecorder.setMirroredAudioTarget(null)
         try { specialVideoUltraWideTempFile?.delete() } catch (ignored: Throwable) {}
         specialVideoUltraWideTempFile = null
         specialVideoUltraWideSurface = null
@@ -6732,6 +6733,7 @@ class Camera2Engine(private val context: Context) {
         val specialVideoRecordingRequested = currentMode == CameraMode.VIDEO &&
             isSpecialVideoPreviewEnabled && lens.facing == CameraCharacteristics.LENS_FACING_BACK
         isSpecialVideoRecordingActive = specialVideoRecordingRequested
+        normalVideoRecorder.setMirroredAudioTarget(null)
         specialVideoUltraWideTempFile = null
         specialVideoUltraWideSurface = null
 
@@ -7110,6 +7112,8 @@ class Camera2Engine(private val context: Context) {
                 )
 
                 if (specialVideoRecordingRequested) {
+                    val mirrorAudioToUltraWide =
+                        isAudioEnabled && normalVideoRecorder.hasPreparedAudioPipeline()
                     val ultraWideLens = _availableLenses.value.firstOrNull {
                         it.facing == CameraCharacteristics.LENS_FACING_BACK && it.lensType == LensType.ULTRAWIDE
                     } ?: run {
@@ -7131,9 +7135,13 @@ class Camera2Engine(private val context: Context) {
                             isFront = false,
                             sensorOrientation = ultraWideSensorOrientation,
                             deviceRotation = currentRot,
-                            preserveInputPresentationTimestamps = true
+                            preserveInputPresentationTimestamps = true,
+                            expectExternalAudioTrack = mirrorAudioToUltraWide
                         )
                         specialVideoUltraWideTempFile = ultraWideTemp
+                        normalVideoRecorder.setMirroredAudioTarget(
+                            if (mirrorAudioToUltraWide) specialVideoUltraWideRecorder else null
+                        )
                         Log.i(TAG, "[SPECIAL_VIDEO] Independent ultra-wide encoder started")
                     } catch (t: Throwable) {
                         try { ultraWideTemp.delete() } catch (_: Throwable) {}
@@ -7907,15 +7915,6 @@ class Camera2Engine(private val context: Context) {
                     try { Thread.sleep(60L) } catch (_: InterruptedException) {}
                 }
 
-                val ultraWideRecordedFile: File? = if (specialUltraWideTempFile != null) {
-                    try {
-                        specialVideoUltraWideRecorder.stopRecording() ?: specialUltraWideTempFile
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Error stopping Special Video ultra-wide recorder", e)
-                        specialUltraWideTempFile
-                    }
-                } else null
-
                 val recordedFile: File? = when {
                     wasSoftwareCinema -> {
                         val f = try {
@@ -7945,6 +7944,17 @@ class Camera2Engine(private val context: Context) {
                         f ?: tempFile
                     }
                 }
+
+                // Drain and mirror every final AAC packet from 1x before closing the paired MP4.
+                normalVideoRecorder.setMirroredAudioTarget(null)
+                val ultraWideRecordedFile: File? = if (specialUltraWideTempFile != null) {
+                    try {
+                        specialVideoUltraWideRecorder.stopRecording() ?: specialUltraWideTempFile
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error stopping Special Video ultra-wide recorder", e)
+                        specialUltraWideTempFile
+                    }
+                } else null
 
                 finalizeAndSaveRecordedVideo(
                     rawRecordedFile = recordedFile,
