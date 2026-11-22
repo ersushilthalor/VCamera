@@ -6464,7 +6464,7 @@ class Camera2Engine(private val context: Context) {
             !lens.supportsPhysicalStream || lens.physicalCameraId == null
         ) return
         try {
-            val physicalId = lens.physicalCameraId
+            val physicalId = lens.physicalCameraId ?: return
             val physicalChars = getCharacteristics(physicalId) ?: return
             val physicalArray = physicalChars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
             builder.setPhysicalCameraKey(
