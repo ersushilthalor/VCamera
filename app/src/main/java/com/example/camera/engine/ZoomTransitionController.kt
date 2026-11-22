@@ -117,10 +117,9 @@ class ZoomTransitionController(
             isTelephotoPresetZoom(fromZoom) && isHalfXZoom(targetZoom)
 
         /**
-         * Calculates alpha progress from real incoming frames and the shared-FOV window.
-         * A pure 16-frame blend leaves differently cropped views visible as double edges.
-         * In either direction, fade faster once zoom moves away from the ~1x handoff FOV;
-         * incoming frames still gate every progress update, so we never fade to a stale stream.
+         * Calculates alpha progress from fixed elapsed time and the shared-FOV window.
+         * Real target frames gate the start of the fade; display vsync drives every later step.
+         * In either direction, fade faster once zoom moves away from the ~1x handoff FOV.
          */
         internal fun calculateFrameHandoffProgress(
             timeProgress: Float,
@@ -356,7 +355,7 @@ class ZoomTransitionController(
 
     /**
      * Keeps the outgoing live source visible while the target stream warms up, then blends
-     * when the target TextureView reports actual new buffers. Progress is frame-count based,
+     * when the target TextureView reports actual new buffers. Progress advances on display vsync after real target-frame warm-up,
      * rather than a timer that can fade to a camera which has not produced an image yet.
      *
      * The timeout is a fail-safe for devices that cannot produce a target frame callback.
@@ -655,9 +654,13 @@ class ZoomTransitionController(
                                 mainLensSelected = true
                             }
 
-                            _currentInterpolatedZoom.value = zoomValue
-                            onZoomUpdate(zoomValue)
-                            onApplyZoomToEngine(zoomValue, true)
+                            // The switch step already applied this exact value immediately before
+                            // selecting Main; do not dispatch the same 1.0x request twice.
+                            if (abs(zoomValue - effectiveSwitchZoom) >= 0.0001f) {
+                                _currentInterpolatedZoom.value = zoomValue
+                                onZoomUpdate(zoomValue)
+                                onApplyZoomToEngine(zoomValue, true)
+                            }
                         }
                     } else {
                         // Preserve the existing continuous curve for all other zoom transitions.

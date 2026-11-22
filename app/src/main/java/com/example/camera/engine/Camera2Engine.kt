@@ -891,9 +891,9 @@ class Camera2Engine(private val context: Context) {
                 applyHardwareEisRequest(builder, lensOverride = standbyLens)
             }
 
-            // Park the standby stream at the FOV-matched switch point while idle.
-            // During overlap, track the controller's current zoom so the old and new views do
-            // not diverge merely because the 16-frame crossfade outlasts the zoom animation.
+            // While idle, use the FOV-matched switch point. During overlap, calculate the
+            // standby crop from the controller's live handoffZoom so the old and new sources
+            // remain close in FOV throughout the fixed-duration display-vsync fade.
             val sensorRect = chars?.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: Rect(0, 0, 4000, 3000)
             val handoffState = zoomTransitionController.previewOverlapState.value
             val handoffZoom = if (handoffState.isOverlapping) {
@@ -2178,8 +2178,6 @@ class Camera2Engine(private val context: Context) {
                 }
                 return
             }
-            val map = getStreamConfigurationMap(cameraId)
-
             val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
             val hasManualSensor = caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
             val hasRaw = caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)
@@ -2330,7 +2328,10 @@ class Camera2Engine(private val context: Context) {
             lensSupportedVideoResolutions[cameraId] = filteredVideoResolutions
 
             if (_selectedPhotoResolution.value == null || !photoResolutions.contains(_selectedPhotoResolution.value)) {
-                _selectedPhotoResolution.value = photoResolutions.firstOrNull()
+                val nextPhotoResolution = photoResolutions.firstOrNull()
+                if (_selectedPhotoResolution.value != nextPhotoResolution) {
+                    _selectedPhotoResolution.value = nextPhotoResolution
+                }
             }
             val preservedVideoRes = userSelectedVideoResolution ?: _selectedVideoResolution.value
             if (preservedVideoRes != null) {
@@ -2349,7 +2350,9 @@ class Camera2Engine(private val context: Context) {
                         ?: filteredVideoResolutions.firstOrNull()
                 }
                 userSelectedVideoResolution = initialVideoRes
-                _selectedVideoResolution.value = initialVideoRes
+                if (_selectedVideoResolution.value != initialVideoRes) {
+                    _selectedVideoResolution.value = initialVideoRes
+                }
             }
 
             updatePreviewAspectRatio()
@@ -2412,7 +2415,7 @@ class Camera2Engine(private val context: Context) {
             ((userSelectedVideoResolution?.let { maxOf(it.width, it.height) >= 3840 } == true) ||
              (_selectedVideoResolution.value?.let { maxOf(it.width, it.height) >= 3840 } == true))
 
-        val map = getStreamConfigurationMap(id) ?: return fallbackDefault
+        if (getStreamConfigurationMap(id) == null) return fallbackDefault
         val previewSizes = getCachedOutputSizes(id, SurfaceTexture::class.java)
         if (previewSizes.isEmpty()) {
             return fallbackDefault
@@ -2879,6 +2882,7 @@ class Camera2Engine(private val context: Context) {
         var staleSwitch = false
         var didInstantSwap = false
         var needsSessionConfigure = false
+        val swapStartedNanos = System.nanoTime()
 
         Trace.beginSection("VCamera.prewarmedLensSwap")
         try {
@@ -2938,6 +2942,12 @@ class Camera2Engine(private val context: Context) {
                 }
             }
         } finally {
+            val swapElapsedMicros = (System.nanoTime() - swapStartedNanos) / 1_000L
+            Log.i(
+                TAG,
+                "[LENS_SWAP_TRACE] prewarmedSwap=" + swapElapsedMicros +
+                    "us thread=" + Thread.currentThread().name
+            )
             Trace.endSection()
         }
 
