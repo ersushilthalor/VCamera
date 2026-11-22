@@ -2,6 +2,7 @@ package com.example.camera.gallery
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -15,9 +16,8 @@ data class SpecialVideoClip(
 )
 
 /**
- * Stores the pairing between the two MediaStore videos created by Special Video.
- * The actual MP4 files remain normal videos in DCIM/Camera, so they are also visible
- * to other gallery applications.
+ * Pairs the public 1x MediaStore video with its VCamera-private ultra-wide companion.
+ * Only the main 1x video is published to system and third-party gallery applications.
  */
 class SpecialVideoGalleryRepository(context: Context) {
 
@@ -89,7 +89,7 @@ class SpecialVideoGalleryRepository(context: Context) {
             if (publicUri.scheme != "content") {
                 clip
             } else {
-                val directory = File(preferencesStorageRoot(), "special_video_companions")
+                val directory = File(appContext.filesDir, "special_video_companions")
                 if (!directory.exists() && !directory.mkdirs()) {
                     clip
                 } else {
@@ -114,14 +114,28 @@ class SpecialVideoGalleryRepository(context: Context) {
                             destination.delete()
                             clip
                         } else {
-                            try {
-                                // These URIs are the app's own legacy _ULTRAWIDE companion rows.
+                            // These URIs are the app's own legacy _ULTRAWIDE companion rows.
+                            // Keep the public URI if the old row still exists and cannot be deleted;
+                            // never orphan the in-app gallery by switching to a private copy alone.
+                            val deletedRows = try {
                                 appContext.contentResolver.delete(publicUri, null, null)
                             } catch (t: Throwable) {
                                 Log.w(TAG, "Could not remove legacy public companion $publicUri", t)
+                                0
                             }
-                            changed = true
-                            clip.copy(ultraWideUri = Uri.fromFile(destination))
+                            val oldRowStillReadable = try {
+                                appContext.contentResolver.openInputStream(publicUri)?.use { true } ?: false
+                            } catch (_: Throwable) {
+                                false
+                            }
+
+                            if (deletedRows > 0 || !oldRowStillReadable) {
+                                changed = true
+                                clip.copy(ultraWideUri = Uri.fromFile(destination))
+                            } else {
+                                try { destination.delete() } catch (_: Throwable) {}
+                                clip
+                            }
                         }
                     } catch (t: Throwable) {
                         Log.w(TAG, "Could not migrate legacy ultra-wide companion $publicUri", t)
@@ -133,8 +147,6 @@ class SpecialVideoGalleryRepository(context: Context) {
         }
         if (changed) persistClips(migrated)
     }
-
-    private fun preferencesStorageRoot(): File = File(appContext.filesDir, "")
 
     private fun deletePrivateCompanion(uri: Uri) {
         if (uri.scheme != "file") return
@@ -162,6 +174,7 @@ class SpecialVideoGalleryRepository(context: Context) {
     }
 
     companion object {
+        private const val TAG = "SpecialVideoGalleryRepo"
         private const val PREFERENCES_NAME = "special_video_gallery"
         private const val KEY_CLIPS = "paired_clips"
         private const val KEY_ID = "id"
