@@ -66,7 +66,6 @@ android {
     compose = true
     buildConfig = true
   }
-  testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true
@@ -78,7 +77,7 @@ android {
     }
   }
 }
- 
+
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
 // to match the convention used in Web projects.
 secrets {
@@ -87,9 +86,8 @@ secrets {
   ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
 }
 
-
 // Some unused dependencies are commented out below instead of being removed.
-// This makes it easy to add them back in the future if needed.
+// This makes it easy to add them back in in the future if needed.
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
@@ -134,11 +132,9 @@ dependencies {
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)
-  testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)
-  testImplementation(libs.robolectric)
   androidTestImplementation(platform(libs.androidx.compose.bom))
   androidTestImplementation(libs.androidx.compose.ui.test.junit4)
   androidTestImplementation(libs.androidx.espresso.core)
