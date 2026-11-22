@@ -1008,21 +1008,23 @@ class RealtimeStabilizationCoordinator(context: Context) {
                     "queuedBoundaries=${frameBoundaries.size}, metadata=${frameMetadata.size}, " +
                     "bufferedImages=${bufferedImages.size}, " +
                     "pendingGyro=${pendingGyroSamples.size}, " +
-                    "gyroLagMs=${timestampLagMs(currentBoundaryNs, lastProcessedGyroTimestampNs)}" +
-                    "(dead=$gyroDead), " +
-                    "opticalCorrectionLagMs=${timestampLagMs(currentBoundaryNs, lastOpticalCorrectionTimestampNs)}" +
+                    "gyroDeltaMs=${timestampDeltaMs(currentBoundaryNs, lastProcessedGyroTimestampNs)}" +
+                    "(sourceAhead=${lastProcessedGyroTimestampNs > currentBoundaryNs},dead=$gyroDead), " +
+                    "opticalDeltaMs=${timestampDeltaMs(currentBoundaryNs, lastOpticalCorrectionTimestampNs)}" +
                     "(dead=$opticalCorrectionDead,dynamic=$dynamicLensIntrinsicsSourceActive), " +
-                    "metadataLagMs=${timestampLagMs(currentBoundaryNs, latestMetadataTimestampNs)}" +
-                    "(dead=$metadataDead), attempts=$nativeFrameAttemptCount, " +
-                    "results=$resultSequence",
+                    "metadataDeltaMs=${timestampDeltaMs(currentBoundaryNs, latestMetadataTimestampNs)}" +
+                    "(sourceBehind=${latestMetadataTimestampNs < currentBoundaryNs},dead=$metadataDead), " +
+                    "attempts=$nativeFrameAttemptCount resultSequence=$resultSequence storedResults=${nativeResults.size}",
             )
             EisPlusDiagnosticLog.event(
                 "FEEDER", "HEALTH_SNAPSHOT",
-                "boundary=$boundaryCount tsNs=$currentBoundaryNs gyroDead=$gyroDead gyroLagMs=${timestampLagMs(currentBoundaryNs, lastProcessedGyroTimestampNs)} " +
-                    "pendingGyro=${pendingGyroSamples.size} opticalDead=$opticalCorrectionDead opticalLagMs=${timestampLagMs(currentBoundaryNs, lastOpticalCorrectionTimestampNs)} " +
-                    "opticalActive=$opticalCorrectionSourceActive metadataDead=$metadataDead metadataLagMs=${timestampLagMs(currentBoundaryNs, latestMetadataTimestampNs)} " +
-                    "queuedBoundaries=${frameBoundaries.size} metadata=${frameMetadata.size} bufferedImages=${bufferedImages.size} " +
-                    "nativeAttempts=$nativeFrameAttemptCount nativeResults=$resultSequence",
+                "boundary=$boundaryCount tsNs=$currentBoundaryNs gyroDead=$gyroDead gyroDeltaMs=${timestampDeltaMs(currentBoundaryNs, lastProcessedGyroTimestampNs)} " +
+                    "gyroSourceAhead=${lastProcessedGyroTimestampNs > currentBoundaryNs} pendingGyro=${pendingGyroSamples.size} " +
+                    "opticalDead=$opticalCorrectionDead opticalDeltaMs=${timestampDeltaMs(currentBoundaryNs, lastOpticalCorrectionTimestampNs)} " +
+                    "opticalActive=$opticalCorrectionSourceActive metadataDead=$metadataDead metadataDeltaMs=${timestampDeltaMs(currentBoundaryNs, latestMetadataTimestampNs)} " +
+                    "metadataSourceBehind=${latestMetadataTimestampNs < currentBoundaryNs} queuedBoundaries=${frameBoundaries.size} " +
+                    "metadata=${frameMetadata.size} bufferedImages=${bufferedImages.size} nativeAttempts=$nativeFrameAttemptCount " +
+                    "resultSequence=$resultSequence storedResults=${nativeResults.size}/$MAX_RESULT_COUNT",
                 if (gyroDead || metadataDead) "WARN" else "INFO",
             )
         }
@@ -1104,12 +1106,41 @@ class RealtimeStabilizationCoordinator(context: Context) {
             lastLoggedGateBoundaryCount != boundaryCount
         ) {
             lastLoggedGateBoundaryCount = boundaryCount
-            Log.i(TAG, "MGC feeder waiting for $source to cross nextBoundary=$nextBoundaryNs")
-            EisPlusDiagnosticLog.event(
-                "FEEDER", "WAITING_FOR_SOURCE",
-                "source=$source nextBoundaryNs=$nextBoundaryNs gyroTs=$lastProcessedGyroTimestampNs metadataTs=$latestMetadataTimestampNs opticalTs=$lastOpticalCorrectionTimestampNs",
-                "WARN",
-            )
+            val sourceTimestampNs = when (source) {
+                "gyro" -> lastProcessedGyroTimestampNs
+                "metadata" -> latestMetadataTimestampNs
+                "opticalCorrection" -> lastOpticalCorrectionTimestampNs
+                else -> 0L
+            }
+            val sourceBehindNs = if (sourceTimestampNs > 0L) {
+                nextBoundaryNs - sourceTimestampNs
+            } else {
+                Long.MAX_VALUE
+            }
+            val expectedFrameDurationNs = frameMetadata.values.lastOrNull()
+                ?.frameDurationNs
+                ?.takeIf { it > 0L }
+                ?: 33_333_333L
+            // CaptureResult callbacks normally trail ImageReader delivery by about one frame.
+            // Do not report that expected look-ahead wait as a stabilization warning.
+            val expectedMetadataLookaheadWait = source == "metadata" &&
+                sourceBehindNs > 0L &&
+                sourceBehindNs <= expectedFrameDurationNs * 2L
+            val severity = if (expectedMetadataLookaheadWait) "INFO" else "WARN"
+            val eventName = if (expectedMetadataLookaheadWait) {
+                "WAITING_FOR_NEXT_FRAME_METADATA"
+            } else {
+                "WAITING_FOR_SOURCE"
+            }
+            val detail = "source=$source nextBoundaryNs=$nextBoundaryNs sourceTs=$sourceTimestampNs " +
+                "sourceBehindMs=${if (sourceTimestampNs > 0L) sourceBehindNs / 1_000_000.0 else "unset"} " +
+                "expectedOneFrameMetadataWait=$expectedMetadataLookaheadWait"
+            if (severity == "INFO") {
+                Log.i(TAG, "MGC feeder waiting for next frame metadata: $detail")
+            } else {
+                Log.w(TAG, "MGC feeder waiting for $source: $detail")
+            }
+            EisPlusDiagnosticLog.event("FEEDER", eventName, detail, severity)
         }
     }
 
@@ -1122,8 +1153,18 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 if (result is MgcEisNativeEngine.FrameResult.Dropped) "WARN" else "INFO",
             )
         }
+        // Keep the result history strictly bounded. The previous implementation briefly
+        // reported 91 entries for a 90-entry ring because it logged before trimming.
+        val evictingOldest = nativeResults.size >= MAX_RESULT_COUNT
         nativeResults.addLast(SequencedNativeResult(resultSequence, result))
-        while (nativeResults.size > MAX_RESULT_COUNT) nativeResults.removeFirst()
+        if (evictingOldest) nativeResults.removeFirst()
+        if (evictingOldest && (resultSequence <= 3L || resultSequence % 30L == 0L)) {
+            EisPlusDiagnosticLog.event(
+                "NATIVE", "RESULT_HISTORY_ROLLOVER",
+                "sequence=$resultSequence oldestHistoryEntryEvicted=true storedResults=${nativeResults.size}/$MAX_RESULT_COUNT",
+                "INFO",
+            )
+        }
         activeSessions.values.forEach { callback ->
             try {
                 callback?.invoke()
@@ -1378,7 +1419,12 @@ internal fun remapMgcGyroForTest(
     }
 }
 
-private fun timestampLagMs(currentTimestampNs: Long, sourceTimestampNs: Long): String =
+/**
+ * Signed source-to-frame delta: positive means the source timestamp is behind the frame;
+ * negative means the source is ahead. Gyro samples commonly lead an ImageReader callback
+ * because sensor delivery is independent of the Camera2 capture-result callback queue.
+ */
+private fun timestampDeltaMs(currentTimestampNs: Long, sourceTimestampNs: Long): String =
     if (sourceTimestampNs <= 0L) {
         "unset"
     } else {
