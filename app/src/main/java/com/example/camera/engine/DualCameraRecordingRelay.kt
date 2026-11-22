@@ -1391,15 +1391,17 @@ class DualCameraRecordingRelay internal constructor(
             cropY = 1f
         }
 
-        // Texture coordinates are transformed in output space. A positive
-        // camera orientation uses the inverse sampling rotation so the sensor
-        // image appears upright in the destination surface.
-        val signedCropX = if (isFront) -cropX else cropX
+        // Map destination coordinates back into the sensor texture: inverse
+        // sensor rotation, then the optional horizontal selfie mirror in display
+        // space, with a centered fill crop. Mirroring only the first matrix
+        // column composes the mirror after rotation instead of mirroring the
+        // sensor X axis before rotation.
+        val displayMirror = if (isFront) -1f else 1f
         outMatrix.fill(0f)
-        outMatrix[0] = signedCropX * cosine
-        outMatrix[4] = -signedCropX * sine
+        outMatrix[0] = displayMirror * cropX * cosine
+        outMatrix[4] = -cropX * sine
         outMatrix[12] = 0.5f - 0.5f * outMatrix[0] - 0.5f * outMatrix[4]
-        outMatrix[1] = cropY * sine
+        outMatrix[1] = displayMirror * cropY * sine
         outMatrix[5] = cropY * cosine
         outMatrix[13] = 0.5f - 0.5f * outMatrix[1] - 0.5f * outMatrix[5]
         outMatrix[10] = 1f
