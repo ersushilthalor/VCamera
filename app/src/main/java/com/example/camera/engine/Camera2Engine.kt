@@ -5189,6 +5189,8 @@ class Camera2Engine(private val context: Context) {
             result: TotalCaptureResult
         ) {
             super.onCaptureCompleted(session, request, result)
+            // Never mix results from a retired preview/recording session into the active EIS+ timeline.
+            if (session !== captureSession) return
             lastCaptureResult = result
             CameraPerformanceMonitor.onPreviewFrame()
             activeVideoEisPlusPipeline?.submitCaptureResult(
