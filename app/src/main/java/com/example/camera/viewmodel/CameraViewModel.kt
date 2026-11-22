@@ -1671,11 +1671,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun openSystemGallery(context: Context) {
         _isSpecialVideoGalleryOpen.value = false
         val media = lastCapturedMedia.value
-        if (media != null) {
+        val latestSpecialVideo = _specialVideoClips.value.firstOrNull()
+        val uri = media?.uri ?: latestSpecialVideo?.mainUri
+        val isVideo = media?.isVideo ?: (latestSpecialVideo != null)
+        if (uri != null) {
             com.example.camera.gallery.GalleryLauncher.openMedia(
                 context = context,
-                uri = media.uri,
-                isVideo = media.isVideo,
+                uri = uri,
+                isVideo = isVideo,
                 preferredPackage = _preferredGalleryPackage.value
             )
         } else {
