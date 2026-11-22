@@ -471,23 +471,26 @@ private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit,
     }
 }
 
-private fun loadGalleryThumbnail(context: Context, item: MediaGalleryItem): Bitmap? = try {
-    if (item.isVideo && item.uri.scheme == "file") {
-        val retriever = MediaMetadataRetriever()
-        try {
-            retriever.setDataSource(item.uri.path ?: return null)
-            retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-        } finally { retriever.release() }
-    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        context.contentResolver.loadThumbnail(item.uri, Size(360, 360), null)
-    } else if (item.isVideo) {
-        val retriever = MediaMetadataRetriever()
-        try {
-            retriever.setDataSource(context, item.uri)
-            retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-        } finally { retriever.release() }
-    } else decodeGalleryImage(context, item.uri, 360)
-} catch (_: Exception) { null }
+private fun loadGalleryThumbnail(context: Context, item: MediaGalleryItem): Bitmap? {
+    return try {
+        if (item.isVideo && item.uri.scheme == "file") {
+            val filePath = item.uri.path ?: return null
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(filePath)
+                retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } finally { retriever.release() }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            context.contentResolver.loadThumbnail(item.uri, Size(360, 360), null)
+        } else if (item.isVideo) {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(context, item.uri)
+                retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } finally { retriever.release() }
+        } else decodeGalleryImage(context, item.uri, 360)
+    } catch (_: Exception) { null }
+}
 
 private fun decodeGalleryImage(context: Context, uri: Uri, maxDimension: Int): Bitmap? {
     val resolver = context.contentResolver
