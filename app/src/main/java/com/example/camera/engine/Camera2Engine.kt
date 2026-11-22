@@ -1537,7 +1537,12 @@ class Camera2Engine(private val context: Context) {
                         Log.w(TAG, "[KEEP_ULTRAWIDE_READY] Standby session with JPEG reader rejected; retrying with preview surface only")
                         try { ultraWideStandbyJpegReader?.close() } catch (_: Throwable) {}
                         ultraWideStandbyJpegReader = null
-                        configureStandbySessionOnDevice(camera, standbyLens, includeJpegReader = false)
+                        configureStandbySessionOnDevice(
+                            camera,
+                            standbyLens,
+                            includeJpegReader = false,
+                            allowEisPlus = allowEisPlus
+                        )
                         return
                     }
                     isPreparingUltraWideStandby.set(false)
@@ -1816,6 +1821,7 @@ class Camera2Engine(private val context: Context) {
         standbyConfiguredPreviewSize = null
         standbyConfiguredIsVideoMode = false
         standbyConfiguredForRecording = false
+        standbyPreviewEisPlusConfigured = false
         standbyRecordingSessionFailed = false
 
         if (ultraWideStandbySurface != null && ultraWideStandbySurface !== ultraWideViewfinderSurface) {
@@ -7624,8 +7630,10 @@ class Camera2Engine(private val context: Context) {
         val oldForCamera = videoEisPlusBindingsByCameraId.put(binding.sessionCameraId, binding)
         val oldForSource = videoEisPlusBindingsBySource.put(binding.source, binding)
         if (oldForCamera != null && oldForCamera !== binding) {
-            videoEisPlusBindingsBySource.remove(oldForCamera.source, oldForCamera)
-            relay.setEisPlusPipelineForSource(oldForCamera.source, null)
+            val oldSourceWasStillOwned = videoEisPlusBindingsBySource.remove(oldForCamera.source, oldForCamera)
+            if (oldSourceWasStillOwned) {
+                relay.setEisPlusPipelineForSource(oldForCamera.source, null)
+            }
             runCatching { oldForCamera.pipeline.stop() }
         }
         if (oldForSource != null && oldForSource !== binding &&
