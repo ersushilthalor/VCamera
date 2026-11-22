@@ -7070,8 +7070,14 @@ class Camera2Engine(private val context: Context) {
     /**
      * Safely releases failed recording resources, restores preview, and notifies error callback.
      */
-    private fun stopActiveVideoEisPlus() {
+    private fun stopActiveVideoEisPlus(closeCameraSession: Boolean = false) {
         val pipeline = activeVideoEisPlusPipeline
+        if (pipeline != null && closeCameraSession) {
+            try { captureSession?.stopRepeating() } catch (_: Throwable) {}
+            try { captureSession?.abortCaptures() } catch (_: Throwable) {}
+            try { captureSession?.close() } catch (_: Throwable) {}
+            captureSession = null
+        }
         activeVideoEisPlusPipeline = null
         activeVideoEisPlusSurface = null
         videoEisPlusCaptureGeneration += 1L
@@ -7081,7 +7087,7 @@ class Camera2Engine(private val context: Context) {
     }
 
     private fun cleanupFailedRecording(onError: (String) -> Unit, message: String) {
-        stopActiveVideoEisPlus()
+        stopActiveVideoEisPlus(closeCameraSession = true)
         isStartingRecording.set(false)
         isStoppingRecording.set(false)
         _isRecordingVideo.value = false
@@ -8286,7 +8292,7 @@ class Camera2Engine(private val context: Context) {
         isStoppingRecording.set(false)
         if (sessionRestoredForStop.compareAndSet(false, true)) {
             backgroundHandler?.post {
-                stopActiveVideoEisPlus()
+                stopActiveVideoEisPlus(closeCameraSession = true)
                 try {
                     val previewSurf = getActivePreviewSurface()
                     if (previewSurf != null && previewSurf.isValid && cameraDevice != null && captureSession != null) {
@@ -9783,6 +9789,7 @@ class Camera2Engine(private val context: Context) {
         pendingReconfigureSession = false
 
         closeCameraCaptureSession()
+        stopActiveVideoEisPlus()
         releaseUltraWideStandby()
         activeRecordingStreamConfig = null
         standbyConfiguredForRecording = false
