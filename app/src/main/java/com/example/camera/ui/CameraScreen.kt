@@ -552,9 +552,7 @@ fun CameraScreen(
             // Special Video owns the full viewfinder/recording surface. Never expose
             // either instant-switch mini window while Special Video is enabled,
             // including the recording-start transition and active recording.
-            showUltraWidePreview = !instantSwitchState.isShowUltraWidePreview &&
-                instantSwitchState.isShowUltraWidePreview &&
-                isUsingRearMainLens && cameraMode == CameraMode.CINEMA,
+            showUltraWidePreview = false,
             showFrontPreview = !instantSwitchState.isShowUltraWidePreview &&
                 instantSwitchState.isShowFrontCameraPreview && isUsingRearLens,
             ultraWideStatus = instantSwitchState.ultraWideStatus,
