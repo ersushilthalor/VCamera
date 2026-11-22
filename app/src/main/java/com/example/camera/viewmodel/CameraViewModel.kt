@@ -719,6 +719,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         engine.saveSelfieAsPreviewed = preferences.saveSelfieAsPreviewed
         engine.viewfinderResolution = preferences.viewfinderResolution
         engine.setMode(initialMode)
+        if (preferences.isShowUltraWidePreview && !preferences.hasExplicitVideoResolution()) {
+            preferences.videoWidth = 1920
+            preferences.videoHeight = 1080
+        }
         engine.restoreInitialVideoResolution(CameraResolution(preferences.videoWidth, preferences.videoHeight))
         engine.setCinemaConfig(preferences.getCinemaConfig())
         setHybridStabilizationConfig(preferences.hybridStabilizationConfig)
