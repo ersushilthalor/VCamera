@@ -59,6 +59,7 @@ fun QuickOptionsFloatingPanel(
     isAudioEnabled: Boolean,
     hasActiveVideoAdjustments: Boolean,
     isSpecialVideoEnabled: Boolean = false,
+    isEisPlusEnabled: Boolean = false,
     // Cinema properties
     cinemaConfig: CinemaConfig = CinemaConfig(),
     isEvOpen: Boolean = false,
@@ -75,6 +76,7 @@ fun QuickOptionsFloatingPanel(
     onAudioToggle: () -> Unit,
     onVideoAdjustmentsClick: () -> Unit,
     onSpecialVideoToggle: () -> Unit = {},
+    onEisPlusToggle: () -> Unit = {},
     onCinemaResolutionClick: () -> Unit = {},
     onCinemaAspectRatioClick: () -> Unit = {},
     onCinemaSettingsClick: () -> Unit = {},
@@ -234,6 +236,18 @@ fun QuickOptionsFloatingPanel(
                                     activeColor = accentColor,
                                     onClick = onSpecialVideoToggle,
                                     testTag = "panel_special_video_button",
+                                    compact = isCompactVideoPanel,
+                                    modifier = Modifier.weight(1f)
+                                )
+
+                                QuickOptionCircleButton(
+                                    icon = Icons.Outlined.Straighten,
+                                    label = "EIS+",
+                                    statusText = if (isEisPlusEnabled) "ON" else "OFF",
+                                    isActive = isEisPlusEnabled,
+                                    activeColor = accentColor,
+                                    onClick = onEisPlusToggle,
+                                    testTag = "panel_eis_plus_button",
                                     compact = isCompactVideoPanel,
                                     modifier = Modifier.weight(1f)
                                 )

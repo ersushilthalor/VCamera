@@ -44,7 +44,7 @@ import kotlin.math.min
  *   with a strictly monotonic presentation timestamp timeline.
  */
 class DualCameraRecordingRelay internal constructor(
-    private val encoderTargetSurface: Surface,
+    private val encoderTargetSurface: Surface?,
     private val bufferWidth: Int,
     private val bufferHeight: Int,
     private val fps: Int,
@@ -144,6 +144,8 @@ class DualCameraRecordingRelay internal constructor(
     private var eglDisplay: EGLDisplay? = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext? = EGL14.EGL_NO_CONTEXT
     private var eglSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
+    /** Tiny pbuffer keeps GLES resources compilable in the preview-only (no encoder) state. */
+    private var eglScratchSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
     private var eglPreviewSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
     private var eglConfig: EGLConfig? = null
     private var eglSecondaryRecordSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
@@ -212,12 +214,18 @@ class DualCameraRecordingRelay internal constructor(
                     )
                     val context = eglContext
                     val encoder = eglSurface
+                    val restoreSurface = if (encoder != null && encoder != EGL14.EGL_NO_SURFACE) {
+                        encoder
+                    } else {
+                        eglScratchSurface
+                    }
                     val previewCurrent = created != null && created != EGL14.EGL_NO_SURFACE &&
                         context != null && context != EGL14.EGL_NO_CONTEXT &&
                         EGL14.eglMakeCurrent(display, created, created, context)
+                    // Preview-only relays restore the pbuffer rather than relying on EGL_KHR_surfaceless_context.
                     val encoderRestored = context != null && context != EGL14.EGL_NO_CONTEXT &&
-                        encoder != null && encoder != EGL14.EGL_NO_SURFACE &&
-                        EGL14.eglMakeCurrent(display, encoder, encoder, context)
+                        restoreSurface != null && restoreSurface != EGL14.EGL_NO_SURFACE &&
+                        EGL14.eglMakeCurrent(display, restoreSurface, restoreSurface, context)
                     if (previewCurrent && encoderRestored) {
                         eglPreviewSurface = created
                         attached = true
@@ -351,9 +359,11 @@ class DualCameraRecordingRelay internal constructor(
 
     val mainRecorderSurface: Surface
         get() = internalMainSurface ?: encoderTargetSurface
+            ?: throw IllegalStateException("Main relay input surface is unavailable")
 
     val ultraWideRecorderSurface: Surface
         get() = internalUltraWideSurface ?: encoderTargetSurface
+            ?: throw IllegalStateException("Ultra-wide relay input surface is unavailable")
 
     init {
         prepare()
@@ -504,9 +514,11 @@ class DualCameraRecordingRelay internal constructor(
     fun getRecorderSurfaceForLens(lens: LensInfo?): Surface {
         val isUw = lens?.lensType == LensType.ULTRAWIDE
         return if (isUw) {
-            internalUltraWideSurface ?: encoderTargetSurface
+            internalUltraWideSurface ?: internalMainSurface ?: encoderTargetSurface
+                ?: throw IllegalStateException("Ultra-wide relay input surface is unavailable")
         } else {
             internalMainSurface ?: encoderTargetSurface
+                ?: throw IllegalStateException("Main relay input surface is unavailable")
         }
     }
 
@@ -614,11 +626,29 @@ class DualCameraRecordingRelay internal constructor(
         eglContext = context
 
         val surfaceAttribs = intArrayOf(EGL14.EGL_NONE)
-        val surface = EGL14.eglCreateWindowSurface(display, chosenConfig, encoderTargetSurface, surfaceAttribs, 0)
-        if (surface == null || surface == EGL14.EGL_NO_SURFACE) {
-            throw IllegalStateException("eglCreateWindowSurface failed")
+        val encoderTarget = encoderTargetSurface
+        if (encoderTarget != null && encoderTarget.isValid) {
+            val surface = EGL14.eglCreateWindowSurface(display, chosenConfig, encoderTarget, surfaceAttribs, 0)
+            if (surface == null || surface == EGL14.EGL_NO_SURFACE) {
+                throw IllegalStateException("eglCreateWindowSurface failed")
+            }
+            eglSurface = surface
+        } else {
+            // A preview-only EIS+ relay owns a GLES context and input SurfaceTextures but
+            // intentionally has no encoder output until recording starts. Keep a pbuffer
+            // current so shader compilation does not depend on EGL_KHR_surfaceless_context.
+            val pbuffer = EGL14.eglCreatePbufferSurface(
+                display,
+                chosenConfig,
+                intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE),
+                0
+            )
+            if (pbuffer == null || pbuffer == EGL14.EGL_NO_SURFACE) {
+                throw IllegalStateException("eglCreatePbufferSurface failed for preview-only EIS+")
+            }
+            eglScratchSurface = pbuffer
+            eglSurface = EGL14.EGL_NO_SURFACE
         }
-        eglSurface = surface
 
         if (secondaryEncoderTargetSurface != null && secondaryEncoderTargetSurface.isValid) {
             val secondarySurface = EGL14.eglCreateWindowSurface(display, chosenConfig, secondaryEncoderTargetSurface, surfaceAttribs, 0)
@@ -628,7 +658,14 @@ class DualCameraRecordingRelay internal constructor(
             eglSecondaryRecordSurface = secondarySurface
         }
 
-        if (!EGL14.eglMakeCurrent(display, surface, surface, context)) {
+        val initialSurface = if (eglSurface != null && eglSurface != EGL14.EGL_NO_SURFACE) {
+            eglSurface
+        } else {
+            eglScratchSurface
+        }
+        val initialSurfaceReady = initialSurface != null && initialSurface != EGL14.EGL_NO_SURFACE &&
+            EGL14.eglMakeCurrent(display, initialSurface, initialSurface, context)
+        if (!initialSurfaceReady) {
             throw IllegalStateException("eglMakeCurrent failed")
         }
 
@@ -884,7 +921,7 @@ class DualCameraRecordingRelay internal constructor(
             return
         }
 
-        if (!encoderTargetSurface.isValid) return
+        if (encoderTargetSurface?.isValid != true) return
 
         try {
 
@@ -1162,9 +1199,12 @@ class DualCameraRecordingRelay internal constructor(
         val pipeline = eisPlusPipeline ?: return
         val display = eglDisplay ?: return
         val context = eglContext ?: return
-        val encoderSurface = eglSurface ?: return
+        val encoderSurface = eglSurface
+        val previewSurface = eglPreviewSurface
         if (!pipeline.isRunning || isReleased.get() || display == EGL14.EGL_NO_DISPLAY ||
-            context == EGL14.EGL_NO_CONTEXT || encoderSurface == EGL14.EGL_NO_SURFACE
+            context == EGL14.EGL_NO_CONTEXT ||
+            ((encoderSurface == null || encoderSurface == EGL14.EGL_NO_SURFACE) &&
+                (previewSurface == null || previewSurface == EGL14.EGL_NO_SURFACE))
         ) return
 
         while (true) {
@@ -1206,9 +1246,13 @@ class DualCameraRecordingRelay internal constructor(
                 presentationNs = lastOutputPtsNs + 1_000_000L.coerceAtLeast(frameIntervalNs / 4)
             }
 
-            val encoded = renderEisPlusOutput(
-                display, context, encoderSurface, frame, presentationNs, bufferWidth, bufferHeight
-            )
+            val encoded = if (encoderSurface != null && encoderSurface != EGL14.EGL_NO_SURFACE) {
+                renderEisPlusOutput(
+                    display, context, encoderSurface, frame, presentationNs, bufferWidth, bufferHeight
+                )
+            } else {
+                true
+            }
             if (!encoded) {
                 eisPlusRenderFailureCount += 1L
                 if (eisPlusRenderFailureCount <= 3L || eisPlusRenderFailureCount % 30L == 0L) {
@@ -1730,6 +1774,11 @@ class DualCameraRecordingRelay internal constructor(
                         if (secondarySurface != null && secondarySurface != EGL14.EGL_NO_SURFACE) {
                             try { EGL14.eglDestroySurface(display, secondarySurface) } catch (_: Throwable) {}
                             eglSecondaryRecordSurface = EGL14.EGL_NO_SURFACE
+                        }
+                        val scratchSurface = eglScratchSurface
+                        if (scratchSurface != null && scratchSurface != EGL14.EGL_NO_SURFACE) {
+                            try { EGL14.eglDestroySurface(display, scratchSurface) } catch (_: Throwable) {}
+                            eglScratchSurface = EGL14.EGL_NO_SURFACE
                         }
                         val prevSurface = eglPreviewSurface
                         if (prevSurface != null && prevSurface != EGL14.EGL_NO_SURFACE) {

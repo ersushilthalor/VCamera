@@ -1630,8 +1630,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setVideoEisPlusEnabled(enabled: Boolean) {
         _videoEisPlusEnabled.value = enabled
-        preferences.videoEisPlusEnabled = enabled
-        showToast(if (enabled) "Photon EIS+ enabled for supported SDR video" else "Photon EIS+ disabled")
+        engine.setVideoEisPlusEnabled(enabled)
+        showToast(if (enabled) "Photon EIS+ enabled for live Video preview" else "Photon EIS+ disabled")
     }
 
     fun setVideoEisPlusStrength(strength: Float) {

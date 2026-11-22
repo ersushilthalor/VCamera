@@ -336,7 +336,7 @@ class CameraPreferences(context: Context) {
 
     // Separate software MGC EIS+ settings; legacy Camera2 EIS remains hard-OFF.
     var videoEisPlusEnabled: Boolean
-        get() = prefs.getBoolean(KEY_VIDEO_EIS_PLUS_ENABLED, false)
+        get() = prefs.getBoolean(KEY_VIDEO_EIS_PLUS_ENABLED, true)
         set(value) = prefs.edit().putBoolean(KEY_VIDEO_EIS_PLUS_ENABLED, value).apply()
 
     var videoEisPlusStrength: Float
