@@ -11,6 +11,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.camera.data.CameraPreferences
+import com.example.camera.gallery.SpecialVideoClip
+import com.example.camera.gallery.SpecialVideoGalleryRepository
 import com.example.camera.engine.Camera2Engine
 import com.example.camera.engine.CameraOpticalCalibration
 import com.example.camera.model.*
@@ -43,6 +45,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     internal val preferences = CameraPreferences(application.applicationContext)
 
     val lastCapturedMedia: StateFlow<CapturedMedia?> = engine.lastCapturedMedia
+    private val specialVideoGalleryRepository = SpecialVideoGalleryRepository(application.applicationContext)
+    private val _specialVideoClips = MutableStateFlow(specialVideoGalleryRepository.getClips())
+    val specialVideoClips: StateFlow<List<SpecialVideoClip>> = _specialVideoClips.asStateFlow()
+    private val _isSpecialVideoGalleryOpen = MutableStateFlow(false)
+    val isSpecialVideoGalleryOpen: StateFlow<Boolean> = _isSpecialVideoGalleryOpen.asStateFlow()
 
     // Mode & Base State must be initialized before combined flows
     private val _cameraMode = MutableStateFlow(preferences.cameraMode)
@@ -1653,6 +1660,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openGallery(context: Context) {
+        _specialVideoClips.value = specialVideoGalleryRepository.getClips()
+        _isSpecialVideoGalleryOpen.value = true
+    }
+
+    fun closeSpecialVideoGallery() {
+        _isSpecialVideoGalleryOpen.value = false
+    }
+
+    fun openSystemGallery(context: Context) {
+        _isSpecialVideoGalleryOpen.value = false
         val media = lastCapturedMedia.value
         if (media != null) {
             com.example.camera.gallery.GalleryLauncher.openMedia(
@@ -1662,7 +1679,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 preferredPackage = _preferredGalleryPackage.value
             )
         } else {
-            showToast("No recent photos yet")
+            showToast("No recent media available")
         }
     }
 
