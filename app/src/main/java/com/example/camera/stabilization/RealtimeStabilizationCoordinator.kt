@@ -27,7 +27,7 @@ const val STABILIZATION_LOOKAHEAD_FRAME_COUNT = MgcEisNativeEngine.LOOKAHEAD_FRA
 // method-4 look-ahead pose blend; the outer full-grid feasibility correction is independent.
 const val DEFAULT_VIDEO_STABILIZATION_STRENGTH = 1f
 const val DEFAULT_VIDEO_STABILIZATION_LOOKAHEAD = 7
-const val MIN_VIDEO_STABILIZATION_LOOKAHEAD = 0
+const val MIN_VIDEO_STABILIZATION_LOOKAHEAD = 3
 const val MAX_VIDEO_STABILIZATION_LOOKAHEAD = 10
 
 fun normalizeStabilizationStrength(strength: Float): Float =
@@ -261,13 +261,30 @@ class RealtimeStabilizationCoordinator(context: Context) {
     val isGyroscopeAvailable: Boolean
         get() = gyroSensor != null
 
-    /**
-     * Keep legacy OIS telemetry enabled as a runtime probe even when static metadata claims that
-     * OIS is unavailable. Some HALs ignore an OFF request while omitting OIS from the mode list;
-     * without this probe EIS+ would discard the only correction stream it could potentially fuse.
-     */
+    /** Request legacy OIS samples only when the HAL advertises that result stream. */
     val shouldRequestOisSamples: Boolean
-        get() = calibration?.supportsLensIntrinsicsSamples != true
+        get() = calibration?.let {
+            it.supportsOisSamples && !it.supportsLensIntrinsicsSamples
+        } == true
+
+    /** True when the active camera advertises at least one optical-correction telemetry source. */
+    val supportsOpticalTelemetry: Boolean
+        get() = calibration?.let {
+            it.supportsOisSamples || it.supportsLensIntrinsicsSamples
+        } == true
+
+    /**
+     * Once the five-result probe has elapsed, let Camera2Engine turn OIS off if the HAL advertised
+     * telemetry but never supplied a single usable optical correction. Missing telemetry alone
+     * is not a HAL stabilization conflict and must never stop MGC EIS+.
+     */
+    val shouldDisableOisForMissingTelemetry: Boolean
+        get() = synchronized(lock) {
+            supportsOpticalTelemetry &&
+                activeSessionCount > 0 &&
+                captureResultCount >= HAL_OPTICAL_CORRECTION_PROBE_FRAME_COUNT &&
+                !opticalCorrectionSourceActive
+        }
 
     /** True after this acquisition has received its first monotonic calibrated gyro sample. */
     val isPoseSourceReady: Boolean
@@ -303,18 +320,32 @@ class RealtimeStabilizationCoordinator(context: Context) {
     fun isCameraSupported(
         characteristics: CameraCharacteristics,
         timingCharacteristics: CameraCharacteristics = characteristics,
-    ): Boolean {
+    ): Boolean = cameraSupportFailureReason(characteristics, timingCharacteristics) == null
+
+    /** Returns the first concrete Camera2/gyro eligibility failure for settings and logcat. */
+    fun cameraSupportFailureReason(
+        characteristics: CameraCharacteristics,
+        timingCharacteristics: CameraCharacteristics = characteristics,
+    ): String? {
+        if (!isGyroscopeAvailable) return "gyroscope sensor unavailable"
         val lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING)
             ?: timingCharacteristics.get(CameraCharacteristics.LENS_FACING)
+        if (lensFacing != CameraCharacteristics.LENS_FACING_BACK &&
+            lensFacing != CameraCharacteristics.LENS_FACING_FRONT
+        ) return "unsupported or missing lens-facing metadata"
+        if (characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) == null) {
+            return "active sensor array metadata unavailable"
+        }
+        if (characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) == null) {
+            return "physical sensor size metadata unavailable"
+        }
         val timestampSource = timingCharacteristics.get(
             CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE,
         ) ?: CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN
-        val activeArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
-        val physicalSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
-        return isGyroscopeAvailable && activeArray != null && physicalSize != null &&
-            (lensFacing == CameraCharacteristics.LENS_FACING_BACK ||
-                lensFacing == CameraCharacteristics.LENS_FACING_FRONT) &&
-            timestampSource == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+        if (timestampSource != CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME) {
+            return "sensor timestamp source is not REALTIME (value=$timestampSource)"
+        }
+        return null
     }
 
     private val sensorListener = object : SensorEventListener {
@@ -548,6 +579,17 @@ class RealtimeStabilizationCoordinator(context: Context) {
             }
             val opticalCorrectionAccepted = acceptedOpticalCorrectionSamples >=
                 MIN_OPTICAL_CORRECTION_SAMPLES_PER_FRAME
+            if (acceptedOpticalCorrectionSamples > 0 &&
+                (captureResultCount <= 5L || captureResultCount % 30L == 0L)
+            ) {
+                Log.i(
+                    TAG,
+                    "MGC accepted optical telemetry: source=" +
+                        (if (currentCalibration.supportsLensIntrinsicsSamples) "lens-intrinsics" else "OIS-samples") +
+                        ", accepted=$acceptedOpticalCorrectionSamples, frame=$captureResultCount, " +
+                        "camera=$stabilizationCameraId",
+                )
+            }
             if (activeSessionCount > 0 &&
                 (captureResultCount <= 3L || captureResultCount % 30L == 0L)
             ) {
@@ -575,10 +617,8 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 )
             }
             if (detectHalStabilizationConflictLocked(
+                    requestedVideoMode = requestedVideoStabilization,
                     actualVideoMode = actualVideoStabilization,
-                    requestedOpticalMode = requestedOpticalStabilization,
-                    actualOpticalMode = actualOpticalStabilization,
-                    opticalCorrectionAccepted = opticalCorrectionAccepted,
                 )
             ) {
                 disableEnhancedStabilizationLocked(
@@ -666,7 +706,18 @@ class RealtimeStabilizationCoordinator(context: Context) {
         strength: Float,
         lookaheadFrames: Int,
     ): Long? = synchronized(lock) {
-        if (!isCurrentCameraSupported) return null
+        if (!isCurrentCameraSupported) {
+            val reason = when {
+                halStabilizationConflictDetected -> "HAL video stabilization remained active after an OFF request"
+                !isGyroscopeAvailable -> "gyroscope sensor unavailable"
+                calibration == null -> "camera calibration unavailable"
+                calibration?.timestampSource != CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME ->
+                    "sensor timestamp source is not REALTIME"
+                else -> "camera/lens is unsupported"
+            }
+            Log.w(TAG, "MGC EIS+ start unavailable: $reason")
+            return null
+        }
         val normalizedLookahead = normalizeStabilizationLookahead(lookaheadFrames)
         val sameConfig = activeSessions.isNotEmpty() &&
             nativeFrameWidth == frameWidth &&
@@ -708,6 +759,11 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 lookaheadFrames = normalizedLookahead,
             )
         ) {
+            Log.e(
+                TAG,
+                "MGC EIS+ native start failed: size=${frameWidth}x${frameHeight}, " +
+                    "lookahead=$normalizedLookahead",
+            )
             return null
         }
 
@@ -739,7 +795,12 @@ class RealtimeStabilizationCoordinator(context: Context) {
         }
         activeSessions[sessionId] = onFrameAvailable
         activeSessionCount = activeSessions.size
-        Log.i(TAG, "MGC htd feeder started with gyro=${sensor.name}, session=$sessionId, active=$activeSessionCount")
+        Log.i(
+            TAG,
+            "MGC EIS+ started: size=${frameWidth}x${frameHeight}, strength=$strength, " +
+                "lookahead=$normalizedLookahead, gyro=${sensor.name}, " +
+                "timestampSource=${currentCalibration.timestampSource}, active=$activeSessionCount",
+        )
         resultSequence
     }
 
@@ -793,37 +854,29 @@ class RealtimeStabilizationCoordinator(context: Context) {
     }
 
     private fun detectHalStabilizationConflictLocked(
+        requestedVideoMode: Int?,
         actualVideoMode: Int?,
-        requestedOpticalMode: Int?,
-        actualOpticalMode: Int?,
-        opticalCorrectionAccepted: Boolean,
     ): Boolean {
         if (halStabilizationConflictDetected || activeSessionCount <= 0) {
             consecutiveHalStabilizationConflictCount = 0
             return false
         }
-        val videoConflict = actualVideoMode != null &&
-            actualVideoMode != CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
-        val opticalStabilizationActive = if (actualOpticalMode != null) {
-            actualOpticalMode != CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
-        } else {
-            requestedOpticalMode == CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
-        }
-        val opticalConflict = opticalStabilizationActive &&
-            !opticalCorrectionAccepted
-        if (!videoConflict && !opticalConflict) {
+
+        // MGC always requests Camera2 video stabilization OFF. Only a HAL that reports a
+        // non-OFF result for that OFF request is a true stabilization conflict. Missing OIS
+        // telemetry is handled by requesting OIS OFF for this recording, not by killing EIS+.
+        val videoConflict =
+            requestedVideoMode == CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF &&
+                actualVideoMode != null &&
+                actualVideoMode != CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+        if (!videoConflict) {
             consecutiveHalStabilizationConflictCount = 0
             return false
         }
+
         consecutiveHalStabilizationConflictCount += 1
-        val confirmationFrameCount = if (videoConflict) {
+        return consecutiveHalStabilizationConflictCount >=
             HAL_STABILIZATION_CONFLICT_CONFIRMATION_FRAME_COUNT
-        } else {
-            // Give a hidden/forced OIS implementation enough completed requests to start
-            // returning telemetry. Five frames remain below profile 7's first delayed output.
-            HAL_OPTICAL_CORRECTION_PROBE_FRAME_COUNT
-        }
-        return consecutiveHalStabilizationConflictCount >= confirmationFrameCount
     }
 
     private fun disableEnhancedStabilizationLocked(
@@ -836,8 +889,8 @@ class RealtimeStabilizationCoordinator(context: Context) {
         val frameReadyCallbacks = activeSessions.values.toList()
         Log.e(
             TAG,
-            "Disabling MGC EIS: Camera HAL stabilization conflicts with EIS+ for " +
-                "$consecutiveHalStabilizationConflictCount consecutive results " +
+            "Disabling MGC EIS+: HAL kept CONTROL_VIDEO_STABILIZATION_MODE non-OFF " +
+                "after an OFF request for $consecutiveHalStabilizationConflictCount consecutive results " +
                 "(videoRequested=$requestedVideoMode, videoActual=$actualVideoMode, " +
                 "opticalRequested=$requestedOpticalMode, opticalActual=$actualOpticalMode, " +
                 "opticalCorrectionActive=$opticalCorrectionSourceActive, " +
