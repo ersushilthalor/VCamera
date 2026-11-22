@@ -1247,7 +1247,8 @@ class DualCameraRecordingRelay internal constructor(
                     Log.e(TAG, "MGC EIS+ renderer is unavailable; dropping matched frame")
                     continue
                 }
-                val frame = renderer.render(pending) ?: run {
+                val frame = renderer.render(pending)
+                if (frame == null) {
                     eisPlusRenderFailureCount += 1L
                     if (eisPlusRenderFailureCount <= 3L || eisPlusRenderFailureCount % 30L == 0L) {
                         EisPlusDiagnosticLog.event(
