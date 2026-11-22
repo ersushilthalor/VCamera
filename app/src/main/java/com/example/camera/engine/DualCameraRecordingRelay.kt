@@ -181,7 +181,7 @@ class DualCameraRecordingRelay internal constructor(
             onAttached(false)
             return
         }
-        handler.post {
+        if (!handler.post {
             var attached = false
             try {
                 val display = eglDisplay
@@ -225,6 +225,8 @@ class DualCameraRecordingRelay internal constructor(
             } catch (t: Throwable) {
                 Log.w(TAG, "EGL preview attach callback failed: ${t.message}", t)
             }
+        }) {
+            onAttached(false)
         }
     }
 
