@@ -56,6 +56,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _isSpecialVideoGalleryOpen = MutableStateFlow(false)
     val isSpecialVideoGalleryOpen: StateFlow<Boolean> = _isSpecialVideoGalleryOpen.asStateFlow()
 
+    private val _isSpecialPhotoEnabled = MutableStateFlow(preferences.isSpecialPhotoCaptureEnabled)
+    val isSpecialPhotoEnabled: StateFlow<Boolean> = _isSpecialPhotoEnabled.asStateFlow()
+
     // Mode & Base State must be initialized before combined flows
     private val _cameraMode = MutableStateFlow(preferences.cameraMode)
     val cameraMode: StateFlow<CameraMode> = _cameraMode.asStateFlow()
@@ -532,6 +535,28 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _instantSwitchState.update { it.copy(isShowUltraWidePreview = enabled) }
         engine.setSpecialVideoPreviewEnabled(enabled)
         showToast(if (enabled) "Special Video: ON" else "Special Video: OFF")
+    }
+
+    fun setSpecialPhotoCaptureEnabled(enabled: Boolean) {
+        if (enabled) {
+            if (engine.selectedLens.value?.facing != CameraCharacteristics.LENS_FACING_BACK) {
+                showToast("Switch to the rear camera to use Special Photo")
+                return
+            }
+            val backLenses = engine.availableLenses.value.filter {
+                it.facing == CameraCharacteristics.LENS_FACING_BACK
+            }
+            val hasMain = backLenses.any { it.isPrimaryMain || it.lensType == LensType.WIDE }
+            val hasUltraWide = backLenses.any { it.lensType == LensType.ULTRAWIDE }
+            if (!hasMain || !hasUltraWide) {
+                showToast("Special Photo requires both rear 1× and ultra-wide cameras")
+                return
+            }
+        }
+        _isSpecialPhotoEnabled.value = enabled
+        preferences.isSpecialPhotoCaptureEnabled = enabled
+        engine.setSpecialPhotoCaptureEnabled(enabled)
+        showToast(if (enabled) "Special Photo ON · 1× + ultra-wide" else "Special Photo OFF")
     }
 
     fun setKeepFrontCameraReady(enabled: Boolean) {
@@ -1843,8 +1868,17 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun executePhotoCapture() {
         com.example.camera.sound.CameraSoundManager.playShutter()
-        engine.takePhoto { uri ->
-            showToast(if (uri != null) "Photo saved to DCIM/Camera" else "Failed to save photo")
+        if (_isSpecialPhotoEnabled.value) {
+            engine.takeSpecialPhoto { uri ->
+                showToast(
+                    if (uri != null) "Special Photo pair saved to DCIM/Camera"
+                    else "Special Photo unavailable. Check dual-camera support and try again."
+                )
+            }
+        } else {
+            engine.takePhoto { uri ->
+                showToast(if (uri != null) "Photo saved to DCIM/Camera" else "Failed to save photo")
+            }
         }
     }
 
