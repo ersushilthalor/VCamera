@@ -88,7 +88,9 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 internal const val GALLERY_LENS_SWITCH_DURATION_MS = 300
 
@@ -580,179 +582,255 @@ private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit,
     }
 }
 
+private const val SPECIAL_PHOTO_ULTRAWIDE_EQUIVALENT_FOCAL_MM = 16f
+private const val SPECIAL_PHOTO_MAIN_EQUIVALENT_FOCAL_MM = 23f
+
 /**
- * Keeps the complete 1× frame centred and uses the ultra-wide frame only for the
- * additional outer field of view. A short alpha feather softens the join.
+ * Normalizes both decoded JPEGs to the same 4:3 sensor aspect (3:4 in portrait).
+ * Some HALs expose only a 16:9 still output; this defensive crop prevents the expanded result
+ * from inheriting a 9:16 canvas if a device ignores the preferred still stream aspect.
+ */
+private fun cropSpecialPhotoToAspect(source: Bitmap, targetAspect: Float): Bitmap {
+    val sourceAspect = source.width.toFloat() / source.height.coerceAtLeast(1).toFloat()
+    if (abs(sourceAspect - targetAspect) < 0.002f) return source
+
+    return if (sourceAspect > targetAspect) {
+        val cropWidth = (source.height * targetAspect).roundToInt().coerceIn(1, source.width)
+        Bitmap.createBitmap(
+            source,
+            (source.width - cropWidth) / 2,
+            0,
+            cropWidth,
+            source.height
+        )
+    } else {
+        val cropHeight = (source.width / targetAspect).roundToInt().coerceIn(1, source.height)
+        Bitmap.createBitmap(
+            source,
+            0,
+            (source.height - cropHeight) / 2,
+            source.width,
+            cropHeight
+        )
+    }
+}
+
+/**
+ * Builds a luminance-gradient image. Gradients are less sensitive than RGB values to different
+ * exposure and white-balance responses from the two physical camera modules.
+ */
+private fun specialPhotoGradient(bitmap: Bitmap): FloatArray {
+    val width = bitmap.width
+    val height = bitmap.height
+    val pixels = IntArray(width * height)
+    bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+
+    val luminance = FloatArray(pixels.size)
+    for (index in pixels.indices) {
+        val pixel = pixels[index]
+        val red = (pixel shr 16) and 0xFF
+        val green = (pixel shr 8) and 0xFF
+        val blue = pixel and 0xFF
+        luminance[index] = ((red * 77 + green * 150 + blue * 29) shr 8).toFloat()
+    }
+
+    val gradient = FloatArray(pixels.size)
+    if (width < 3 || height < 3) return gradient
+    for (y in 1 until height - 1) {
+        for (x in 1 until width - 1) {
+            val index = y * width + x
+            val horizontal = abs(luminance[index + 1] - luminance[index - 1])
+            val vertical = abs(luminance[index + width] - luminance[index - width])
+            gradient[index] = horizontal + vertical
+        }
+    }
+    return gradient
+}
+
+/**
+ * Estimates the small global translation between the focal-ratio-scaled Main frame and the
+ * Ultra-Wide frame. It searches only near the optical centre and falls back to centred alignment
+ * when the shared overlap has too little matching detail.
+ */
+private fun estimateSpecialPhotoAlignment(
+    main: Bitmap,
+    ultraWide: Bitmap,
+    overlayWidth: Int,
+    overlayHeight: Int
+): Pair<Float, Float> {
+    var widePreview: Bitmap? = null
+    var mainPreview: Bitmap? = null
+    try {
+        val previewScale = minOf(1f, 360f / maxOf(ultraWide.width, ultraWide.height).toFloat())
+        val previewWidth = (ultraWide.width * previewScale).roundToInt().coerceAtLeast(3)
+        val previewHeight = (ultraWide.height * previewScale).roundToInt().coerceAtLeast(3)
+        val patchWidth = (overlayWidth * previewWidth.toFloat() / ultraWide.width).roundToInt().coerceAtLeast(3)
+        val patchHeight = (overlayHeight * previewHeight.toFloat() / ultraWide.height).roundToInt().coerceAtLeast(3)
+        if (patchWidth >= previewWidth || patchHeight >= previewHeight) return 0f to 0f
+
+        widePreview = if (previewWidth == ultraWide.width && previewHeight == ultraWide.height) {
+            ultraWide
+        } else {
+            Bitmap.createScaledBitmap(ultraWide, previewWidth, previewHeight, true)
+        }
+        mainPreview = Bitmap.createScaledBitmap(main, patchWidth, patchHeight, true)
+
+        val wideGradient = specialPhotoGradient(widePreview)
+        val mainGradient = specialPhotoGradient(mainPreview)
+        val baseLeft = (previewWidth - patchWidth) / 2
+        val baseTop = (previewHeight - patchHeight) / 2
+        val maxShiftX = minOf(
+            (previewWidth - patchWidth) / 2 - 2,
+            (previewWidth * 0.045f).roundToInt()
+        ).coerceAtLeast(0)
+        val maxShiftY = minOf(
+            (previewHeight - patchHeight) / 2 - 2,
+            (previewHeight * 0.045f).roundToInt()
+        ).coerceAtLeast(0)
+        val insetX = (patchWidth * 0.18f).roundToInt().coerceIn(1, patchWidth / 3)
+        val insetY = (patchHeight * 0.18f).roundToInt().coerceIn(1, patchHeight / 3)
+        val sampleStep = maxOf(2, minOf(patchWidth, patchHeight) / 100)
+
+        fun scoreOffset(dx: Int, dy: Int): Float {
+            var sumMain = 0.0
+            var sumWide = 0.0
+            var sumMainSquared = 0.0
+            var sumWideSquared = 0.0
+            var sumProduct = 0.0
+            var sampleCount = 0
+            for (y in insetY until patchHeight - insetY step sampleStep) {
+                val wideRow = (baseTop + dy + y) * previewWidth + baseLeft + dx
+                val mainRow = y * patchWidth
+                for (x in insetX until patchWidth - insetX step sampleStep) {
+                    val mainValue = mainGradient[mainRow + x].toDouble()
+                    val wideValue = wideGradient[wideRow + x].toDouble()
+                    sumMain += mainValue
+                    sumWide += wideValue
+                    sumMainSquared += mainValue * mainValue
+                    sumWideSquared += wideValue * wideValue
+                    sumProduct += mainValue * wideValue
+                    sampleCount++
+                }
+            }
+            if (sampleCount < 16) return -1f
+            val count = sampleCount.toDouble()
+            val covariance = sumProduct - (sumMain * sumWide / count)
+            val mainVariance = sumMainSquared - (sumMain * sumMain / count)
+            val wideVariance = sumWideSquared - (sumWide * sumWide / count)
+            if (mainVariance <= 1.0 || wideVariance <= 1.0) return -1f
+            return (covariance / sqrt(mainVariance * wideVariance)).toFloat()
+        }
+
+        var bestX = 0
+        var bestY = 0
+        var bestScore = scoreOffset(0, 0)
+        val coarseX = maxOf(1, maxShiftX / 5)
+        val coarseY = maxOf(1, maxShiftY / 5)
+        for (dy in -maxShiftY..maxShiftY step coarseY) {
+            for (dx in -maxShiftX..maxShiftX step coarseX) {
+                val score = scoreOffset(dx, dy)
+                if (score > bestScore) {
+                    bestScore = score
+                    bestX = dx
+                    bestY = dy
+                }
+            }
+        }
+
+        val refineMinX = (bestX - coarseX).coerceAtLeast(-maxShiftX)
+        val refineMaxX = (bestX + coarseX).coerceAtMost(maxShiftX)
+        val refineMinY = (bestY - coarseY).coerceAtLeast(-maxShiftY)
+        val refineMaxY = (bestY + coarseY).coerceAtMost(maxShiftY)
+        for (dy in refineMinY..refineMaxY) {
+            for (dx in refineMinX..refineMaxX) {
+                val score = scoreOffset(dx, dy)
+                if (score > bestScore) {
+                    bestScore = score
+                    bestX = dx
+                    bestY = dy
+                }
+            }
+        }
+
+        if (bestScore < 0.16f) return 0f to 0f
+        return Pair(
+            bestX * ultraWide.width.toFloat() / previewWidth,
+            bestY * ultraWide.height.toFloat() / previewHeight
+        )
+    } catch (_: Throwable) {
+        return 0f to 0f
+    } finally {
+        widePreview?.takeIf { it !== ultraWide && !it.isRecycled }?.recycle()
+        mainPreview?.takeIf { it !== main && !it.isRecycled }?.recycle()
+    }
+}
+
+/**
+ * The 23mm Main frame remains centred and the 16mm Ultra-Wide frame contributes the wider field.
+ * A 16/23 focal-length ratio determines the overlay size; image-gradient registration corrects
+ * small module offsets before a feathered seam blends the two views.
  */
 private fun mergeSpecialPhotoBitmaps(main: Bitmap, ultraWide: Bitmap): Bitmap {
-    val width = ultraWide.width.coerceAtLeast(1)
-    val height = ultraWide.height.coerceAtLeast(1)
-    val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    val outputCanvas = Canvas(output)
-    val filteringPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    outputCanvas.drawBitmap(
-        ultraWide,
-        null,
-        RectF(0f, 0f, width.toFloat(), height.toFloat()),
-        filteringPaint
-    )
+    val targetAspect = if (main.width <= main.height) 3f / 4f else 4f / 3f
+    val mainFrame = cropSpecialPhotoToAspect(main, targetAspect)
+    val ultraWideFrame = cropSpecialPhotoToAspect(ultraWide, targetAspect)
+    var fittedMain: Bitmap? = null
 
-    val centreWidth = width * 0.50f
-    val mainAspect = main.width.toFloat() / main.height.coerceAtLeast(1).toFloat()
-    val centreHeight = (centreWidth / mainAspect).coerceAtMost(height * 0.50f)
-    val left = (width - centreWidth) * 0.5f
-    val top = (height - centreHeight) * 0.5f
-    val right = left + centreWidth
-    val bottom = top + centreHeight
-
-    val centreOverlay = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    Canvas(centreOverlay).drawBitmap(main, null, RectF(left, top, right, bottom), filteringPaint)
-
-    val pixels = IntArray(width * height)
-    centreOverlay.getPixels(pixels, 0, width, 0, 0, width, height)
-    val featherX = (centreWidth * 0.045f).coerceAtLeast(1f)
-    val featherY = (centreHeight * 0.045f).coerceAtLeast(1f)
-    for (y in 0 until height) {
-        val yInside = minOf(y + 0.5f - top, bottom - (y + 0.5f))
-        for (x in 0 until width) {
-            val index = y * width + x
-            val pixel = pixels[index]
-            val existingAlpha = pixel ushr 24
-            if (existingAlpha == 0) continue
-            val xInside = minOf(x + 0.5f - left, right - (x + 0.5f))
-            val feather = minOf(
-                1f,
-                (xInside / featherX).coerceIn(0f, 1f),
-                (yInside / featherY).coerceIn(0f, 1f)
-            )
-            val alpha = (existingAlpha * feather).toInt().coerceIn(0, 255)
-            pixels[index] = (alpha shl 24) or (pixel and 0x00FFFFFF)
-        }
-    }
-    centreOverlay.setPixels(pixels, 0, width, 0, 0, width, height)
-    outputCanvas.drawBitmap(centreOverlay, 0f, 0f, null)
-    centreOverlay.recycle()
-    return output
-}
-
-private fun loadGalleryThumbnail(context: Context, item: MediaGalleryItem): Bitmap? {
-    return try {
-        if (item.isVideo && item.uri.scheme == "file") {
-            val filePath = item.uri.path ?: return null
-            val retriever = MediaMetadataRetriever()
-            try {
-                retriever.setDataSource(filePath)
-                retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-            } finally { retriever.release() }
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            context.contentResolver.loadThumbnail(item.uri, Size(360, 360), null)
-        } else if (item.isVideo) {
-            val retriever = MediaMetadataRetriever()
-            try {
-                retriever.setDataSource(context, item.uri)
-                retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-            } finally { retriever.release() }
-        } else decodeGalleryImage(context, item.uri, 360)
-    } catch (_: Exception) { null }
-}
-
-private const val GALLERY_PHOTO_DECODE_TAG = "GalleryPhotoDecoder"
-
-/**
- * Decodes MediaStore and file-backed photos at a bounded size. ImageDecoder is preferred on
- * Android 9+ because it supports newer still-image formats and applies EXIF orientation.
- * BitmapFactory plus a file-descriptor fallback keeps older Android versions supported.
- */
-private fun decodeGalleryImage(context: Context, uri: Uri, maxDimension: Int): Bitmap? {
-    val targetLimit = maxDimension.coerceAtLeast(1)
-    val resolver = context.contentResolver
-
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-        try {
-            val source = if (uri.scheme == "file") {
-                val path = uri.path ?: return null
-                ImageDecoder.createSource(File(path))
-            } else {
-                ImageDecoder.createSource(resolver, uri)
-            }
-            return ImageDecoder.decodeBitmap(source) { decoder, imageInfo, _ ->
-                val sourceWidth = imageInfo.size.width.coerceAtLeast(1)
-                val sourceHeight = imageInfo.size.height.coerceAtLeast(1)
-                val scale = minOf(
-                    1f,
-                    targetLimit.toFloat() / maxOf(sourceWidth, sourceHeight).toFloat()
-                )
-                decoder.setTargetSize(
-                    (sourceWidth * scale).roundToInt().coerceAtLeast(1),
-                    (sourceHeight * scale).roundToInt().coerceAtLeast(1)
-                )
-                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                decoder.isMutableRequired = false
-            }
-        } catch (e: Exception) {
-            Log.w(GALLERY_PHOTO_DECODE_TAG, "ImageDecoder could not decode $uri; trying BitmapFactory", e)
-        }
-    }
-
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    decodeGalleryImageWithBitmapFactory(context, uri, bounds)
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-        Log.e(
-            GALLERY_PHOTO_DECODE_TAG,
-            "Unsupported, empty, or inaccessible photo: uri=$uri, mime=${runCatching { resolver.getType(uri) }.getOrNull()}"
-        )
-        return null
-    }
-
-    var sampleSize = 1
-    while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > targetLimit) {
-        sampleSize *= 2
-    }
-    val options = BitmapFactory.Options().apply {
-        inSampleSize = sampleSize
-        inPreferredConfig = Bitmap.Config.ARGB_8888
-        inDither = false
-    }
-    return decodeGalleryImageWithBitmapFactory(context, uri, options).also { bitmap ->
-        if (bitmap == null) {
-            Log.e(
-                GALLERY_PHOTO_DECODE_TAG,
-                "BitmapFactory could not decode photo: uri=$uri, mime=${runCatching { resolver.getType(uri) }.getOrNull()}"
-            )
-        }
-    }
-}
-
-/** Uses a seekable descriptor when a provider does not supply a usable InputStream. */
-private fun decodeGalleryImageWithBitmapFactory(
-    context: Context,
-    uri: Uri,
-    options: BitmapFactory.Options
-): Bitmap? {
-    if (uri.scheme == "file") {
-        val path = uri.path ?: return null
-        return BitmapFactory.decodeFile(path, options)
-    }
-
-    val resolver = context.contentResolver
     try {
-        val bitmap = resolver.openInputStream(uri)?.use { input ->
-            BitmapFactory.decodeStream(input, null, options)
-        }
-        if (bitmap != null || (options.inJustDecodeBounds && options.outWidth > 0 && options.outHeight > 0)) {
-            return bitmap
-        }
-    } catch (e: Exception) {
-        Log.d(GALLERY_PHOTO_DECODE_TAG, "InputStream decode failed for $uri; trying file descriptor", e)
-    }
+        val outputWidth = ultraWideFrame.width.coerceAtLeast(1)
+        val outputHeight = ultraWideFrame.height.coerceAtLeast(1)
+        val opticalScale = (
+            SPECIAL_PHOTO_ULTRAWIDE_EQUIVALENT_FOCAL_MM /
+                SPECIAL_PHOTO_MAIN_EQUIVALENT_FOCAL_MM
+            ).coerceIn(0.5f, 0.9f)
+        val overlayWidth = (outputWidth * opticalScale).roundToInt().coerceIn(1, outputWidth)
+        val overlayHeight = (outputHeight * opticalScale).roundToInt().coerceIn(1, outputHeight)
+        val alignment = estimateSpecialPhotoAlignment(
+            mainFrame,
+            ultraWideFrame,
+            overlayWidth,
+            overlayHeight
+        )
+        val left = (
+            (outputWidth - overlayWidth) / 2f + alignment.first
+        ).roundToInt().coerceIn(0, outputWidth - overlayWidth)
+        val top = (
+            (outputHeight - overlayHeight) / 2f + alignment.second
+        ).roundToInt().coerceIn(0, outputHeight - overlayHeight)
 
-    return try {
-        resolver.openFileDescriptor(uri, "r")?.use { descriptor ->
-            BitmapFactory.decodeFileDescriptor(descriptor.fileDescriptor, null, options)
+        val output = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
+        val outputCanvas = Canvas(output)
+        val filteringPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        outputCanvas.drawBitmap(ultraWideFrame, 0f, 0f, filteringPaint)
+
+        fittedMain = Bitmap.createScaledBitmap(mainFrame, overlayWidth, overlayHeight, true)
+        val pixels = IntArray(overlayWidth * overlayHeight)
+        fittedMain.getPixels(pixels, 0, overlayWidth, 0, 0, overlayWidth, overlayHeight)
+        val featherX = (overlayWidth * 0.025f).coerceAtLeast(1f)
+        val featherY = (overlayHeight * 0.025f).coerceAtLeast(1f)
+
+        for (y in 0 until overlayHeight) {
+            val yInside = minOf(y + 0.5f, overlayHeight - y - 0.5f)
+            val fadeY = (yInside / featherY).coerceIn(0f, 1f)
+            for (x in 0 until overlayWidth) {
+                val index = y * overlayWidth + x
+                val existingAlpha = (pixels[index] ushr 24) and 0xFF
+                if (existingAlpha == 0) continue
+
+                val xInside = minOf(x + 0.5f, overlayWidth - x - 0.5f)
+                val linearFade = minOf(1f, xInside / featherX, fadeY)
+                val feather = linearFade * linearFade * (3f - 2f * linearFade)
+                val alpha = (existingAlpha * feather).roundToInt().coerceIn(0, 255)
+                pixels[index] = (alpha shl 24) or (pixels[index] and 0x00FFFFFF)
+            }
         }
-    } catch (e: Exception) {
-        Log.e(GALLERY_PHOTO_DECODE_TAG, "File-descriptor decode failed for $uri", e)
-        null
+        fittedMain.setPixels(pixels, 0, overlayWidth, 0, 0, overlayWidth, overlayHeight)
+        outputCanvas.drawBitmap(fittedMain, left.toFloat(), top.toFloat(), filteringPaint)
+        return output
+    } finally {
+        fittedMain?.takeIf { it !== mainFrame && !it.isRecycled }?.recycle()
+        mainFrame.takeIf { it !== main && !it.isRecycled }?.recycle()
+        ultraWideFrame.takeIf { it !== ultraWide && !it.isRecycled }?.recycle()
     }
 }
 

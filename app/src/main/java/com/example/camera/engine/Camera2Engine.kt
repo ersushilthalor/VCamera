@@ -869,6 +869,71 @@ class Camera2Engine(private val context: Context) {
     }
 
     /**
+     * Special Photo needs the companion sensor's native field of view. The normal standby preview
+     * is deliberately cropped to the active lens FOV for seamless lens switching; do not reuse
+     * that crop for the saved ultra-wide surround.
+     */
+    private fun applyNativeSpecialPhotoCrop(builder: CaptureRequest.Builder, lens: LensInfo) {
+        try {
+            val chars = lens.physicalCameraId?.let { getCharacteristics(it) }
+                ?: getCharacteristics(lens.cameraId)
+                ?: return
+            val activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val zoomRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+                if (zoomRange != null) {
+                    builder.set(
+                        CaptureRequest.CONTROL_ZOOM_RATIO,
+                        1.0f.coerceIn(zoomRange.lower, zoomRange.upper)
+                    )
+                }
+            }
+            builder.set(CaptureRequest.SCALER_CROP_REGION, Rect(activeArray))
+        } catch (t: Throwable) {
+            Log.w(TAG, "Unable to restore native Special Photo crop", t)
+        }
+    }
+
+    /**
+     * Logical multi-camera still requests use per-physical-camera crop overrides when the HAL
+     * exposes those request keys, so both JPEG outputs retain their own native sensor FOV.
+     */
+    private fun applyNativeSpecialPhotoCropForPhysicalCamera(
+        builder: CaptureRequest.Builder,
+        lens: LensInfo
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
+        val physicalId = lens.physicalCameraId ?: return
+        try {
+            val chars = getCharacteristics(physicalId) ?: return
+            val supportedKeys = chars.getAvailablePhysicalCameraRequestKeys() ?: emptyList()
+            val activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                supportedKeys.contains(CaptureRequest.CONTROL_ZOOM_RATIO)
+            ) {
+                val zoomRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+                if (zoomRange != null) {
+                    builder.setPhysicalCameraKey(
+                        CaptureRequest.CONTROL_ZOOM_RATIO,
+                        1.0f.coerceIn(zoomRange.lower, zoomRange.upper),
+                        physicalId
+                    )
+                }
+            }
+            if (supportedKeys.contains(CaptureRequest.SCALER_CROP_REGION)) {
+                builder.setPhysicalCameraKey(
+                    CaptureRequest.SCALER_CROP_REGION,
+                    Rect(activeArray),
+                    physicalId
+                )
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Unable to set native Special Photo crop for physical sensor", t)
+        }
+    }
+
+    /**
      * Synchronizes the background standby session's repeating request whenever active settings change.
      */
     private fun syncStandbyStreamSettings(forceDuringFrameHandoff: Boolean = false) {
@@ -4402,7 +4467,8 @@ class Camera2Engine(private val context: Context) {
             (it.width.toLong() * it.height.toLong()) <= maxStandardPixels
         }.ifEmpty { sixteenNineSizes }
 
-        val isPhotoOrPortrait = false
+        // Still JPEG outputs use the native 4:3 sensor aspect (3:4 after portrait orientation).
+        val isPhotoOrPortrait = true
 
         return when {
             isPhotoOrPortrait -> {
@@ -6735,7 +6801,22 @@ class Camera2Engine(private val context: Context) {
         handler.postDelayed(captureTimeout, 5000L)
 
         try {
-            val activeRequest = activeCamera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+            val physicalCameraIds = listOfNotNull(
+                mainLens.physicalCameraId,
+                ultraWideLens.physicalCameraId
+            ).toSet()
+            val canUsePhysicalStillCrop = isLogicalDual &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                physicalCameraIds.size == 2
+            val activeRequestBuilder = if (canUsePhysicalStillCrop) {
+                activeCamera.createCaptureRequest(
+                    CameraDevice.TEMPLATE_STILL_CAPTURE,
+                    physicalCameraIds
+                )
+            } else {
+                activeCamera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+            }
+            val activeRequest = activeRequestBuilder.apply {
                 if (isLogicalDual) {
                     addTarget(mainReader.surface)
                     addTarget(ultraReader.surface)
@@ -6743,6 +6824,10 @@ class Camera2Engine(private val context: Context) {
                     addTarget(activeReader.surface)
                 }
                 applyCommonSettings(this, isStillCapture = true)
+                if (canUsePhysicalStillCrop) {
+                    applyNativeSpecialPhotoCropForPhysicalCamera(this, mainLens)
+                    applyNativeSpecialPhotoCropForPhysicalCamera(this, ultraWideLens)
+                }
                 set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
                 set(CaptureRequest.JPEG_ORIENTATION, getCaptureJpegOrientation())
                 set(CaptureRequest.JPEG_QUALITY, preferences.jpegQuality.coerceIn(90, 100).toByte())
@@ -6773,6 +6858,7 @@ class Camera2Engine(private val context: Context) {
                 val standbyRequest = targetStandbyCamera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                     addTarget(standbyReader!!.surface)
                     applySynchronizedStandbySettings(this, targetStandbyLens)
+                    applyNativeSpecialPhotoCrop(this, targetStandbyLens)
                     set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
                     set(CaptureRequest.JPEG_ORIENTATION, getCaptureJpegOrientation())
                     set(CaptureRequest.JPEG_QUALITY, preferences.jpegQuality.coerceIn(90, 100).toByte())
