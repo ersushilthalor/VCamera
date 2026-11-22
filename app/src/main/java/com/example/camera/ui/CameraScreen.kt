@@ -982,7 +982,11 @@ fun CameraScreen(
             },
             onFlipCameraClick = { viewModel.toggleCameraFacing() },
             onGalleryClick = {
-                viewModel.openGallery(context)
+                if (cameraMode == CameraMode.PHOTO) {
+                    viewModel.openSystemGallery(context)
+                } else {
+                    viewModel.openGallery(context)
+                }
             },
             onCinemaModeClick = { viewModel.toggleCinemaSettings() },
             onSettingsClick = { viewModel.setSettingsOpen(true) },
