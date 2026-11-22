@@ -18,7 +18,9 @@ data class MediaGalleryItem(
     val durationMs: Long,
     val isVCameraRecording: Boolean,
     val isVideo: Boolean,
-    val ultraWideUri: Uri? = null
+    val ultraWideUri: Uri? = null,
+    val isSpecialPhoto: Boolean = false,
+    val captureSkewMs: Long? = null
 )
 
 /** Returns only VCamera-owned media; a Special Video pair is represented by its main clip. */
@@ -26,10 +28,13 @@ class MediaGalleryRepository(context: Context) {
     private val appContext = context.applicationContext
     private val resolver = appContext.contentResolver
 
-    fun getMedia(specialClips: List<SpecialVideoClip>): List<MediaGalleryItem> {
+    fun getMedia(
+        specialClips: List<SpecialVideoClip>,
+        specialPhotos: List<SpecialPhotoPair> = emptyList()
+    ): List<MediaGalleryItem> {
         val media = ArrayList<MediaGalleryItem>()
         media += getVcameraVideos(specialClips)
-        media += getVcameraPhotos()
+        media += getVcameraPhotos(specialPhotos)
         val knownUris = media.mapTo(HashSet()) { it.uri.toString() }
         getAppSpecificVideos().forEach { if (knownUris.add(it.uri.toString())) media += it }
         return media.distinctBy { it.uri.toString() }.sortedByDescending { it.timestamp }
@@ -110,7 +115,7 @@ class MediaGalleryRepository(context: Context) {
         return videos
     }
 
-    private fun getVcameraPhotos(): List<MediaGalleryItem> {
+    private fun getVcameraPhotos(specialPhotos: List<SpecialPhotoPair>): List<MediaGalleryItem> {
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
             MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
@@ -123,6 +128,12 @@ class MediaGalleryRepository(context: Context) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) add(MediaStore.Images.Media.OWNER_PACKAGE_NAME)
             else add(MediaStore.Images.Media.DATA)
         }.toTypedArray()
+        val specialByMainIdentity = specialPhotos.mapNotNull { pair ->
+            mediaStoreIdentity(pair.mainUri)?.let { it to pair }
+        }.toMap()
+        val pairedUltraWideIdentities = specialPhotos.mapNotNull { mediaStoreIdentity(it.ultraWideUri) }.toSet()
+        val specialByMainUri = specialPhotos.associateBy { it.mainUri.toString() }
+        val pairedUltraWideUris = specialPhotos.map { it.ultraWideUri.toString() }.toSet()
         val photos = ArrayList<MediaGalleryItem>()
 
         try {
@@ -140,11 +151,16 @@ class MediaGalleryRepository(context: Context) {
                 while (cursor.moveToNext()) {
                     val mediaId = cursor.getLong(idCol)
                     val uri = ContentUris.withAppendedId(collection, mediaId)
+                    val identity = mediaStoreIdentity(uri)
+                    if ((identity != null && identity in pairedUltraWideIdentities) ||
+                        uri.toString() in pairedUltraWideUris) continue
                     val name = if (nameCol >= 0) cursor.getString(nameCol).orEmpty() else ""
                     val description = if (descCol >= 0) cursor.getString(descCol).orEmpty() else ""
                     val owner = if (ownerCol >= 0) cursor.getString(ownerCol) else null
+                    val specialPair = identity?.let { specialByMainIdentity[it] } ?: specialByMainUri[uri.toString()]
                     val isVCamera = owner == appContext.packageName ||
-                        name.startsWith("VCAM_", true) || description.contains("VCamera", true)
+                        name.startsWith("VCAM_", true) || description.contains("VCamera", true) ||
+                        specialPair != null
                     if (!isVCamera) continue
                     val dateTaken = if (takenCol >= 0) cursor.getLong(takenCol) else 0L
                     val dateAdded = if (addedCol >= 0) cursor.getLong(addedCol) else 0L
@@ -155,7 +171,11 @@ class MediaGalleryRepository(context: Context) {
                         timestamp = if (dateTaken > 0L) dateTaken else dateAdded * 1000L,
                         durationMs = 0L,
                         isVCameraRecording = true,
-                        isVideo = false
+                        isVideo = false,
+                        ultraWideUri = specialPair?.ultraWideUri,
+                        isSpecialPhoto = specialPair != null,
+                        captureSkewMs = specialPair?.sensorTimestampSkewNs
+                            ?.takeIf { it >= 0L }?.let { (it + 500_000L) / 1_000_000L }
                     )
                 }
             }
