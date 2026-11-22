@@ -150,26 +150,26 @@ class MediaGalleryRepository(context: Context) {
 
         val discovered = LinkedHashMap<String, MediaGalleryVideo>()
         directories.forEach { directory ->
-            val files = try {
-                directory.listFiles().orEmpty()
+            val files: Array<File> = try {
+                directory.listFiles() ?: emptyArray()
             } catch (exception: Exception) {
                 Log.w(TAG, "Unable to list app-specific video directory: " + directory, exception)
                 emptyArray()
             }
             files.forEach { file ->
                 val extension = file.extension.lowercase(Locale.ROOT)
-                if (!file.isFile || file.length() <= 0L || extension !in VIDEO_EXTENSIONS) return@forEach
-
-                val duration = readVideoDuration(file)
-                val uri = Uri.fromFile(file)
-                discovered[file.absolutePath] = MediaGalleryVideo(
-                    id = "file:" + file.absolutePath,
-                    displayName = file.name,
-                    uri = uri,
-                    timestamp = file.lastModified(),
-                    durationMs = duration,
-                    isVCameraRecording = true
-                )
+                if (file.isFile && file.length() > 0L && extension in VIDEO_EXTENSIONS) {
+                    val duration = readVideoDuration(file)
+                    val uri = Uri.fromFile(file)
+                    discovered[file.absolutePath] = MediaGalleryVideo(
+                        id = "file:" + file.absolutePath,
+                        displayName = file.name,
+                        uri = uri,
+                        timestamp = file.lastModified(),
+                        durationMs = duration,
+                        isVCameraRecording = true
+                    )
+                }
             }
         }
         return discovered.values.toList()
