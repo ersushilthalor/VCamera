@@ -217,13 +217,13 @@ class DualCameraRecordingRelay internal constructor(
                     Log.w(TAG, "EGL preview attach skipped: relay/context/target is unavailable")
                 }
             } catch (t: Throwable) {
-                Log.w(TAG, "EGL preview attach failed: \${t.message}", t)
+                Log.w(TAG, "EGL preview attach failed: ${t.message}", t)
                 eglPreviewSurface = EGL14.EGL_NO_SURFACE
             }
             try {
                 onAttached(attached)
             } catch (t: Throwable) {
-                Log.w(TAG, "EGL preview attach callback failed: \${t.message}", t)
+                Log.w(TAG, "EGL preview attach callback failed: ${t.message}", t)
             }
         }
     }
@@ -231,7 +231,14 @@ class DualCameraRecordingRelay internal constructor(
     /** Schedule a timestamp-matched MGC frame on the relay's owning GL thread. */
     fun notifyEisPlusFrameAvailable() {
         val handler = glHandler ?: return
-        if (!handler.post { renderEisPlusFrames() }) {
+        if (!handler.post {
+                try {
+                    renderEisPlusFrames()
+                } catch (t: Throwable) {
+                    Log.e(TAG, "MGC EIS+ relay render failed; keeping GL thread alive: ${t.message}", t)
+                }
+            }
+        ) {
             Log.w(TAG, "Unable to schedule timestamp-matched MGC EIS+ frame")
         }
     }
@@ -1107,7 +1114,13 @@ class DualCameraRecordingRelay internal constructor(
                 pending.image.close()
                 continue
             }
-            val frame = eisPlusRenderer?.render(pending) ?: continue
+            val renderer = eisPlusRenderer
+            if (renderer == null) {
+                pending.image.close()
+                Log.e(TAG, "MGC EIS+ renderer is unavailable; dropping matched frame")
+                continue
+            }
+            val frame = renderer.render(pending) ?: continue
 
             val sourceTimestampNs = frame.timestampNs
             if (recordingStartMonotonicNs <= 0L) recordingStartMonotonicNs = sourceTimestampNs
