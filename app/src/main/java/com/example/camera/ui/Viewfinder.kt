@@ -58,7 +58,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import android.graphics.Bitmap
 import androidx.compose.ui.platform.LocalContext
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collect
 import com.example.camera.model.CameraMode
 import com.example.camera.model.CinemaColorProfile
 import com.example.camera.model.CinemaConfig
@@ -106,11 +107,7 @@ fun Viewfinder(
     onSurfaceTextureSizeChanged: ((SurfaceTexture, Int, Int) -> Unit)? = null,
     isUsingUltraWideSurface: Boolean = false,
     isSpecialVideoPreviewEnabled: Boolean = false,
-    previewOverlapState: com.example.camera.engine.PreviewOverlapState = com.example.camera.engine.PreviewOverlapState(
-        isOverlapping = false,
-        mainAlpha = if (isUsingUltraWideSurface) 0f else 1f,
-        ultraWideAlpha = if (isUsingUltraWideSurface) 1f else 0f
-    ),
+    previewOverlapState: StateFlow<com.example.camera.engine.PreviewOverlapState>,
     onUltraWideSurfaceTextureAvailable: ((SurfaceTexture?, Int, Int) -> Unit)? = null,
     onUltraWideSurfaceTextureSizeChanged: ((SurfaceTexture, Int, Int) -> Unit)? = null,
     onPreviewFrameAvailable: ((com.example.camera.engine.PreviewStreamSource) -> Unit)? = null,
@@ -138,7 +135,7 @@ fun Viewfinder(
     var ultraWideTransformPendingFirstFrame by remember { mutableStateOf(true) }
     val currentIsUsingUltraWideSurface by rememberUpdatedState(isUsingUltraWideSurface)
     val currentIsSpecialVideoPreviewEnabled by rememberUpdatedState(isSpecialVideoPreviewEnabled)
-    val currentPreviewOverlapState by rememberUpdatedState(previewOverlapState)
+    var overlapStructure by remember(previewOverlapState) { mutableStateOf(previewOverlapState.value) }
     val currentCameraMode by rememberUpdatedState(cameraMode)
     val currentCinemaConfig by rememberUpdatedState(cinemaConfig)
     val currentOnFrameLuminanceStats by rememberUpdatedState(onFrameLuminanceStats)
@@ -225,39 +222,59 @@ fun Viewfinder(
         }
     }
 
-    // Dynamic preview stream visibility and smooth overlap blending
-    LaunchedEffect(previewOverlapState, isUsingUltraWideSurface, isSpecialVideoPreviewEnabled) {
-        if (previewOverlapState.isOverlapping) {
-            textureViewInstance?.let { tv ->
-                tv.alpha = previewOverlapState.mainAlpha
-                val mainOnTop = previewOverlapState.topSource == com.example.camera.engine.PreviewStreamSource.MAIN
-                tv.translationZ = if (mainOnTop) 2f else 1f
-                (tv.parent as? android.view.View)?.translationZ = if (mainOnTop) 2f else 1f
-                tv.visibility = android.view.View.VISIBLE
-            }
-            ultraWideTextureViewInstance?.let { tv ->
-                tv.alpha = previewOverlapState.ultraWideAlpha
-                val ultraWideOnTop = previewOverlapState.topSource == com.example.camera.engine.PreviewStreamSource.ULTRAWIDE
-                tv.translationZ = if (ultraWideOnTop) 2f else 1f
-                (tv.parent as? android.view.View)?.translationZ = if (ultraWideOnTop) 2f else 1f
-                tv.visibility = android.view.View.VISIBLE
-            }
-        } else {
+    // The controller publishes overlap values from its Choreographer callback.
+    // Collect them without Compose state so only the native TextureViews update per vsync.
+    LaunchedEffect(
+        previewOverlapState,
+        isUsingUltraWideSurface,
+        isSpecialVideoPreviewEnabled,
+        textureViewInstance,
+        ultraWideTextureViewInstance
+    ) {
+        fun applyPreviewLayerState(state: com.example.camera.engine.PreviewOverlapState) {
             val isUw = isUsingUltraWideSurface
-            textureViewInstance?.let { tv ->
-                val mainAlpha = if (!isUw) 1f else 0f
-                tv.alpha = mainAlpha
-                tv.translationZ = if (!isUw) 2f else 0f
-                (tv.parent as? android.view.View)?.translationZ = if (!isUw) 2f else 0f
-                tv.visibility = android.view.View.VISIBLE
+            if (state.isOverlapping) {
+                textureViewInstance?.let { view ->
+                    view.alpha = state.mainAlpha
+                    val mainOnTop = state.topSource == com.example.camera.engine.PreviewStreamSource.MAIN
+                    view.translationZ = if (mainOnTop) 2f else 1f
+                    (view.parent as? android.view.View)?.translationZ = if (mainOnTop) 2f else 1f
+                    view.visibility = android.view.View.VISIBLE
+                }
+                ultraWideTextureViewInstance?.let { view ->
+                    view.alpha = state.ultraWideAlpha
+                    val ultraWideOnTop = state.topSource == com.example.camera.engine.PreviewStreamSource.ULTRAWIDE
+                    view.translationZ = if (ultraWideOnTop) 2f else 1f
+                    (view.parent as? android.view.View)?.translationZ = if (ultraWideOnTop) 2f else 1f
+                    view.visibility = android.view.View.VISIBLE
+                }
+            } else {
+                textureViewInstance?.let { view ->
+                    view.alpha = if (!isUw) 1f else 0f
+                    view.translationZ = if (!isUw) 2f else 1f
+                    (view.parent as? android.view.View)?.translationZ = if (!isUw) 2f else 1f
+                    view.visibility = if (!isUw) android.view.View.VISIBLE else android.view.View.INVISIBLE
+                }
+                ultraWideTextureViewInstance?.let { view ->
+                    val showUltraWidePip = isSpecialVideoPreviewEnabled && !isUw
+                    view.alpha = if (isUw || showUltraWidePip) 1f else 0f
+                    view.translationZ = if (isUw) 2f else if (showUltraWidePip) 3f else 0f
+                    (view.parent as? android.view.View)?.translationZ =
+                        if (isUw) 2f else if (showUltraWidePip) 3f else 0f
+                    view.visibility = android.view.View.VISIBLE
+                }
             }
-            ultraWideTextureViewInstance?.let { tv ->
-                val showUltraWidePip = isSpecialVideoPreviewEnabled && !isUw
-                val uwAlpha = if (isUw || showUltraWidePip) 1f else 0f
-                tv.alpha = uwAlpha
-                tv.translationZ = if (isUw) 2f else if (showUltraWidePip) 3f else 0f
-                (tv.parent as? android.view.View)?.translationZ = if (isUw) 2f else if (showUltraWidePip) 3f else 0f
-                tv.visibility = android.view.View.VISIBLE
+        }
+
+        applyPreviewLayerState(previewOverlapState.value)
+        previewOverlapState.collect { state ->
+            applyPreviewLayerState(state)
+            // Compose zIndex changes only at overlap start/end or when the top layer changes,
+            // never on every alpha tick.
+            if (overlapStructure.isOverlapping != state.isOverlapping ||
+                overlapStructure.topSource != state.topSource
+            ) {
+                overlapStructure = state
             }
         }
     }
@@ -468,12 +485,6 @@ fun Viewfinder(
                     },
                     update = { textureView ->
                         val isUw = currentIsUsingUltraWideSurface
-                        val isOverlapping = currentPreviewOverlapState.isOverlapping
-                        textureView.alpha = if (isOverlapping) currentPreviewOverlapState.mainAlpha else (if (!isUw) 1f else 0f)
-                        textureView.visibility = if (isOverlapping || !isUw) android.view.View.VISIBLE else android.view.View.INVISIBLE
-                        val mainOnTop = currentPreviewOverlapState.topSource == com.example.camera.engine.PreviewStreamSource.MAIN
-                        textureView.translationZ = if (isOverlapping) (if (mainOnTop) 2f else 1f) else (if (!isUw) 2f else 1f)
-                        (textureView.parent as? android.view.View)?.translationZ = if (isOverlapping) (if (mainOnTop) 2f else 1f) else (if (!isUw) 2f else 1f)
                         // Sample background blur frame when windows are active
                         if (!isUw && com.example.camera.ui.components.BackdropBlurManager.isWindowActive && textureView.isAvailable) {
                             com.example.camera.ui.components.BackdropBlurManager.onViewfinderFrame(
@@ -499,8 +510,8 @@ fun Viewfinder(
                     modifier = Modifier
                         .fillMaxSize()
                         .zIndex(
-                            if (currentPreviewOverlapState.isOverlapping) {
-                                if (currentPreviewOverlapState.topSource == com.example.camera.engine.PreviewStreamSource.MAIN) 2f else 1f
+                            if (overlapStructure.isOverlapping) {
+                                if (overlapStructure.topSource == com.example.camera.engine.PreviewStreamSource.MAIN) 2f else 1f
                             } else if (!currentIsUsingUltraWideSurface) 2f else 1f
                         )
                         .onGloballyPositioned { coordinates ->
@@ -623,15 +634,8 @@ fun Viewfinder(
                             }
                         },
                         update = { textureView ->
-                            val isUw = currentIsUsingUltraWideSurface
-                            val isOverlapping = currentPreviewOverlapState.isOverlapping
-                            val showUltraWidePip = currentIsSpecialVideoPreviewEnabled && !isUw
-                            textureView.alpha = if (isOverlapping) currentPreviewOverlapState.ultraWideAlpha else (if (isUw || showUltraWidePip) 1f else 0f)
-                            textureView.visibility = android.view.View.VISIBLE
-                            val ultraWideOnTop = currentPreviewOverlapState.topSource == com.example.camera.engine.PreviewStreamSource.ULTRAWIDE
-                            textureView.translationZ = if (isOverlapping) (if (ultraWideOnTop) 2f else 1f) else (if (isUw) 2f else if (showUltraWidePip) 3f else 0f)
-                            (textureView.parent as? android.view.View)?.translationZ = if (isOverlapping) (if (ultraWideOnTop) 2f else 1f) else (if (isUw) 2f else if (showUltraWidePip) 3f else 0f)
-                            if (isUw && com.example.camera.ui.components.BackdropBlurManager.isWindowActive && textureView.isAvailable) {
+                        val isUw = currentIsUsingUltraWideSurface
+                        if (isUw && com.example.camera.ui.components.BackdropBlurManager.isWindowActive && textureView.isAvailable) {
                                 com.example.camera.ui.components.BackdropBlurManager.onViewfinderFrame(
                                     textureView = textureView,
                                     blurStrength = floatingWindowBlurStrength
@@ -665,8 +669,8 @@ fun Viewfinder(
                                 }
                             )
                             .zIndex(
-                                if (currentPreviewOverlapState.isOverlapping) {
-                                    if (currentPreviewOverlapState.topSource == com.example.camera.engine.PreviewStreamSource.ULTRAWIDE) 2f else 1f
+                                if (overlapStructure.isOverlapping) {
+                                    if (overlapStructure.topSource == com.example.camera.engine.PreviewStreamSource.ULTRAWIDE) 2f else 1f
                                 } else if (currentIsUsingUltraWideSurface) 2f else if (currentIsSpecialVideoPreviewEnabled) 3f else 1f
                             )
                     )
