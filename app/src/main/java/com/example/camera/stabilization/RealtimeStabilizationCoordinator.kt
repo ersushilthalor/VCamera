@@ -1016,6 +1016,15 @@ class RealtimeStabilizationCoordinator(context: Context) {
                     "(dead=$metadataDead), attempts=$nativeFrameAttemptCount, " +
                     "results=$resultSequence",
             )
+            EisPlusDiagnosticLog.event(
+                "FEEDER", "HEALTH_SNAPSHOT",
+                "boundary=$boundaryCount tsNs=$currentBoundaryNs gyroDead=$gyroDead gyroLagMs=${timestampLagMs(currentBoundaryNs, lastProcessedGyroTimestampNs)} " +
+                    "pendingGyro=${pendingGyroSamples.size} opticalDead=$opticalCorrectionDead opticalLagMs=${timestampLagMs(currentBoundaryNs, lastOpticalCorrectionTimestampNs)} " +
+                    "opticalActive=$opticalCorrectionSourceActive metadataDead=$metadataDead metadataLagMs=${timestampLagMs(currentBoundaryNs, latestMetadataTimestampNs)} " +
+                    "queuedBoundaries=${frameBoundaries.size} metadata=${frameMetadata.size} bufferedImages=${bufferedImages.size} " +
+                    "nativeAttempts=$nativeFrameAttemptCount nativeResults=$resultSequence",
+                if (gyroDead || metadataDead) "WARN" else "INFO",
+            )
         }
         while (frameBoundaries.size > 1) {
             val nextBoundaryNs = frameBoundaries[1]
@@ -1073,7 +1082,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                     focalLengthMm = metadata.focalLengthMm,
                 ),
             )
-            if (nativeFrameAttemptCount <= 3L || nativeFrameAttemptCount % 30L == 0L) {
+            if (nativeFrameAttemptCount <= 3L || nativeFrameAttemptCount % 30L == 0L || result is MgcEisNativeEngine.FrameResult.Dropped) {
                 val resultName = result?.javaClass?.simpleName ?: "pending"
                 Log.i(TAG, "MGC native processFrame #$nativeFrameAttemptCount returned $resultName")
                 val stabilized = result as? MgcEisNativeEngine.FrameResult.Stabilized
@@ -1260,8 +1269,8 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 }
                 val image = coordinator.acquireImageForSession(sessionId, timestampNs)
                 if (image == null) {
+                    EisPlusDiagnosticLog.event("SESSION", "IMAGE_FOR_RESULT_MISSING", "sequence=${next.sequence} timestampNs=$timestampNs", "WARN")
                     if (next.sequence <= 3L || next.sequence % 30L == 0L) {
-                        EisPlusDiagnosticLog.event("SESSION", "IMAGE_FOR_RESULT_MISSING", "sequence=${next.sequence} timestampNs=$timestampNs", "WARN")
                         Log.i(
                             TAG,
                             "MGC session skipped unbuffered result sequence=${next.sequence}, " +
@@ -1293,7 +1302,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                         image = image,
                     )
                 }
-                if (next.sequence <= 3L || next.sequence % 30L == 0L) {
+                if (next.sequence <= 3L || next.sequence % 30L == 0L || next.result is MgcEisNativeEngine.FrameResult.Dropped) {
                     EisPlusDiagnosticLog.event(
                         "SESSION", "FRAME_DEQUEUED",
                         "sequence=${next.sequence} tsNs=$timestampNs transformApplied=${outputFrame.transform != null} image=${image.width}x${image.height}",
