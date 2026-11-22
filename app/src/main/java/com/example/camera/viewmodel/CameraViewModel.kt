@@ -1412,6 +1412,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             scope = viewModelScope,
             durationMs = zoomTransitionDurationMs,
             skipHoldAtSwitchPoint = skipHoldAtSwitchPoint,
+            // In Video/Cinema modes, the 1x handoff hold is part of the 300ms total budget.
+            includeHoldWithinDuration = isVideoMode,
             onZoomUpdate = { interpolatedZoom ->
                 _currentZoom.value = interpolatedZoom
             },
