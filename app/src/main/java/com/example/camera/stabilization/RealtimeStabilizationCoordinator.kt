@@ -1038,6 +1038,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 val nearestMetadataTimestampNs = frameMetadata.keys.minByOrNull {
                     absoluteTimestampDifference(it, frameTimestampNs)
                 }
+                EisPlusDiagnosticLog.event("FEEDER", "METADATA_MISSING", "frameTs=$frameTimestampNs nearest=$nearestMetadataTimestampNs deltaNs=${nearestMetadataTimestampNs?.minus(frameTimestampNs)}", "WARN")
                 Log.w(
                     TAG,
                     "MGC has no exact metadata for boundary=$frameTimestampNs; " +
@@ -1073,10 +1074,16 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 ),
             )
             if (nativeFrameAttemptCount <= 3L || nativeFrameAttemptCount % 30L == 0L) {
-                Log.i(
-                    TAG,
-                    "MGC native processFrame #$nativeFrameAttemptCount returned " +
-                        (result?.javaClass?.simpleName ?: "pending"),
+                val resultName = result?.javaClass?.simpleName ?: "pending"
+                Log.i(TAG, "MGC native processFrame #$nativeFrameAttemptCount returned $resultName")
+                val stabilized = result as? MgcEisNativeEngine.FrameResult.Stabilized
+                val dropped = result as? MgcEisNativeEngine.FrameResult.Dropped
+                EisPlusDiagnosticLog.event(
+                    "NATIVE", "FRAME_RESULT",
+                    "attempt=$nativeFrameAttemptCount inputTs=${metadata.timestampNs} result=$resultName " +
+                        (stabilized?.let { "outputTs=${it.sensorTimestampNs} strength=${it.appliedStrength} tripod=${it.tripodMode}" } ?: "") +
+                        (dropped?.let { " droppedTs=${it.sensorTimestampNs}" } ?: ""),
+                    if (dropped != null) "WARN" else "INFO",
                 )
             }
             if (result != null) appendNativeResultLocked(result)
@@ -1089,11 +1096,23 @@ class RealtimeStabilizationCoordinator(context: Context) {
         ) {
             lastLoggedGateBoundaryCount = boundaryCount
             Log.i(TAG, "MGC feeder waiting for $source to cross nextBoundary=$nextBoundaryNs")
+            EisPlusDiagnosticLog.event(
+                "FEEDER", "WAITING_FOR_SOURCE",
+                "source=$source nextBoundaryNs=$nextBoundaryNs gyroTs=$lastProcessedGyroTimestampNs metadataTs=$latestMetadataTimestampNs opticalTs=$lastOpticalCorrectionTimestampNs",
+                "WARN",
+            )
         }
     }
 
     private fun appendNativeResultLocked(result: MgcEisNativeEngine.FrameResult) {
         resultSequence += 1L
+        if (resultSequence <= 3L || resultSequence % 30L == 0L) {
+            EisPlusDiagnosticLog.event(
+                "NATIVE", "RESULT_QUEUED",
+                "sequence=$resultSequence type=${result.javaClass.simpleName} queueSize=${nativeResults.size + 1}",
+                if (result is MgcEisNativeEngine.FrameResult.Dropped) "WARN" else "INFO",
+            )
+        }
         nativeResults.addLast(SequencedNativeResult(resultSequence, result))
         while (nativeResults.size > MAX_RESULT_COUNT) nativeResults.removeFirst()
         activeSessions.values.forEach { callback ->
@@ -1190,6 +1209,11 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 lookaheadFrames = lookaheadFrames,
             )
             active = startSequence != null
+            EisPlusDiagnosticLog.event(
+                "SESSION", if (active) "CONSUMER_STARTED" else "CONSUMER_START_FAILED",
+                "id=$sessionId size=${frameWidth}x$frameHeight strength=$strength lookahead=$lookaheadFrames cursor=$startSequence",
+                if (active) "INFO" else "ERROR",
+            )
             // Registration and the result cursor are captured under the same coordinator lock:
             // no image can include this session and then have its result skipped by a start race.
             lastConsumedSequence = startSequence ?: 0L
@@ -1237,6 +1261,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 val image = coordinator.acquireImageForSession(sessionId, timestampNs)
                 if (image == null) {
                     if (next.sequence <= 3L || next.sequence % 30L == 0L) {
+                        EisPlusDiagnosticLog.event("SESSION", "IMAGE_FOR_RESULT_MISSING", "sequence=${next.sequence} timestampNs=$timestampNs", "WARN")
                         Log.i(
                             TAG,
                             "MGC session skipped unbuffered result sequence=${next.sequence}, " +
@@ -1253,9 +1278,8 @@ class RealtimeStabilizationCoordinator(context: Context) {
                             "timestamp=$timestampNs",
                     )
                 }
-                return when (val result = next.result) {
-                    is MgcEisNativeEngine.FrameResult.Dropped ->
-                        StabilizationFrame(timestampNs, null, image)
+                val outputFrame = when (val result = next.result) {
+                    is MgcEisNativeEngine.FrameResult.Dropped -> StabilizationFrame(timestampNs, null, image)
                     is MgcEisNativeEngine.FrameResult.Stabilized -> StabilizationFrame(
                         timestampNs = timestampNs,
                         transform = AlgorithmicStabilizationTransform(
@@ -1269,6 +1293,14 @@ class RealtimeStabilizationCoordinator(context: Context) {
                         image = image,
                     )
                 }
+                if (next.sequence <= 3L || next.sequence % 30L == 0L) {
+                    EisPlusDiagnosticLog.event(
+                        "SESSION", "FRAME_DEQUEUED",
+                        "sequence=${next.sequence} tsNs=$timestampNs transformApplied=${outputFrame.transform != null} image=${image.width}x${image.height}",
+                        if (outputFrame.transform != null) "INFO" else "WARN",
+                    )
+                }
+                return outputFrame
             }
         }
 
