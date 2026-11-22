@@ -40,7 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -190,7 +190,6 @@ private fun SpecialVideoPlayer(
 ) {
     var isUltraWide by rememberSaveable(clip.id) { mutableStateOf(false) }
     val currentUri = if (isUltraWide) clip.ultraWideUri else clip.mainUri
-    val context = LocalContext.current
 
     Column(
         modifier = Modifier
