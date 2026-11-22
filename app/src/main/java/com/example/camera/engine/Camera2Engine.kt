@@ -7662,8 +7662,11 @@ class Camera2Engine(private val context: Context) {
                 // Special Video, Cinema, 10-bit/HDR, ultra-wide, and dual-ready sessions keep
                 // their existing synchronized OES pipelines unchanged.
                 val eisPlusLogicalZoom = canUseLogicalZoomForLens(camera.id, lens, currentZoom)
-                val eisPlusPhysicalId = if (eisPlusLogicalZoom) null else lens.physicalCameraId
-                    ?.takeIf { chars?.physicalCameraIds?.contains(it) == true }
+                val eisPlusPhysicalId = if (
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && !eisPlusLogicalZoom
+                ) {
+                    lens.physicalCameraId?.takeIf { chars?.physicalCameraIds?.contains(it) == true }
+                } else null
                 val eisPlusCameraId = eisPlusPhysicalId ?: camera.id
                 val eisPlusCameraChars = getCharacteristics(eisPlusCameraId)
                 val eisPlusTimingChars = getCharacteristics(camera.id) ?: chars ?: eisPlusCameraChars
