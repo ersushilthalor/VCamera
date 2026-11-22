@@ -2,7 +2,7 @@ package com.example.camera.engine
 
 import com.example.camera.model.LensType
 import com.example.camera.ui.GALLERY_LENS_SWITCH_DURATION_MS
-import com.example.camera.ui.calculateGalleryLensSwitchCropScale
+import com.example.camera.ui.calculateGalleryLensSwitchZoomScale
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -95,15 +95,15 @@ class ZoomTransitionTimingTest {
     }
 
     @Test
-    fun galleryLensSwitchUsesThreeSecondCropAnimation() {
+    fun galleryLensSwitchUses300MillisecondZoomAnimation() {
         assertEquals(300, GALLERY_LENS_SWITCH_DURATION_MS)
     }
 
     @Test
-    fun mainToUltraWideAnimatesFromMatchingMainCropToFullUltraWide() {
+    fun mainToUltraWideAnimatesFromMatchingMainZoomToFullUltraWide() {
         assertEquals(
             2.0f,
-            calculateGalleryLensSwitchCropScale(
+            calculateGalleryLensSwitchZoomScale(
                 isUltraWidePlayer = true,
                 transitionFromUltraWide = false,
                 progress = 0.0f,
@@ -113,7 +113,7 @@ class ZoomTransitionTimingTest {
         )
         assertEquals(
             1.5f,
-            calculateGalleryLensSwitchCropScale(
+            calculateGalleryLensSwitchZoomScale(
                 isUltraWidePlayer = true,
                 transitionFromUltraWide = false,
                 progress = 0.5f,
@@ -123,7 +123,7 @@ class ZoomTransitionTimingTest {
         )
         assertEquals(
             1.0f,
-            calculateGalleryLensSwitchCropScale(
+            calculateGalleryLensSwitchZoomScale(
                 isUltraWidePlayer = true,
                 transitionFromUltraWide = false,
                 progress = 1.0f,
@@ -134,10 +134,10 @@ class ZoomTransitionTimingTest {
     }
 
     @Test
-    fun ultraWideToMainAnimatesCropInBeforeReturningToMainFrame() {
+    fun ultraWideToMainAnimatesZoomInBeforeReturningToMainFrame() {
         assertEquals(
             1.0f,
-            calculateGalleryLensSwitchCropScale(
+            calculateGalleryLensSwitchZoomScale(
                 isUltraWidePlayer = true,
                 transitionFromUltraWide = true,
                 progress = 0.0f,
@@ -147,7 +147,7 @@ class ZoomTransitionTimingTest {
         )
         assertEquals(
             1.5f,
-            calculateGalleryLensSwitchCropScale(
+            calculateGalleryLensSwitchZoomScale(
                 isUltraWidePlayer = true,
                 transitionFromUltraWide = true,
                 progress = 0.5f,
@@ -157,7 +157,7 @@ class ZoomTransitionTimingTest {
         )
         assertEquals(
             2.0f,
-            calculateGalleryLensSwitchCropScale(
+            calculateGalleryLensSwitchZoomScale(
                 isUltraWidePlayer = true,
                 transitionFromUltraWide = true,
                 progress = 1.0f,
@@ -168,10 +168,10 @@ class ZoomTransitionTimingTest {
     }
 
     @Test
-    fun galleryCropIsOnlyAppliedToUltraWidePlayerDuringTransition() {
+    fun galleryZoomIsOnlyAppliedToUltraWidePlayerDuringTransition() {
         assertEquals(
             1.0f,
-            calculateGalleryLensSwitchCropScale(
+            calculateGalleryLensSwitchZoomScale(
                 isUltraWidePlayer = false,
                 transitionFromUltraWide = false,
                 progress = 0.0f,
@@ -181,7 +181,7 @@ class ZoomTransitionTimingTest {
         )
         assertEquals(
             1.0f,
-            calculateGalleryLensSwitchCropScale(
+            calculateGalleryLensSwitchZoomScale(
                 isUltraWidePlayer = true,
                 transitionFromUltraWide = false,
                 progress = 0.5f,
