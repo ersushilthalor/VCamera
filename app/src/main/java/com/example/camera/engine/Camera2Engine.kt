@@ -87,6 +87,9 @@ class Camera2Engine(private val context: Context) {
     private var imageReaderYuv: ImageReader? = null
     private var mediaRecorder: MediaRecorder? = null
     private var activeRecordingSurface: Surface? = null
+    private var activeVideoEisPlusPipeline: VideoEisPlusPipeline? = null
+    private var activeVideoEisPlusSurface: Surface? = null
+    @Volatile private var videoEisPlusCaptureGeneration: Long = 0L
     private var videoRecordingFileDescriptor: ParcelFileDescriptor? = null
     private var currentRecordingTempFile: File? = null
     private var currentVideoUri: Uri? = null
@@ -5179,6 +5182,12 @@ class Camera2Engine(private val context: Context) {
             super.onCaptureCompleted(session, request, result)
             lastCaptureResult = result
             CameraPerformanceMonitor.onPreviewFrame()
+            activeVideoEisPlusPipeline?.submitCaptureResult(
+                result = result,
+                request = request,
+                generation = videoEisPlusCaptureGeneration,
+                outputPhysicalCameraId = activeSessionPhysicalCameraId
+            )
 
             // Verify OIS using the HAL's CaptureResult, not just the preference toggle.
             val actualOisMode = result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE)
@@ -6920,6 +6929,8 @@ class Camera2Engine(private val context: Context) {
         is10Bit: Boolean,
         physicalCameraId: String? = null,
         updateActivePhysicalId: Boolean = true,
+        stabilizationSurface: Surface? = null,
+        previewViaRelay: Boolean = false,
         callback: CameraCaptureSession.StateCallback
     ) {
         val executor = Executor { command -> backgroundHandler?.post(command) ?: command.run() }
@@ -6984,10 +6995,16 @@ class Camera2Engine(private val context: Context) {
             }
         } else null
 
-        val outputConfigs = if (recorderConfig != null) {
-            listOf(previewConfig, recorderConfig)
-        } else {
-            listOf(previewConfig)
+        val stabilizationConfig = stabilizationSurface?.takeIf { it.isValid }?.let { surface ->
+            OutputConfiguration(surface).apply {
+                if (usePhysicalRouting) setPhysicalCameraId(physicalCameraId)
+            }
+        }
+        val outputConfigs = mutableListOf<OutputConfiguration>().apply {
+            if (!previewViaRelay) add(previewConfig)
+            recorderConfig?.let(::add)
+            stabilizationConfig?.let(::add)
+            if (isEmpty()) add(previewConfig)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -7012,10 +7029,11 @@ class Camera2Engine(private val context: Context) {
             activeSessionPhysicalCameraId = null
         }
         @Suppress("DEPRECATION")
-        val surfaces = if (hasSeparateRecorder) {
-            listOf(previewSurface, recorderSurface!!)
-        } else {
-            listOf(previewSurface)
+        val surfaces = mutableListOf<Surface>().apply {
+            if (!previewViaRelay) add(previewSurface)
+            if (hasSeparateRecorder) add(recorderSurface!!)
+            stabilizationSurface?.takeIf { it.isValid }?.let(::add)
+            if (isEmpty()) add(previewSurface)
         }
         camera.createCaptureSession(surfaces, callback, backgroundHandler)
     }
@@ -7023,7 +7041,18 @@ class Camera2Engine(private val context: Context) {
     /**
      * Safely releases failed recording resources, restores preview, and notifies error callback.
      */
+    private fun stopActiveVideoEisPlus() {
+        val pipeline = activeVideoEisPlusPipeline
+        activeVideoEisPlusPipeline = null
+        activeVideoEisPlusSurface = null
+        videoEisPlusCaptureGeneration += 1L
+        try { pipeline?.stop() } catch (t: Throwable) {
+            Log.w(TAG, "Failed to stop Photon EIS+ input pipeline", t)
+        }
+    }
+
     private fun cleanupFailedRecording(onError: (String) -> Unit, message: String) {
+        stopActiveVideoEisPlus()
         isStartingRecording.set(false)
         isStoppingRecording.set(false)
         _isRecordingVideo.value = false
@@ -8138,6 +8167,7 @@ class Camera2Engine(private val context: Context) {
         isStoppingRecording.set(false)
         if (sessionRestoredForStop.compareAndSet(false, true)) {
             backgroundHandler?.post {
+                stopActiveVideoEisPlus()
                 try {
                     val previewSurf = getActivePreviewSurface()
                     if (previewSurf != null && previewSurf.isValid && cameraDevice != null && captureSession != null) {
