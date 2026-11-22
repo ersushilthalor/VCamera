@@ -6806,30 +6806,45 @@ class Camera2Engine(private val context: Context) {
                         addTarget(ultraJpegReader.surface)
                         applySynchronizedStandbySettings(this, ultraWideLens)
                         applyFullFrameJpegCrop(this, ultraWideLens)
+                        applyFullFramePhysicalJpegCrop(this, ultraWideLens)
                         set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
                         set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
                         set(CaptureRequest.JPEG_QUALITY, jpegQuality)
                     }.build()
-                    mainSession.capture(mainRequest, object : CameraCaptureSession.CaptureCallback() {
-                        override fun onCaptureFailed(
-                            session: CameraCaptureSession,
-                            request: CaptureRequest,
-                            failure: CaptureFailure
-                        ) {
-                            Log.e(TAG, "[SPECIAL_PHOTO] Main capture failed: ${failure.reason}")
+                    // Queue both camera submissions on the same Camera2 handler in one runnable.
+                    // Separate physical devices still cannot promise identical exposure instants,
+                    // but this removes extra app-thread scheduling delay between their requests.
+                    val captureQueued = cameraHandler.post {
+                        if (completed.get()) return@post
+                        try {
+                            mainSession.capture(mainRequest, object : CameraCaptureSession.CaptureCallback() {
+                                override fun onCaptureFailed(
+                                    session: CameraCaptureSession,
+                                    request: CaptureRequest,
+                                    failure: CaptureFailure
+                                ) {
+                                    Log.e(TAG, "[SPECIAL_PHOTO] Main capture failed: ${failure.reason}")
+                                    finish(null, null, null, "")
+                                }
+                            }, cameraHandler)
+                            ultraSession.capture(ultraRequest, object : CameraCaptureSession.CaptureCallback() {
+                                override fun onCaptureFailed(
+                                    session: CameraCaptureSession,
+                                    request: CaptureRequest,
+                                    failure: CaptureFailure
+                                ) {
+                                    Log.e(TAG, "[SPECIAL_PHOTO] Ultra-wide capture failed: ${failure.reason}")
+                                    finish(null, null, null, "")
+                                }
+                            }, cameraHandler)
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "[SPECIAL_PHOTO] Unable to queue both sensor requests", t)
                             finish(null, null, null, "")
                         }
-                    }, cameraHandler)
-                    ultraSession.capture(ultraRequest, object : CameraCaptureSession.CaptureCallback() {
-                        override fun onCaptureFailed(
-                            session: CameraCaptureSession,
-                            request: CaptureRequest,
-                            failure: CaptureFailure
-                        ) {
-                            Log.e(TAG, "[SPECIAL_PHOTO] Ultra-wide capture failed: ${failure.reason}")
-                            finish(null, null, null, "")
-                        }
-                    }, cameraHandler)
+                    }
+                    if (!captureQueued) {
+                        finish(null, null, null, "")
+                    }
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "[SPECIAL_PHOTO] Dual-lens capture failed", t)
