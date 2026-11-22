@@ -512,6 +512,7 @@ private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit,
         }
         value = GalleryPhotoLoadState(isLoading = false, bitmap = decodedBitmap)
     }
+    val decodedPhoto = photoLoadState.bitmap
     Column(Modifier.fillMaxSize().background(Color.Black)) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
@@ -532,8 +533,8 @@ private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit,
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             when {
                 photoLoadState.isLoading -> CircularProgressIndicator(color = Color.White)
-                photoLoadState.bitmap != null -> Image(
-                    bitmap = photoLoadState.bitmap.asImageBitmap(),
+                decodedPhoto != null -> Image(
+                    bitmap = decodedPhoto.asImageBitmap(),
                     contentDescription = photo.displayName,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = androidx.compose.ui.layout.ContentScale.Fit
