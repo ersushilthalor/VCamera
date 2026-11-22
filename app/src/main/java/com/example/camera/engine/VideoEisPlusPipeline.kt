@@ -21,15 +21,34 @@ internal class VideoEisPlusPipeline(private val context: android.content.Context
     @Volatile private var session: RealtimeStabilizationCoordinator.Session? = null
     @Volatile var isUnavailable: Boolean = false
         private set
+    @Volatile var lastStartFailureReason: String? = null
+        private set
+
+    /** Camera2Engine uses this only for a confirmed video-stabilization HAL conflict. */
+    @Volatile var onRuntimeUnavailable: (() -> Unit)? = null
+
+    init {
+        coordinator.onEnhancedStabilizationUnavailable = {
+            isUnavailable = true
+            onRuntimeUnavailable?.invoke()
+        }
+    }
 
     val surface get() = imageReader?.surface
     val shouldRequestOisSamples get() = coordinator.shouldRequestOisSamples
+    val supportsOpticalTelemetry get() = coordinator.supportsOpticalTelemetry
+    val shouldDisableOisForMissingTelemetry get() = coordinator.shouldDisableOisForMissingTelemetry
     val isRunning get() = session?.isOperational == true
+
+    fun supportFailureReason(
+        characteristics: CameraCharacteristics,
+        timingCharacteristics: CameraCharacteristics = characteristics
+    ): String? = coordinator.cameraSupportFailureReason(characteristics, timingCharacteristics)
 
     fun isSupported(
         characteristics: CameraCharacteristics,
         timingCharacteristics: CameraCharacteristics = characteristics
-    ): Boolean = coordinator.isCameraSupported(characteristics, timingCharacteristics)
+    ): Boolean = supportFailureReason(characteristics, timingCharacteristics) == null
 
     fun start(
         cameraId: String,
@@ -45,8 +64,11 @@ internal class VideoEisPlusPipeline(private val context: android.content.Context
         onUnavailable: () -> Unit
     ): Boolean {
         stop()
-        if (!isSupported(characteristics, timingCharacteristics) || width <= 0 || height <= 0) {
+        lastStartFailureReason = supportFailureReason(characteristics, timingCharacteristics)
+            ?: if (width <= 0 || height <= 0) "no matching positive-sized YUV output" else null
+        if (lastStartFailureReason != null) {
             isUnavailable = true
+            Log.w("VideoEisPlusPipeline", "Photon EIS+ start unavailable: $lastStartFailureReason")
             onUnavailable()
             return false
         }
@@ -74,16 +96,26 @@ internal class VideoEisPlusPipeline(private val context: android.content.Context
             )
             session = eisSession
             if (!eisSession.start()) {
+                lastStartFailureReason = "MGC native engine or calibrated gyro stream failed to start"
                 stop()
                 isUnavailable = true
+                Log.w("VideoEisPlusPipeline", "Photon EIS+ unavailable: $lastStartFailureReason")
                 onUnavailable()
                 false
             } else {
+                lastStartFailureReason = null
                 isUnavailable = false
+                Log.i(
+                    "VideoEisPlusPipeline",
+                    "Photon EIS+ input started: camera=$cameraId size=${width}x$height " +
+                        "lookahead=$lookaheadFrames opticalTelemetry=$supportsOpticalTelemetry",
+                )
                 true
             }
         } catch (t: Throwable) {
-            Log.e("VideoEisPlusPipeline", "Failed to initialize Photon EIS+", t)
+            lastStartFailureReason = t.message?.takeIf { it.isNotBlank() }
+                ?: "pipeline initialization exception"
+            Log.e("VideoEisPlusPipeline", "Failed to initialize Photon EIS+: $lastStartFailureReason", t)
             stop()
             isUnavailable = true
             onUnavailable()
