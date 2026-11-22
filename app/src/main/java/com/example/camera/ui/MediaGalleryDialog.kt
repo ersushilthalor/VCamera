@@ -76,7 +76,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-internal const val GALLERY_LENS_SWITCH_DURATION_MS = 3_000
+internal const val GALLERY_LENS_SWITCH_DURATION_MS = 300
 
 /**
  * Calculates the actual crop applied to the ultra-wide player while the two gallery sources

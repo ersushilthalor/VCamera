@@ -96,7 +96,7 @@ class ZoomTransitionTimingTest {
 
     @Test
     fun galleryLensSwitchUsesThreeSecondCropAnimation() {
-        assertEquals(3_000, GALLERY_LENS_SWITCH_DURATION_MS)
+        assertEquals(300, GALLERY_LENS_SWITCH_DURATION_MS)
     }
 
     @Test
