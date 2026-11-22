@@ -55,11 +55,11 @@ type18::Parameters parametersFor(const EngineConfig &config) {
   // ten.  Keep it alongside the queue delay rather than letting either path
   // retain a stale type-18 literal.
   parameters.half_window_frames = config.lookahead_frames;
-  // 0x22FD640 and 0x22FE244 pass params+416 to the rolling-shutter projection
-  // builder. The ensuing conditional is the proprietary profile's calibrated
-  // lens-model branch, which profile 7 leaves false. Photon retains that
-  // recovered field verbatim; Camera2's public, already pixel-calibrated OIS
-  // shifts/dynamic intrinsics are fused separately in realIntrinsicsForRows.
+  // Intentional profile compatibility: the recovered profile-7 default (7 look-ahead
+  // frames) leaves the proprietary calibrated lens-model branch disabled. Other supported
+  // look-ahead windows enable that branch. Keep this conditional unchanged: Camera2's public,
+  // already pixel-calibrated OIS shifts/dynamic intrinsics are fused separately in
+  // realIntrinsicsForRows.
   parameters.apply_lens_offsets_to_intrinsics = config.lookahead_frames != 7;
   return parameters;
 }
