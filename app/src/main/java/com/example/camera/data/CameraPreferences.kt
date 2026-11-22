@@ -40,6 +40,7 @@ class CameraPreferences(context: Context) {
         private const val KEY_KEEP_ULTRAWIDE_READY = "pref_keep_ultrawide_ready"
         private const val KEY_AUTO_SWITCH_TO_ULTRAWIDE = "pref_auto_switch_to_ultrawide"
         private const val KEY_SHOW_ULTRAWIDE_PREVIEW = "pref_show_ultrawide_preview"
+        private const val KEY_SPECIAL_PHOTO_ENABLED = "pref_special_photo_enabled"
         private const val KEY_KEEP_FRONT_READY = "pref_keep_front_ready"
         private const val KEY_SHOW_FRONT_PREVIEW = "pref_show_front_preview"
         private const val KEY_FLOATING_WINDOW_TRANSPARENCY = "pref_floating_window_transparency"
@@ -222,6 +223,10 @@ class CameraPreferences(context: Context) {
     var isShowUltraWidePreview: Boolean
         get() = prefs.getBoolean(KEY_SHOW_ULTRAWIDE_PREVIEW, false)
         set(value) = prefs.edit().putBoolean(KEY_SHOW_ULTRAWIDE_PREVIEW, value).apply()
+
+    var isSpecialPhotoCaptureEnabled: Boolean
+        get() = prefs.getBoolean(KEY_SPECIAL_PHOTO_ENABLED, false)
+        set(value) = prefs.edit().putBoolean(KEY_SPECIAL_PHOTO_ENABLED, value).apply()
 
     var isKeepFrontCameraReady: Boolean
         get() = prefs.getBoolean(KEY_KEEP_FRONT_READY, true)
