@@ -1213,7 +1213,21 @@ class DualCameraRecordingRelay internal constructor(
                 if (sourceTimestampNs < recordingStartMonotonicNs) continue
                 val frameIntervalNs = 1_000_000_000L / fps.coerceAtLeast(1)
                 var presentationNs = sourceTimestampNs - recordingStartMonotonicNs -
-                    totalPausedDurationNs + streamClockOffsetNs
+                    totalPausedDurationNs
+                // OES callbacks are intentionally suppressed while the active lens has EIS+.
+                // Consume the same source-switch clock handoff here so changing cameras cannot
+                // leave the native YUV encoder path with a stale PTS offset.
+                if (pendingClockSyncOnSwitch) {
+                    pendingClockSyncOnSwitch = false
+                    if (lastOutputPtsNs > 0L) {
+                        val expectedNext = lastOutputPtsNs + frameIntervalNs
+                        if (kotlin.math.abs(presentationNs - expectedNext) > 150_000_000L) {
+                            streamClockOffsetNs += expectedNext - presentationNs
+                            presentationNs = expectedNext
+                        }
+                    }
+                }
+                presentationNs += streamClockOffsetNs
                 if (presentationNs < 0L) presentationNs = 0L
                 if (lastOutputPtsNs >= 0L && presentationNs <= lastOutputPtsNs) {
                     presentationNs = lastOutputPtsNs + max(1_000_000L, frameIntervalNs / 4)
