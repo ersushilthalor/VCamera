@@ -8014,10 +8014,10 @@ class Camera2Engine(private val context: Context) {
                     uwLensForRec != null &&
                     mainLensForRec != null
 
-                // Photon EIS+ supports standard SDR Video recording from the active sensor.
-                // Keep Ultra-Wide Ready stays enabled: on logical multi-camera devices the EIS+
-                // YUV reader is routed to whichever physical lens is actively being recorded.
-                // Special Video, Cinema, and 10-bit/HDR recording keep their own paths.
+                // Photon EIS+ consumes the active recording sensor's Camera2 YUV stream.
+                // Special Video keeps its independent ultra-wide companion encoder; EIS+ is
+                // applied to the primary relay stream without changing the companion recording.
+                // Cinema and 10-bit/HDR continue to use their existing dedicated recording paths.
                 val eisPlusLogicalZoom = canUseLogicalZoomForLens(camera.id, lens, currentZoom)
                 val preferredEisPlusPhysicalId = when {
                     Build.VERSION.SDK_INT < Build.VERSION_CODES.P -> null
@@ -8050,7 +8050,6 @@ class Camera2Engine(private val context: Context) {
                 )
                 val eisPlusModeFailureReason = when {
                     currentMode != CameraMode.VIDEO -> "standard Video mode only"
-                    isSpecialVideoRecording -> "Special Video recording is not supported"
                     isSoftwareCinema -> "Cinema recording is not supported"
                     is10BitSession -> "10-bit/HDR recording is not supported"
                     else -> null
