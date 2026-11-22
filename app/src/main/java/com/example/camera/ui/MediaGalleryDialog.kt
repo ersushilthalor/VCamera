@@ -50,6 +50,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
@@ -488,9 +489,42 @@ private fun MediaGalleryItemViewer(item: MediaGalleryItem, onBack: () -> Unit, o
 @Composable
 private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit, onClose: () -> Unit) {
     val context = LocalContext.current
+    var isExpanded by rememberSaveable(photo.uri.toString()) { mutableStateOf(false) }
     val bitmap by produceState<Bitmap?>(initialValue = null, key1 = photo.uri) {
         value = withContext(Dispatchers.IO) { decodeGalleryImage(context, photo.uri, 2200) }
     }
+    val expandedBitmap by produceState<Bitmap?>(
+        initialValue = null,
+        key1 = photo.uri,
+        key2 = photo.ultraWideUri,
+        key3 = isExpanded
+    ) {
+        if (!isExpanded || photo.ultraWideUri == null) {
+            value = null
+        } else {
+            val pairBitmaps = withContext(Dispatchers.IO) {
+                val main = decodeGalleryImage(context, photo.uri, 1800)
+                val ultraWide = decodeGalleryImage(context, photo.ultraWideUri, 1800)
+                if (main == null || ultraWide == null) {
+                    main?.recycle()
+                    ultraWide?.recycle()
+                    null
+                } else main to ultraWide
+            }
+            value = if (pairBitmaps == null) null else {
+                val (main, ultraWide) = pairBitmaps
+                try {
+                    withContext(Dispatchers.Default) {
+                        com.example.camera.gallery.SmartPhotoExpandComposer.compose(main, ultraWide)
+                    }
+                } finally {
+                    main.recycle()
+                    ultraWide.recycle()
+                }
+            }
+        }
+    }
+
     Column(Modifier.fillMaxSize().background(Color.Black)) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
@@ -500,19 +534,40 @@ private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit,
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Back to media", tint = Color.White)
             }
             Column(Modifier.weight(1f)) {
-                Text("Photo", color = Color.White, style = MaterialTheme.typography.titleLarge)
-                Text(photo.displayName, color = Color.White.copy(alpha = 0.62f),
-                    style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                Text(if (isExpanded) "Expanded Photo" else "Photo", color = Color.White, style = MaterialTheme.typography.titleLarge)
+                Text(
+                    if (photo.isSpecialPhoto && photo.captureSkewMs != null)
+                        "${photo.displayName} · sensor skew ${photo.captureSkewMs} ms"
+                    else photo.displayName,
+                    color = Color.White.copy(alpha = 0.62f),
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1
+                )
+            }
+            if (photo.ultraWideUri != null) {
+                TextButton(onClick = { isExpanded = !isExpanded }) {
+                    Text(if (isExpanded) "1x" else "Expand", color = galleryAccent, fontWeight = FontWeight.SemiBold)
+                }
             }
             IconButton(onClick = onClose) {
                 Icon(Icons.Filled.Close, contentDescription = "Close photo", tint = Color.White)
             }
         }
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            if (bitmap != null) {
-                Image(bitmap = bitmap!!.asImageBitmap(), contentDescription = photo.displayName,
-                    modifier = Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Fit)
-            } else Text("Unable to load photo", color = Color.White.copy(alpha = 0.75f))
+            val displayBitmap = if (isExpanded) expandedBitmap else bitmap
+            if (displayBitmap != null) {
+                Image(
+                    bitmap = displayBitmap.asImageBitmap(),
+                    contentDescription = if (isExpanded) "Expanded 1x and ultra-wide photo" else photo.displayName,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                )
+            } else {
+                Text(
+                    if (isExpanded) "Preparing expanded view…" else "Unable to load photo",
+                    color = Color.White.copy(alpha = 0.75f)
+                )
+            }
         }
     }
 }
