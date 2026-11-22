@@ -1,6 +1,7 @@
 package com.example.camera.engine
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ZoomTransitionTimingTest {
@@ -54,6 +55,60 @@ class ZoomTransitionTimingTest {
         assertEquals(true, ZoomTransitionController.isHoldTimeHandoffEligible(0.5f, 1.0f))
         assertEquals(false, ZoomTransitionController.isHoldTimeHandoffEligible(0.5f, 2.0f))
         assertEquals(false, ZoomTransitionController.isHoldTimeHandoffEligible(1.0f, 0.5f))
+    }
+
+    @Test
+    fun frameHandoffUsesFixedTimeFadeIndependentOfCameraFrameRate() {
+        assertEquals(160L, ZoomTransitionController.FRAME_HANDOFF_FADE_DURATION_MS)
+        assertEquals(
+            0f,
+            ZoomTransitionController.calculateFrameHandoffProgress(
+                timeProgress = 0f,
+                targetSource = PreviewStreamSource.MAIN,
+                currentZoom = 1f
+            ),
+            0.0001f
+        )
+    }
+
+    @Test
+    fun frameHandoffFadeUsesCosineEasingAndMonotonicAlphaStepLimit() {
+        var progress = 0f
+        val halfTimeProgress = ZoomTransitionController.calculateFrameHandoffProgress(
+            timeProgress = 0.5f,
+            targetSource = PreviewStreamSource.MAIN,
+            currentZoom = 1f,
+            previousProgress = progress
+        )
+        assertEquals(0.5f, halfTimeProgress, 0.0001f)
+        assertTrue(halfTimeProgress >= progress)
+        assertTrue(halfTimeProgress - progress <= 0.3001f)
+
+        progress = halfTimeProgress
+        repeat(4) {
+            val next = ZoomTransitionController.calculateFrameHandoffProgress(
+                timeProgress = 1f,
+                targetSource = PreviewStreamSource.MAIN,
+                currentZoom = 1f,
+                previousProgress = progress
+            )
+            assertTrue(next >= progress)
+            assertTrue(next - progress <= 0.3001f)
+            progress = next
+        }
+        assertEquals(1f, progress, 0.0001f)
+    }
+
+    @Test
+    fun zoomTrajectoryCanAccelerateFadeWithoutReversingAlpha() {
+        val progress = ZoomTransitionController.calculateFrameHandoffProgress(
+            timeProgress = 0f,
+            targetSource = PreviewStreamSource.MAIN,
+            currentZoom = 1.2f,
+            previousProgress = 0.1f
+        )
+        assertEquals(0.4f, progress, 0.0001f)
+        assertTrue(progress >= 0.1f)
     }
 
     @Test

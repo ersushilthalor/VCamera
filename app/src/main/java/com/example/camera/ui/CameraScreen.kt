@@ -156,7 +156,6 @@ fun CameraScreen(
     val mainPreviewBufferSize by viewModel.engine.mainPreviewBufferSize.collectAsStateWithLifecycle()
     val ultraWidePreviewBufferSize by viewModel.engine.ultraWidePreviewBufferSize.collectAsStateWithLifecycle()
     val isUsingUltraWideSurface by viewModel.isUsingUltraWideSurface.collectAsStateWithLifecycle()
-    val previewOverlapState by viewModel.previewOverlapState.collectAsStateWithLifecycle()
     val sensorOrientation by viewModel.engine.sensorOrientation.collectAsStateWithLifecycle()
     val storageStats by viewModel.engine.storageStats.collectAsStateWithLifecycle()
     val isRecordingVideo by viewModel.engine.isRecordingVideo.collectAsStateWithLifecycle()
@@ -396,7 +395,7 @@ fun CameraScreen(
                 isUsingUltraWideSurface = isUsingUltraWideSurface,
                 isSpecialVideoPreviewEnabled = cameraMode == CameraMode.VIDEO &&
                     instantSwitchState.isShowUltraWidePreview && isUsingRearMainLens,
-                previewOverlapState = previewOverlapState,
+                previewOverlapState = viewModel.previewOverlapState,
                 onUltraWideSurfaceTextureAvailable = { texture, width, height ->
                     viewModel.engine.setUltraWidePreviewSurfaceTexture(texture, width, height)
                 },

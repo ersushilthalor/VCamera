@@ -32,6 +32,7 @@ import android.os.HandlerThread
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.StatFs
+import android.os.Trace
 import java.util.concurrent.Executor
 import android.provider.MediaStore
 import android.util.Log
@@ -58,6 +59,14 @@ import kotlin.math.min
 
 private const val TAG = "Camera2Engine"
 
+private data class CameraCapabilitiesCacheEntry(
+    val hardwareCapabilities: HardwareCapabilities,
+    val cinemaCapabilities: CinemaHardwareCapabilities,
+    val selectedPhotoResolution: CameraResolution?,
+    val selectedVideoResolution: CameraResolution?,
+    val supportedVideoResolutions: List<CameraResolution>
+)
+
 enum class PreviewStreamSource {
     MAIN,
     ULTRAWIDE
@@ -67,6 +76,17 @@ class Camera2Engine(private val context: Context) {
 
     private val cameraManager: CameraManager? =
         context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+
+    // Camera2 characteristics and stream output geometry are immutable for a camera ID
+    // during an app session. Cache them so a lens hand-off never queries camera metadata.
+    private val cameraCharacteristicsCache = java.util.concurrent.ConcurrentHashMap<String, CameraCharacteristics>()
+    private val streamConfigurationMapCache = java.util.concurrent.ConcurrentHashMap<String, StreamConfigurationMap>()
+    private val outputSizesCache = java.util.concurrent.ConcurrentHashMap<String, Array<Size>>()
+    private val optimalPreviewSizeCache = java.util.concurrent.ConcurrentHashMap<String, Size>()
+    private val previewSizeCacheLock = Any()
+    @Volatile private var previewSizeCacheContext: String? = null
+    @Volatile private var lastPreviewBufferSyncCacheKey: String? = null
+    private val cameraCapabilitiesCache = java.util.concurrent.ConcurrentHashMap<String, CameraCapabilitiesCacheEntry>()
 
     // Background threads
     private var backgroundThread: HandlerThread? = null
@@ -100,12 +120,62 @@ class Camera2Engine(private val context: Context) {
     val cameraInitError: StateFlow<String?> = _cameraInitError.asStateFlow()
 
     fun getCharacteristics(cameraId: String): CameraCharacteristics? {
+        cameraCharacteristicsCache[cameraId]?.let { return it }
         val mgr = cameraManager ?: return null
         return try {
-            mgr.getCameraCharacteristics(cameraId)
+            val characteristics = mgr.getCameraCharacteristics(cameraId)
+            cameraCharacteristicsCache.putIfAbsent(cameraId, characteristics) ?: characteristics
         } catch (t: Throwable) {
             Log.w(TAG, "Failed to get characteristics for camera $cameraId", t)
             null
+        }
+    }
+
+    private fun getStreamConfigurationMap(cameraId: String): StreamConfigurationMap? {
+        streamConfigurationMapCache[cameraId]?.let { return it }
+        val map = getCharacteristics(cameraId)
+            ?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            ?: return null
+        return streamConfigurationMapCache.putIfAbsent(cameraId, map) ?: map
+    }
+
+    private fun getCachedOutputSizes(cameraId: String, format: Int): Array<Size> {
+        val key = cameraId + "|format:" + format
+        return outputSizesCache.computeIfAbsent(key) {
+            getStreamConfigurationMap(cameraId)?.getOutputSizes(format) ?: emptyArray()
+        }
+    }
+
+    private fun getCachedOutputSizes(cameraId: String, outputClass: Class<*>): Array<Size> {
+        val key = cameraId + "|class:" + outputClass.name
+        return outputSizesCache.computeIfAbsent(key) {
+            getStreamConfigurationMap(cameraId)?.getOutputSizes(outputClass) ?: emptyArray()
+        }
+    }
+
+    private fun currentPreviewSizeCacheContext(): String {
+        val requestedResolution = if (currentMode == CameraMode.CINEMA) {
+            _cinemaConfig.value.selectedResolution
+                ?: userSelectedVideoResolution
+                ?: _selectedVideoResolution.value
+        } else {
+            userSelectedVideoResolution ?: _selectedVideoResolution.value
+        }
+        val recording = _isRecordingVideo.value || isStartingRecording.get()
+        return listOf(
+            currentMode.name,
+            viewfinderResolution.maxDimension,
+            requestedResolution?.width ?: 0,
+            requestedResolution?.height ?: 0,
+            recording
+        ).joinToString("|")
+    }
+
+    private fun invalidatePreviewSizeCache() {
+        synchronized(previewSizeCacheLock) {
+            optimalPreviewSizeCache.clear()
+            previewSizeCacheContext = null
+            lastPreviewBufferSyncCacheKey = null
         }
     }
 
@@ -392,6 +462,30 @@ class Camera2Engine(private val context: Context) {
      * Synchronizes all preview SurfaceTexture buffer dimensions (Main + Ultra-Wide)
      * so both streams match their respective active viewfinder resolution and aspect ratio.
      */
+    private fun syncPreviewBufferSizesIfNeeded(
+        cameraW: Int,
+        cameraH: Int,
+        surfaceLens: LensInfo
+    ) {
+        val cacheKey = listOf(
+            surfaceLens.cameraId,
+            surfaceLens.lensType.name,
+            cameraW,
+            cameraH,
+            getTargetAspectRatioForMode(currentMode).toBits(),
+            currentPreviewSizeCacheContext(),
+            System.identityHashCode(previewSurfaceTexture),
+            System.identityHashCode(fallbackMainSurfaceTexture),
+            System.identityHashCode(ultraWideViewfinderSurfaceTexture),
+            System.identityHashCode(ultraWideStandbySurfaceTexture)
+        ).joinToString("|")
+        synchronized(previewSizeCacheLock) {
+            if (lastPreviewBufferSyncCacheKey == cacheKey) return
+            lastPreviewBufferSyncCacheKey = cacheKey
+        }
+        syncPreviewBufferSizes(cameraW, cameraH, surfaceLens)
+    }
+
     private fun syncPreviewBufferSizes(
         cameraW: Int,
         cameraH: Int,
@@ -801,9 +895,9 @@ class Camera2Engine(private val context: Context) {
                 applyHardwareEisRequest(builder, lensOverride = standbyLens)
             }
 
-            // Park the standby stream at the FOV-matched switch point while idle.
-            // During overlap, track the controller's current zoom so the old and new views do
-            // not diverge merely because the 16-frame crossfade outlasts the zoom animation.
+            // While idle, use the FOV-matched switch point. During overlap, calculate the
+            // standby crop from the controller's live handoffZoom so the old and new sources
+            // remain close in FOV throughout the fixed-duration display-vsync fade.
             val sensorRect = chars?.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: Rect(0, 0, 4000, 3000)
             val handoffState = zoomTransitionController.previewOverlapState.value
             val handoffZoom = if (handoffState.isOverlapping) {
@@ -1513,11 +1607,9 @@ class Camera2Engine(private val context: Context) {
         cameraId: String,
         requested: CameraResolution = userSelectedVideoResolution ?: _selectedVideoResolution.value ?: CameraResolution(1920, 1080)
     ): CameraResolution {
-        val chars = getCharacteristics(cameraId)
-        val map = chars?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-        val supportedSizes = map?.getOutputSizes(MediaRecorder::class.java)
-            ?: map?.getOutputSizes(SurfaceTexture::class.java)
-            ?: emptyArray()
+        val recorderSizes = getCachedOutputSizes(cameraId, MediaRecorder::class.java)
+        val supportedSizes = recorderSizes.takeIf { it.isNotEmpty() }
+            ?: getCachedOutputSizes(cameraId, SurfaceTexture::class.java)
         val reqW = maxOf(requested.width, requested.height)
         val reqH = minOf(requested.width, requested.height)
         val lens = _availableLenses.value.firstOrNull { it.cameraId == cameraId }
@@ -1578,7 +1670,7 @@ class Camera2Engine(private val context: Context) {
         // capture using the highest suitable supported 4:3 sensor stream (e.g. 3264x2448) which will be cropped to 9:16 for
         // live preview and final video while keeping encoder output at 4K (2160x3840).
         if (reqW >= 3840 && isUltraWide) {
-            val allStreamSizes = ((map?.getOutputSizes(SurfaceTexture::class.java) ?: emptyArray()).toList() +
+            val allStreamSizes = (getCachedOutputSizes(cameraId, SurfaceTexture::class.java).toList() +
                     supportedSizes.toList()).distinctBy { "${it.width}x${it.height}" }
             val fourThreeSizes = allStreamSizes.filter {
                 val r = maxOf(it.width, it.height).toFloat() / minOf(it.width, it.height).toFloat()
@@ -1651,6 +1743,12 @@ class Camera2Engine(private val context: Context) {
 
     // Capture Settings State
     var currentMode: CameraMode = CameraMode.VIDEO
+        set(value) {
+            if (field != value) {
+                field = value
+                invalidatePreviewSizeCache()
+            }
+        }
     var flashMode: FlashMode = FlashMode.OFF
         set(value) {
             field = value
@@ -1727,6 +1825,12 @@ class Camera2Engine(private val context: Context) {
     private var pendingDirectTargetZoom: Float? = null
     var saveSelfieAsPreviewed: Boolean = true
     var viewfinderResolution: ViewfinderResolution = ViewfinderResolution.NORMAL
+        set(value) {
+            if (field != value) {
+                field = value
+                invalidatePreviewSizeCache()
+            }
+        }
     private val cinemaSoftwareRecorder by lazy { CinemaSoftwareRecordingEngine(context) }
     private val normalVideoRecorder by lazy { NormalVideoRecordingEngine(context) }
     private var isSoftwareCinemaRecording: Boolean = false
@@ -2070,8 +2174,34 @@ class Camera2Engine(private val context: Context) {
     fun inspectCapabilities(cameraId: String) {
         try {
             val chars = getCharacteristics(cameraId) ?: return
-            val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-
+            val cachedCapabilities = cameraCapabilitiesCache[cameraId]
+            if (cachedCapabilities != null) {
+                if (_capabilities.value != cachedCapabilities.hardwareCapabilities) {
+                    _capabilities.value = cachedCapabilities.hardwareCapabilities
+                }
+                if (_cinemaCapabilities.value != cachedCapabilities.cinemaCapabilities) {
+                    _cinemaCapabilities.value = cachedCapabilities.cinemaCapabilities
+                }
+                val selectedPhoto = _selectedPhotoResolution.value
+                    ?.takeIf { cachedCapabilities.hardwareCapabilities.supportedPhotoResolutions.contains(it) }
+                    ?: cachedCapabilities.selectedPhotoResolution
+                if (_selectedPhotoResolution.value != selectedPhoto) {
+                    _selectedPhotoResolution.value = selectedPhoto
+                }
+                val selectedVideo = userSelectedVideoResolution
+                    ?: _selectedVideoResolution.value
+                    ?: cachedCapabilities.selectedVideoResolution
+                if (selectedVideo != null && _selectedVideoResolution.value != selectedVideo) {
+                    _selectedVideoResolution.value = selectedVideo
+                }
+                lensSupportedVideoResolutions[cameraId] = cachedCapabilities.supportedVideoResolutions
+                cinemaEngine.onCameraConfigured(chars, cachedCapabilities.supportedVideoResolutions)
+                val currentCinemaCapabilities = cinemaEngine.capabilities
+                if (_cinemaCapabilities.value != currentCinemaCapabilities) {
+                    _cinemaCapabilities.value = currentCinemaCapabilities
+                }
+                return
+            }
             val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
             val hasManualSensor = caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
             val hasRaw = caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)
@@ -2109,7 +2239,7 @@ class Camera2Engine(private val context: Context) {
             // Photo JPEG Resolutions: use standard SCALER_STREAM_CONFIGURATION_MAP sizes
             // (SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION sizes are illegal in standard SESSION_REGULAR
             // preview sessions without SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION and cause HAL hangs/failures on back cameras)
-            val standardSizes = map?.getOutputSizes(ImageFormat.JPEG) ?: emptyArray()
+            val standardSizes = getCachedOutputSizes(cameraId, ImageFormat.JPEG)
             val allJpegSizes = standardSizes.distinctBy { "${it.width}x${it.height}" }
             val photoResolutions = allJpegSizes
                 .sortedByDescending { it.width.toLong() * it.height.toLong() }
@@ -2117,7 +2247,7 @@ class Camera2Engine(private val context: Context) {
 
             // RAW Resolutions
             val standardRawSizes = if (hasRaw) {
-                map?.getOutputSizes(ImageFormat.RAW_SENSOR) ?: emptyArray()
+                getCachedOutputSizes(cameraId, ImageFormat.RAW_SENSOR)
             } else emptyArray()
             val allRawSizes = standardRawSizes.distinctBy { "${it.width}x${it.height}" }
             val rawResolutions = allRawSizes
@@ -2125,9 +2255,9 @@ class Camera2Engine(private val context: Context) {
                 .map { CameraResolution(it.width, it.height, ImageFormat.RAW_SENSOR, isRaw = true) }
 
             // Video Resolutions: strictly validate against camera sensor's supported sizes
-            val videoSizes = map?.getOutputSizes(MediaRecorder::class.java)
-                ?: map?.getOutputSizes(SurfaceTexture::class.java)
-                ?: emptyArray()
+            val recorderVideoSizes = getCachedOutputSizes(cameraId, MediaRecorder::class.java)
+            val videoSizes = recorderVideoSizes.takeIf { it.isNotEmpty() }
+                ?: getCachedOutputSizes(cameraId, SurfaceTexture::class.java)
 
             val standardVideoQualities = listOf(
                 CameraResolution(3840, 2160), // 4K UHD
@@ -2141,7 +2271,7 @@ class Camera2Engine(private val context: Context) {
                     if (standard.width == 3840 && standard.height == 2160) {
                         videoSizes.any { it.width == 3840 && it.height == 2160 } ||
                         videoSizes.any { (it.width.toLong() * it.height.toLong()) >= 5_000_000L } ||
-                        (map?.getOutputSizes(SurfaceTexture::class.java) ?: emptyArray()).any {
+                        getCachedOutputSizes(cameraId, SurfaceTexture::class.java).any {
                             (it.width.toLong() * it.height.toLong()) >= 5_000_000L
                         }
                     } else if (standard.width == 2560 && standard.height == 1440) {
@@ -2209,15 +2339,23 @@ class Camera2Engine(private val context: Context) {
                 maxZoom = maxZoom
             )
 
-            _capabilities.value = hardwareCaps
+            if (_capabilities.value != hardwareCaps) {
+                _capabilities.value = hardwareCaps
+            }
 
             cinemaEngine.onCameraConfigured(chars, filteredVideoResolutions)
-            _cinemaCapabilities.value = cinemaEngine.capabilities
+            val cinemaCaps = cinemaEngine.capabilities
+            if (_cinemaCapabilities.value != cinemaCaps) {
+                _cinemaCapabilities.value = cinemaCaps
+            }
 
             lensSupportedVideoResolutions[cameraId] = filteredVideoResolutions
 
             if (_selectedPhotoResolution.value == null || !photoResolutions.contains(_selectedPhotoResolution.value)) {
-                _selectedPhotoResolution.value = photoResolutions.firstOrNull()
+                val nextPhotoResolution = photoResolutions.firstOrNull()
+                if (_selectedPhotoResolution.value != nextPhotoResolution) {
+                    _selectedPhotoResolution.value = nextPhotoResolution
+                }
             }
             val preservedVideoRes = userSelectedVideoResolution ?: _selectedVideoResolution.value
             if (preservedVideoRes != null) {
@@ -2236,10 +2374,19 @@ class Camera2Engine(private val context: Context) {
                         ?: filteredVideoResolutions.firstOrNull()
                 }
                 userSelectedVideoResolution = initialVideoRes
-                _selectedVideoResolution.value = initialVideoRes
+                if (_selectedVideoResolution.value != initialVideoRes) {
+                    _selectedVideoResolution.value = initialVideoRes
+                }
             }
 
             updatePreviewAspectRatio()
+            cameraCapabilitiesCache[cameraId] = CameraCapabilitiesCacheEntry(
+                hardwareCapabilities = hardwareCaps,
+                cinemaCapabilities = cinemaCaps,
+                selectedPhotoResolution = _selectedPhotoResolution.value,
+                selectedVideoResolution = _selectedVideoResolution.value,
+                supportedVideoResolutions = filteredVideoResolutions
+            )
         } catch (t: Throwable) {
             Log.e(TAG, "Error inspecting capabilities for camera $cameraId", t)
         }
@@ -2259,9 +2406,31 @@ class Camera2Engine(private val context: Context) {
         targetRatio: Float = getTargetAspectRatioForMode(currentMode),
         lensTypeHint: LensType? = null
     ): Size {
+        val fallbackDefault = if (targetRatio > 1.5f) Size(1920, 1080) else Size(1440, 1080)
+        val id = cameraId ?: _selectedLens.value?.cameraId ?: return fallbackDefault
+        val contextKey = currentPreviewSizeCacheContext()
+        synchronized(previewSizeCacheLock) {
+            if (previewSizeCacheContext != contextKey) {
+                optimalPreviewSizeCache.clear()
+                lastPreviewBufferSyncCacheKey = null
+                previewSizeCacheContext = contextKey
+            }
+        }
+        val cacheKey = listOf(id, targetRatio.toBits(), lensTypeHint?.name ?: "any", contextKey)
+            .joinToString("|")
+        optimalPreviewSizeCache[cacheKey]?.let { return it }
+        val selectedSize = calculateOptimalPreviewSize(id, targetRatio, lensTypeHint)
+        optimalPreviewSizeCache.putIfAbsent(cacheKey, selectedSize)
+        return optimalPreviewSizeCache[cacheKey] ?: selectedSize
+    }
+
+    private fun calculateOptimalPreviewSize(
+        id: String,
+        targetRatio: Float,
+        lensTypeHint: LensType?
+    ): Size {
         val streamRatio = targetRatio
         val fallbackDefault = if (streamRatio > 1.5f) Size(1920, 1080) else Size(1440, 1080)
-        val id = cameraId ?: _selectedLens.value?.cameraId ?: return fallbackDefault
         val lens = _availableLenses.value.firstOrNull {
             it.cameraId == id && (lensTypeHint == null || it.lensType == lensTypeHint)
         }
@@ -2270,9 +2439,8 @@ class Camera2Engine(private val context: Context) {
             ((userSelectedVideoResolution?.let { maxOf(it.width, it.height) >= 3840 } == true) ||
              (_selectedVideoResolution.value?.let { maxOf(it.width, it.height) >= 3840 } == true))
 
-        val chars = getCharacteristics(id) ?: return fallbackDefault
-        val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return fallbackDefault
-        val previewSizes = map.getOutputSizes(SurfaceTexture::class.java) ?: emptyArray()
+        if (getStreamConfigurationMap(id) == null) return fallbackDefault
+        val previewSizes = getCachedOutputSizes(id, SurfaceTexture::class.java)
         if (previewSizes.isEmpty()) {
             return fallbackDefault
         }
@@ -2495,6 +2663,20 @@ class Camera2Engine(private val context: Context) {
         preserveZoom: Boolean = false,
         targetZoom: Float? = null,
         isContinuousTransition: Boolean = false
+    ) {
+        Trace.beginSection("VCamera.selectLens")
+        try {
+            selectLensInternal(lens, preserveZoom, targetZoom, isContinuousTransition)
+        } finally {
+            Trace.endSection()
+        }
+    }
+
+    private fun selectLensInternal(
+        lens: LensInfo,
+        preserveZoom: Boolean,
+        targetZoom: Float?,
+        isContinuousTransition: Boolean
     ) {
         val defaultLensZoom = if (lens.isPrimaryMain || lens.lensType == LensType.WIDE) 1.0f else lens.baseZoomRatio
         val effectiveTargetZoom = targetZoom ?: if (preserveZoom) currentZoom else defaultLensZoom
@@ -2721,93 +2903,120 @@ class Camera2Engine(private val context: Context) {
             return
         }
 
-        synchronized(cameraLifecycleLock) {
-            if (switchGen != lensSwitchGeneration.get()) {
-                completeLensSwitch(targetLens, isContinuousTransition = isContinuousTransition)
-                return
-            }
+        var staleSwitch = false
+        var didInstantSwap = false
+        var needsSessionConfigure = false
+        val swapStartedNanos = System.nanoTime()
 
-            val standbySession = ultraWideStandbyCaptureSession
-            val oldCam = cameraDevice
-            val oldSession = captureSession
+        Trace.beginSection("VCamera.prewarmedLensSwap")
+        try {
+            synchronized(cameraLifecycleLock) {
+                if (switchGen != lensSwitchGeneration.get()) {
+                    staleSwitch = true
+                } else {
+                    val standbySession = ultraWideStandbyCaptureSession
+                    val oldCam = cameraDevice
+                    val oldSession = captureSession
 
-            // Ensure both preview surfaces are sized to the active viewfinder resolution & aspect ratio
-            val targetRatio = getTargetAspectRatioForMode(currentMode)
-            val optimalPreviewSize = getOptimalPreviewSize(resolvePreviewStreamCameraId(targetLens), targetRatio, targetLens.lensType)
-            _previewAspectRatio.value = targetRatio
-            _previewBufferSize.value = optimalPreviewSize
-            val cameraW = max(optimalPreviewSize.width, optimalPreviewSize.height)
-            val cameraH = min(optimalPreviewSize.width, optimalPreviewSize.height)
-            syncPreviewBufferSizes(cameraW, cameraH, targetLens)
+                    if (standbySession != null) {
+                        val previousBuilder = synchronized(previewRequestLock) { previewRequestBuilder }
+                        val previousJpegReader = imageReaderJpeg
+                        val targetBuilder = ultraWideStandbyRequestBuilder
+                        val targetJpegReader = ultraWideStandbyJpegReader
 
-            if (standbySession != null) {
-                // True 0ms persistent dual-session swap:
-                // Both sessions are already configured and streaming continuously.
-                // Swap active <-> standby pointers without stopping or closing either session!
-                val prevBuilder = synchronized(previewRequestLock) { previewRequestBuilder }
-                val prevJpeg = imageReaderJpeg
-                val targetBuilder = ultraWideStandbyRequestBuilder
-                val targetJpeg = ultraWideStandbyJpegReader
-
-                cameraDevice = targetCam
-                captureSession = standbySession
-                synchronized(previewRequestLock) {
-                    previewRequestBuilder = targetBuilder
-                }
-                if (targetJpeg != null) {
-                    imageReaderJpeg = targetJpeg
-                }
-
-                ultraWideStandbyCameraDevice = oldCam
-                ultraWideStandbyCaptureSession = oldSession
-                ultraWideStandbyRequestBuilder = prevBuilder
-                if (targetJpeg != null) {
-                    ultraWideStandbyJpegReader = prevJpeg
-                }
-
-                val useUw = (targetLens.lensType == LensType.ULTRAWIDE)
-                val targetSource = if (useUw) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
-                if (_isRecordingVideo.value) {
-                    dualCameraRecordingRelay?.setActiveSource(targetSource)
-                    dualCameraRecordingRelay?.getRecorderSurfaceForLens(targetLens)?.let { surf ->
-                        if (surf.isValid) {
-                            activeRecordingSurface = surf
+                        cameraDevice = targetCam
+                        captureSession = standbySession
+                        synchronized(previewRequestLock) {
+                            previewRequestBuilder = targetBuilder
                         }
+                        if (targetJpegReader != null) imageReaderJpeg = targetJpegReader
+
+                        ultraWideStandbyCameraDevice = oldCam
+                        ultraWideStandbyCaptureSession = oldSession
+                        ultraWideStandbyRequestBuilder = previousBuilder
+                        if (targetJpegReader != null) ultraWideStandbyJpegReader = previousJpegReader
+
+                        val useUltraWide = targetLens.lensType == LensType.ULTRAWIDE
+                        val targetSource = if (useUltraWide) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
+                        if (_isRecordingVideo.value) {
+                            dualCameraRecordingRelay?.setActiveSource(targetSource)
+                            dualCameraRecordingRelay?.getRecorderSurfaceForLens(targetLens)?.let { surface ->
+                                if (surface.isValid) activeRecordingSurface = surface
+                            }
+                        }
+                        _isUsingUltraWideSurface.value = useUltraWide
+                        _displayedPreviewSource.value = targetSource
+                        activeSessionLens = targetLens
+                        _selectedLens.value = targetLens
+                        activeSessionPhysicalCameraId = targetLens.physicalCameraId
+                        _isCameraReady.value = true
+                        isUltraWideStreaming.set(true)
+                        _ultraWideStreamStatus.value = BackgroundCameraStatus.READY_QUIET
+                        didInstantSwap = true
+                    } else {
+                        cameraDevice = targetCam
+                        ultraWideStandbyCameraDevice = oldCam
+                        ultraWideStandbyCaptureSession = oldSession
+                        ultraWideStandbyRequestBuilder = synchronized(previewRequestLock) { previewRequestBuilder }
+                        ultraWideStandbyJpegReader = imageReaderJpeg
+                        activeSessionLens = targetLens
+                        activeSessionPhysicalCameraId = targetLens.physicalCameraId
+                        needsSessionConfigure = true
                     }
                 }
-                _isUsingUltraWideSurface.value = useUw
-                _displayedPreviewSource.value = targetSource
-                activeSessionLens = targetLens
-                _selectedLens.value = targetLens
-                activeSessionPhysicalCameraId = targetLens.physicalCameraId
-                _isCameraReady.value = true
-                isUltraWideStreaming.set(true)
-                _ultraWideStreamStatus.value = BackgroundCameraStatus.READY_QUIET
-
-                // Update capabilities for the newly active lens first, then apply
-                // settings. During continuous zoom, do NOT synchronously flush the capture request.
-                inspectCapabilities(targetLens.cameraId)
-                scheduleZoomPreviewUpdate(immediate = true, explicitZoom = currentZoom)
-                backgroundHandler?.post {
-                    syncStandbyStreamSettings()
-                }
-                completeLensSwitch(targetLens, isContinuousTransition = isContinuousTransition)
-                Log.i(TAG, "[KEEP_ULTRAWIDE_READY] 0ms instant stream swap completed to ${targetLens.lensType} (ID=${targetCam.id}, recording=${_isRecordingVideo.value}, source=${_displayedPreviewSource.value})")
-                return
             }
+        } finally {
+            val swapElapsedMicros = (System.nanoTime() - swapStartedNanos) / 1_000L
+            Log.i(
+                TAG,
+                "[LENS_SWAP_TRACE] prewarmedSwap=" + swapElapsedMicros +
+                    "us thread=" + Thread.currentThread().name
+            )
+            Trace.endSection()
+        }
 
-            // If targetCam was just opened and standbySession is still configuring, prepare session
-            // while keeping the current valid preview visible until the target stream is usable.
-            Log.w(TAG, "Standby session not configured on target camera ${targetCam.id}; preparing session before switching preview source")
-            cameraDevice = targetCam
-            ultraWideStandbyCameraDevice = oldCam
-            ultraWideStandbyCaptureSession = oldSession
-            ultraWideStandbyRequestBuilder = synchronized(previewRequestLock) { previewRequestBuilder }
-            ultraWideStandbyJpegReader = imageReaderJpeg
-            activeSessionLens = targetLens
-            activeSessionPhysicalCameraId = targetLens.physicalCameraId
+        if (staleSwitch) {
+            completeLensSwitch(targetLens, isContinuousTransition = isContinuousTransition)
+            return
+        }
 
+        if (didInstantSwap) {
+            // Queue the capture-request update without doing any camera metadata work on the caller.
+            scheduleZoomPreviewUpdate(immediate = true, explicitZoom = currentZoom)
             backgroundHandler?.post {
+                if (switchGen != lensSwitchGeneration.get() || cameraDevice?.id != targetCam.id) return@post
+
+                // Characteristics/output-size results are reused per cameraId. The first inspection
+                // for a newly discovered camera runs here, never in the main-thread swap callback.
+                inspectCapabilities(targetLens.cameraId)
+                val targetRatio = getTargetAspectRatioForMode(currentMode)
+                val optimalPreviewSize = getOptimalPreviewSize(
+                    resolvePreviewStreamCameraId(targetLens),
+                    targetRatio,
+                    targetLens.lensType
+                )
+                _previewAspectRatio.value = targetRatio
+                _previewBufferSize.value = optimalPreviewSize
+                syncPreviewBufferSizesIfNeeded(
+                    max(optimalPreviewSize.width, optimalPreviewSize.height),
+                    min(optimalPreviewSize.width, optimalPreviewSize.height),
+                    targetLens
+                )
+                syncStandbyStreamSettings()
+            }
+            completeLensSwitch(targetLens, isContinuousTransition = isContinuousTransition)
+            Log.i(
+                TAG,
+                "[KEEP_ULTRAWIDE_READY] 0ms instant stream swap completed to " + targetLens.lensType +
+                    " (ID=" + targetCam.id + ", recording=" + _isRecordingVideo.value +
+                    ", source=" + _displayedPreviewSource.value + ")"
+            )
+            return
+        }
+
+        if (needsSessionConfigure) {
+            backgroundHandler?.post {
+                if (switchGen != lensSwitchGeneration.get() || cameraDevice?.id != targetCam.id) return@post
                 inspectCapabilities(targetLens.cameraId)
                 setupImageReaders(targetLens.cameraId)
                 createCameraCaptureSession()
