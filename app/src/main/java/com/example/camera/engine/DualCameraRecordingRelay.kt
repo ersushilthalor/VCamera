@@ -1252,6 +1252,14 @@ class DualCameraRecordingRelay internal constructor(
         GLES30.glViewport(0, 0, targetWidth, targetHeight)
         GLES30.glUseProgram(activeProgram)
 
+        // EGL reports the producer BufferQueue size. For the preview TextureView,
+        // that is the landscape Camera2 buffer size even though the visible
+        // viewfinder is portrait. Use the requested presentation dimensions for
+        // the transform/crop, while retaining the queried EGL dimensions only for
+        // the GL viewport. For the encoder these dimensions are already identical.
+        val presentationWidth = outputWidth.coerceAtLeast(2)
+        val presentationHeight = outputHeight.coerceAtLeast(2)
+
         // The MGC YUV renderer outputs a regular GL_TEXTURE_2D whose row/texture
         // convention is already normalized. Do not apply the OES SurfaceTexture
         // flip/rotation heuristic here; it adds a second flip to the MGC result.
@@ -1259,8 +1267,8 @@ class DualCameraRecordingRelay internal constructor(
             isFront = isFrontFacing,
             sensorOrientation = cameraSensorOrientation,
             deviceRotation = activeDeviceRotation,
-            viewportWidth = targetWidth,
-            viewportHeight = targetHeight,
+            viewportWidth = presentationWidth,
+            viewportHeight = presentationHeight,
             camBufferWidth = frame.width,
             camBufferHeight = frame.height,
             outMatrix = renderTexMatrix
@@ -1282,8 +1290,8 @@ class DualCameraRecordingRelay internal constructor(
                 VideoAdjustmentsPipeline.bindUniforms(
                     handles = it,
                     adjustments = currentVideoAdjustments,
-                    width = targetWidth,
-                    height = targetHeight,
+                    width = presentationWidth,
+                    height = presentationHeight,
                     timeSec = presentationNs.toFloat() / 1_000_000_000f
                 )
             }
