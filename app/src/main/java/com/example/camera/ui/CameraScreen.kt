@@ -508,7 +508,7 @@ fun CameraScreen(
             showUltraWidePreview = instantSwitchState.isShowUltraWidePreview &&
                 isUsingRearMainLens && cameraMode != CameraMode.VIDEO,
             showFrontPreview = instantSwitchState.isShowFrontCameraPreview && isUsingRearLens &&
-                !(cameraMode == CameraMode.VIDEO && instantSwitchState.isShowUltraWidePreview && isUsingRearMainLens),
+                !(cameraMode == CameraMode.VIDEO && instantSwitchState.isShowUltraWidePreview),
             ultraWideStatus = instantSwitchState.ultraWideStatus,
             frontStatus = instantSwitchState.frontStatus,
             onUltraWideSurfaceTextureAvailable = { texture ->
