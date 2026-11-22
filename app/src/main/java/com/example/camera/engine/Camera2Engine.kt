@@ -993,7 +993,7 @@ class Camera2Engine(private val context: Context) {
                 val recConfig = activeRecordingStreamConfig
                 val requestedVideoRes = recConfig?.videoResolution
                     ?: (userSelectedVideoResolution ?: _selectedVideoResolution.value ?: CameraResolution(1920, 1080))
-                val resolvedStandbyRes = resolveEffectiveVideoResolutionForLens(standbyLens.cameraId, requestedVideoRes)
+                val resolvedStandbyRes = resolveEffectiveVideoResolutionForLens(standbyLens, requestedVideoRes)
                 val effectiveStandbyVideoSize = Size(
                     max(resolvedStandbyRes.width, resolvedStandbyRes.height),
                     min(resolvedStandbyRes.width, resolvedStandbyRes.height)
@@ -1521,16 +1521,59 @@ class Camera2Engine(private val context: Context) {
     fun resolveEffectiveVideoResolutionForLens(
         cameraId: String,
         requested: CameraResolution = userSelectedVideoResolution ?: _selectedVideoResolution.value ?: CameraResolution(1920, 1080)
+    ): CameraResolution = resolveEffectiveVideoResolutionForLensInternal(
+        cameraId = cameraId,
+        requested = requested,
+        lensOverride = null,
+        fallbackCameraId = null
+    )
+
+    /**
+     * Resolve the input size for the actual lens stream feeding DualCameraRecordingRelay.
+     * The relay camera input is a SurfaceTexture, not a MediaRecorder surface. On logical
+     * multi-camera devices, Main and Ultra-Wide can also share one logical cameraId, so
+     * retain the LensInfo to avoid accidentally using the Main lens' capabilities for UW.
+     */
+    private fun resolveEffectiveVideoResolutionForLens(
+        lens: LensInfo,
+        requested: CameraResolution
+    ): CameraResolution {
+        val streamCameraId = resolvePreviewStreamCameraId(lens, usePhysicalStream = true)
+            ?: lens.cameraId
+        return resolveEffectiveVideoResolutionForLensInternal(
+            cameraId = streamCameraId,
+            requested = requested,
+            lensOverride = lens,
+            fallbackCameraId = lens.cameraId
+        )
+    }
+
+    private fun resolveEffectiveVideoResolutionForLensInternal(
+        cameraId: String,
+        requested: CameraResolution,
+        lensOverride: LensInfo?,
+        fallbackCameraId: String?
     ): CameraResolution {
         val chars = getCharacteristics(cameraId)
+            ?: fallbackCameraId?.takeIf { it != cameraId }?.let { getCharacteristics(it) }
         val map = chars?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-        val supportedSizes = map?.getOutputSizes(MediaRecorder::class.java)
-            ?: map?.getOutputSizes(SurfaceTexture::class.java)
+
+        // Camera2 feeds the relay through SurfaceTexture-backed input surfaces. Prefer
+        // those exact supported sizes; MediaRecorder sizes describe a different output
+        // consumer and can report dimensions the relay's camera stream does not use.
+        val surfaceTextureSizes = map?.getOutputSizes(SurfaceTexture::class.java)
+        val supportedSizes = surfaceTextureSizes?.takeIf { it.isNotEmpty() }
+            ?: map?.getOutputSizes(MediaRecorder::class.java)?.takeIf { it.isNotEmpty() }
             ?: emptyArray()
+
         val reqW = maxOf(requested.width, requested.height)
         val reqH = minOf(requested.width, requested.height)
-        val lens = _availableLenses.value.firstOrNull { it.cameraId == cameraId }
-        val isUltraWide = (lens?.lensType == LensType.ULTRAWIDE) || (lens?.isPhysical == true && lens.lensType == LensType.ULTRAWIDE)
+        val lens = lensOverride ?: _availableLenses.value.firstOrNull {
+            it.cameraId == cameraId || it.physicalCameraId == cameraId
+        } ?: fallbackCameraId?.let { id ->
+            _availableLenses.value.firstOrNull { it.cameraId == id }
+        }
+        val isUltraWide = lens?.lensType == LensType.ULTRAWIDE
         val is2K = (reqW == 2560 && reqH == 1440) || (reqW in 2400..2800)
 
         if (supportedSizes.isEmpty()) {
@@ -3079,7 +3122,7 @@ class Camera2Engine(private val context: Context) {
                     relay.setActiveSource(targetSource)
                     val requestedRes = activeRecordingStreamConfig?.videoResolution
                         ?: (userSelectedVideoResolution ?: _selectedVideoResolution.value ?: CameraResolution(1920, 1080))
-                    val effectiveRes = resolveEffectiveVideoResolutionForLens(targetLens.cameraId, requestedRes)
+                    val effectiveRes = resolveEffectiveVideoResolutionForLens(targetLens, requestedRes)
                     relay.updateInputBufferSize(
                         isUltraWide = (targetLens.lensType == LensType.ULTRAWIDE),
                         width = effectiveRes.width,
@@ -3549,7 +3592,7 @@ class Camera2Engine(private val context: Context) {
                                     relay.setActiveSource(targetSource)
                                     val requestedRes = activeRecordingStreamConfig?.videoResolution
                                         ?: (userSelectedVideoResolution ?: _selectedVideoResolution.value ?: CameraResolution(1920, 1080))
-                                    val effectiveRes = resolveEffectiveVideoResolutionForLens(lens.cameraId, requestedRes)
+                                    val effectiveRes = resolveEffectiveVideoResolutionForLens(lens, requestedRes)
                                     relay.updateInputBufferSize(
                                         isUltraWide = (lens.lensType == LensType.ULTRAWIDE),
                                         width = effectiveRes.width,
@@ -7208,13 +7251,13 @@ class Camera2Engine(private val context: Context) {
                 )
                 if (relay.isRelayReady) {
                     if (isKeepUwReadyBack && uwLensForRec != null && mainLensForRec != null) {
-                        val bestUwRes = resolveEffectiveVideoResolutionForLens(uwLensForRec.cameraId, videoRes)
+                        val bestUwRes = resolveEffectiveVideoResolutionForLens(uwLensForRec, videoRes)
                         relay.updateInputBufferSize(isUltraWide = true, bestUwRes.width, bestUwRes.height)
 
-                        val bestMainRes = resolveEffectiveVideoResolutionForLens(mainLensForRec.cameraId, videoRes)
+                        val bestMainRes = resolveEffectiveVideoResolutionForLens(mainLensForRec, videoRes)
                         relay.updateInputBufferSize(isUltraWide = false, bestMainRes.width, bestMainRes.height)
                     } else {
-                        val activeStreamRes = resolveEffectiveVideoResolutionForLens(lens.cameraId, videoRes)
+                        val activeStreamRes = resolveEffectiveVideoResolutionForLens(lens, videoRes)
                         relay.updateInputBufferSize(
                             isUltraWide = (lens.lensType == LensType.ULTRAWIDE),
                             width = activeStreamRes.width,
