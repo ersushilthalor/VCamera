@@ -469,7 +469,7 @@ class DualCameraRecordingRelay(
                 EGL14.EGL_GREEN_SIZE, 8,
                 EGL14.EGL_BLUE_SIZE, 8,
                 EGL14.EGL_ALPHA_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_RENDERABLE_TYPE, if (eisPlusPipeline != null) EGL_OPENGL_ES3_BIT else EGL14.EGL_OPENGL_ES2_BIT,
                 EGL_RECORDABLE_ANDROID, 1,
                 EGL14.EGL_NONE
             )
@@ -480,7 +480,7 @@ class DualCameraRecordingRelay(
                     EGL14.EGL_GREEN_SIZE, 8,
                     EGL14.EGL_BLUE_SIZE, 8,
                     EGL14.EGL_ALPHA_SIZE, 8,
-                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL14.EGL_RENDERABLE_TYPE, if (eisPlusPipeline != null) EGL_OPENGL_ES3_BIT else EGL14.EGL_OPENGL_ES2_BIT,
                     EGL14.EGL_NONE
                 )
                 configChosen = EGL14.eglChooseConfig(display, fallbackAttribs, 0, configs, 0, 1, numConfigs, 0) && numConfigs[0] > 0
