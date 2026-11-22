@@ -2,7 +2,6 @@ package com.example.camera.stabilization
 
 import android.media.Image
 import android.opengl.GLES30
-import android.opengl.GLES31
 import android.util.Log
 import java.nio.ByteBuffer
 
@@ -90,9 +89,6 @@ internal class MgcEisYuvRenderer(private val tag: String = "MgcEisYuvRenderer") 
                 GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
             }
             GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
-            GLES31.glMemoryBarrier(
-                GLES31.GL_FRAMEBUFFER_BARRIER_BIT or GLES31.GL_TEXTURE_FETCH_BARRIER_BIT
-            )
             Frame(frame.timestampNs, outputTextureId, image.width, image.height)
         } catch (t: Throwable) {
             Log.w(tag, "MGC YUV frame dropped: ${t.message}", t)
