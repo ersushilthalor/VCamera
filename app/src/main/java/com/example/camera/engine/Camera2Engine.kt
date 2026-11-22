@@ -7739,23 +7739,47 @@ class Camera2Engine(private val context: Context) {
                     max(videoRes.width, videoRes.height),
                     min(videoRes.width, videoRes.height)
                 )
+                val eisPlusModeFailureReason = when {
+                    currentMode != CameraMode.VIDEO -> "standard Video mode only"
+                    isSpecialVideoRecording -> "Special Video recording is not supported"
+                    isSoftwareCinema -> "Cinema recording is not supported"
+                    is10BitSession -> "10-bit/HDR recording is not supported"
+                    isKeepUwReadyBack -> "Keep Ultra-Wide Ready dual-stream session is active"
+                    lens.lensType == LensType.ULTRAWIDE -> "ultra-wide lens is not supported"
+                    else -> null
+                }
                 val eisPlusEligible = preferences.videoEisPlusEnabled &&
-                    currentMode == CameraMode.VIDEO &&
-                    !isSpecialVideoRecording &&
-                    !isSoftwareCinema &&
-                    !is10BitSession &&
-                    !isKeepUwReadyBack &&
-                    lens.lensType != LensType.ULTRAWIDE
-                val eisPlusCandidate = if (
+                    eisPlusModeFailureReason == null
+                val eisPlusPipelineProbe = if (
                     eisPlusEligible && eisPlusCameraChars != null &&
                     eisPlusTimingChars != null && eisPlusYuvSize != null
                 ) {
-                    VideoEisPlusPipeline(context).takeIf {
-                        it.isSupported(eisPlusCameraChars, eisPlusTimingChars)
-                    }
+                    VideoEisPlusPipeline(context)
                 } else null
-                if (preferences.videoEisPlusEnabled && eisPlusEligible && eisPlusCandidate == null) {
-                    Log.w(TAG, "Photon EIS+ unavailable: camera lacks realtime timestamp/gyro support or a matching YUV stream size")
+                val eisPlusSupportFailureReason = if (
+                    eisPlusPipelineProbe != null &&
+                    eisPlusCameraChars != null && eisPlusTimingChars != null
+                ) {
+                    eisPlusPipelineProbe.supportFailureReason(eisPlusCameraChars, eisPlusTimingChars)
+                } else null
+                val eisPlusCandidate = eisPlusPipelineProbe?.takeIf {
+                    eisPlusSupportFailureReason == null
+                }
+                val eisPlusUnavailableReason = when {
+                    !preferences.videoEisPlusEnabled -> "disabled in Settings"
+                    eisPlusModeFailureReason != null -> eisPlusModeFailureReason
+                    eisPlusCameraChars == null -> "camera characteristics unavailable"
+                    eisPlusTimingChars == null -> "sensor timestamp characteristics unavailable"
+                    eisPlusYuvSize == null ->
+                        "no matching YUV stream size for ${videoRes.width}x${videoRes.height}"
+                    eisPlusSupportFailureReason != null -> eisPlusSupportFailureReason
+                    else -> "EIS+ pipeline could not be created"
+                }
+                if (preferences.videoEisPlusEnabled && eisPlusCandidate == null) {
+                    _videoEisPlusStatus.value = "Unavailable: $eisPlusUnavailableReason"
+                    Log.w(TAG, "Photon EIS+ unavailable: $eisPlusUnavailableReason")
+                } else if (!preferences.videoEisPlusEnabled) {
+                    _videoEisPlusStatus.value = "Disabled"
                 }
 
                 // Initialize DualCameraRecordingRelay as the live GPU processing surface:
@@ -7789,9 +7813,21 @@ class Camera2Engine(private val context: Context) {
                 )
                 var eisPlusPreviewViaRelay = eisPlusCandidate != null && relay.isRelayReady && relay.isRelayPreviewActive
                 var eisPlusStarted = false
+                if (eisPlusCandidate != null && !eisPlusPreviewViaRelay) {
+                    val reason = "GPU recording relay preview path unavailable"
+                    _videoEisPlusStatus.value = "Unavailable: $reason"
+                    Log.w(TAG, "Photon EIS+ unavailable: $reason; using synchronized relay fallback")
+                }
                 if (eisPlusPreviewViaRelay && eisPlusCandidate != null && eisPlusYuvSize != null &&
                     eisPlusCameraChars != null && eisPlusTimingChars != null
                 ) {
+                    eisPlusCandidate.onRuntimeUnavailable = {
+                        _videoEisPlusStatus.value = "Disabled by HAL conflict"
+                        Log.w(
+                            TAG,
+                            "Photon EIS+ fallback: HAL kept CONTROL_VIDEO_STABILIZATION_MODE non-OFF after an OFF request",
+                        )
+                    }
                     val started = eisPlusCandidate.start(
                         cameraId = eisPlusCameraId,
                         characteristics = eisPlusCameraChars,
@@ -7804,7 +7840,10 @@ class Camera2Engine(private val context: Context) {
                         imageHandler = backgroundHandler ?: mainHandler,
                         onFrameAvailable = { relay.notifyEisPlusFrameAvailable() },
                         onUnavailable = {
-                            Log.w(TAG, "Photon EIS+ input pipeline did not start; using synchronized relay fallback")
+                            val reason = eisPlusCandidate.lastStartFailureReason
+                                ?: "input pipeline did not start"
+                            _videoEisPlusStatus.value = "Unavailable: $reason"
+                            Log.w(TAG, "Photon EIS+ fallback reason: $reason; using synchronized relay frames")
                         }
                     )
                     if (started && eisPlusCandidate.surface?.isValid == true) {
@@ -7812,10 +7851,30 @@ class Camera2Engine(private val context: Context) {
                         activeVideoEisPlusSurface = eisPlusCandidate.surface
                         videoEisPlusCaptureGeneration += 1L
                         eisPlusStarted = true
+                        _videoEisPlusStatus.value = "Active"
+                        Log.i(
+                            TAG,
+                            "Photon EIS+ started: camera=$eisPlusCameraId yuv=${eisPlusYuvSize.width}x${eisPlusYuvSize.height} " +
+                                "lookahead=${preferences.videoEisPlusLookahead}",
+                        )
                     } else {
                         eisPlusCandidate.stop()
-                        Log.w(TAG, "Photon EIS+ initialization failed; falling back to unwarped relay frames")
+                        val reason = eisPlusCandidate.lastStartFailureReason
+                            ?: "input pipeline initialization failed"
+                        _videoEisPlusStatus.value = "Unavailable: $reason"
+                        Log.w(TAG, "Photon EIS+ fallback reason: $reason; using unwarped relay frames")
                     }
+                }
+
+                videoEisPlusOisDisabledForSession =
+                    eisPlusStarted && activeVideoEisPlusPipeline?.supportsOpticalTelemetry != true
+                if (eisPlusStarted) {
+                    Log.i(
+                        TAG,
+                        "Photon EIS+ OIS decision: preferenceEnabled=$isOisAllowed, " +
+                            "opticalTelemetry=${activeVideoEisPlusPipeline?.supportsOpticalTelemetry}, " +
+                            "forceOisOff=$videoEisPlusOisDisabledForSession",
+                    )
                 }
                 if (relay.isRelayReady) {
                     if (isKeepUwReadyBack && uwLensForRec != null && mainLensForRec != null) {
@@ -8147,7 +8206,7 @@ class Camera2Engine(private val context: Context) {
                             applyHardwareEisRequest(this)
                             applyHardwareOisRequest(
                                 this,
-                                oisAllowed = isOisAllowed && isOisSupportedForActiveLens()
+                                oisAllowed = isOisAllowedForCurrentSession()
                             )
                             if (activeVideoEisPlusPipeline?.shouldRequestOisSamples == true &&
                                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
@@ -8172,7 +8231,7 @@ class Camera2Engine(private val context: Context) {
                                         applyHardwareEisRequest(recordBuilder)
                                         applyHardwareOisRequest(
                                             recordBuilder,
-                                            oisAllowed = isOisAllowed && isOisSupportedForActiveLens()
+                                            oisAllowed = isOisAllowedForCurrentSession()
                                         )
                                         if (activeVideoEisPlusPipeline?.shouldRequestOisSamples == true &&
                                             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
