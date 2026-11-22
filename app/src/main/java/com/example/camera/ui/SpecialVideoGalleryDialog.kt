@@ -1,5 +1,6 @@
 package com.example.camera.ui
 
+import android.media.MediaPlayer
 import android.widget.MediaController
 import android.widget.VideoView
 import androidx.activity.compose.BackHandler
@@ -54,7 +55,8 @@ internal const val SPECIAL_VIDEO_GALLERY_LENS_SWITCH_DURATION_MS = 3_000
 private class GalleryVideoPlayerState(
     val uri: String,
     var isPrepared: Boolean = false,
-    var wasActive: Boolean = false
+    var wasActive: Boolean = false,
+    var mediaPlayer: MediaPlayer? = null
 )
 
 @Composable
@@ -200,8 +202,7 @@ private fun SpecialVideoPlayer(
     var playbackPosition by rememberSaveable(clip.id) { mutableStateOf(0) }
     var shouldResumePlayback by rememberSaveable(clip.id) { mutableStateOf(true) }
     val videoViewState = remember(clip.id) { mutableStateOf<VideoView?>(null) }
-    val currentUri = if (isUltraWide) clip.ultraWideUri else clip.mainUri
-
+    
     // Snapshot and pause the current player before changing its source. VideoView otherwise
     // keeps a PLAYING target state and may briefly autoplay the replacement from time zero.
     val selectLens: (Boolean) -> Unit = { useUltraWide ->
@@ -263,8 +264,9 @@ private fun SpecialVideoPlayer(
                 val lastSafePosition = (videoView.duration - 250).coerceAtLeast(0)
                 val targetPosition = playbackPosition.coerceAtMost(lastSafePosition)
                 val resumeAfterSeek = shouldResumePlayback
-                if (targetPosition > 0) {
-                    videoView.setOnSeekCompleteListener { seekedPlayer ->
+                val mediaPlayer = viewState.mediaPlayer
+                if (targetPosition > 0 && mediaPlayer != null) {
+                    mediaPlayer.setOnSeekCompleteListener { seekedPlayer ->
                         seekedPlayer.setOnSeekCompleteListener(null)
                         if (targetIsUltraWide == isUltraWide && viewState.wasActive) {
                             playbackPosition = seekedPlayer.currentPosition.coerceAtLeast(0)
@@ -274,7 +276,7 @@ private fun SpecialVideoPlayer(
                             videoView.pause()
                         }
                     }
-                    videoView.seekTo(targetPosition)
+                    mediaPlayer.seekTo(targetPosition)
                 } else {
                     playbackPosition = 0
                     if (targetIsUltraWide == isUltraWide && viewState.wasActive) {
@@ -304,6 +306,7 @@ private fun SpecialVideoPlayer(
                         setMediaController(controller)
                         setOnPreparedListener { player ->
                             player.isLooping = false
+                            viewState.mediaPlayer = player
                             viewState.isPrepared = true
                             if (targetIsUltraWide == isUltraWide) {
                                 viewState.wasActive = true
@@ -335,7 +338,7 @@ private fun SpecialVideoPlayer(
                 onRelease = { videoView ->
                     if (videoViewState.value === videoView) videoViewState.value = null
                     videoView.setOnPreparedListener(null)
-                    videoView.setOnSeekCompleteListener(null)
+                    (videoView.tag as? GalleryVideoPlayerState)?.mediaPlayer?.setOnSeekCompleteListener(null)
                     videoView.setMediaController(null)
                     videoView.stopPlayback()
                 }
