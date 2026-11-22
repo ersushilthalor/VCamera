@@ -80,6 +80,7 @@ class NormalVideoRecordingEngine(private val context: Context) {
     private var totalPausedDurationNs = 0L
     private var baseVideoPtsUs = -1L
     private var lastVideoPtsUs = -1L
+    @Volatile private var preserveInputPresentationTimestamps = false
 
     fun isRecordingActive(): Boolean = isRecording.get()
 
@@ -115,10 +116,12 @@ class NormalVideoRecordingEngine(private val context: Context) {
         orientationHint: Int = 0,
         isFront: Boolean = false,
         sensorOrientation: Int = 90,
-        deviceRotation: Int = 0
+        deviceRotation: Int = 0,
+        preserveInputPresentationTimestamps: Boolean = false
     ): Surface {
         activeCodec = codec
         outputFile = destFile
+        this.preserveInputPresentationTimestamps = preserveInputPresentationTimestamps
 
         isRecording.set(true)
         isStopping.set(false)
@@ -442,11 +445,17 @@ class NormalVideoRecordingEngine(private val context: Context) {
                         if (bufferInfo.size > 0) {
                             // Calculate monotonic presentation timestamp
                             val rawPtsUs = bufferInfo.presentationTimeUs
-                            if (baseVideoPtsUs < 0L) {
-                                baseVideoPtsUs = rawPtsUs
+                            // Special Video's two encoders receive frames from the same
+                            // DualCameraRecordingRelay clock. Preserve those shared timestamps
+                            // instead of normalizing each camera's first frame independently.
+                            var ptsUs = if (preserveInputPresentationTimestamps) {
+                                rawPtsUs.coerceAtLeast(0L)
+                            } else {
+                                if (baseVideoPtsUs < 0L) {
+                                    baseVideoPtsUs = rawPtsUs
+                                }
+                                (rawPtsUs - baseVideoPtsUs).coerceAtLeast(0L)
                             }
-                            var ptsUs = rawPtsUs - baseVideoPtsUs
-                            if (ptsUs < 0L) ptsUs = 0L
                             if (lastVideoPtsUs >= 0L && ptsUs <= lastVideoPtsUs) {
                                 ptsUs = lastVideoPtsUs + 1_000L
                             }

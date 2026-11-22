@@ -59,6 +59,16 @@ class MediaGalleryRepository(context: Context) {
             selectionArgs = arrayOf("%/DCIM/Camera/%", "VCAM%")
         }
 
+        // MediaStore can return one item under different volume aliases
+        // ("external" while querying and "external_primary" while saving).
+        // Match the collection path + row ID instead of the full URI string.
+        val specialByMainIdentity = specialClips.mapNotNull { clip ->
+            mediaStoreIdentity(clip.mainUri)?.let { identity -> identity to clip }
+        }.toMap()
+        val pairedUltraWideIdentities = specialClips.mapNotNull {
+            mediaStoreIdentity(it.ultraWideUri)
+        }.toSet()
+        // Keep exact-URI matching for older/unusual content providers.
         val specialByMainUri = specialClips.associateBy { it.mainUri.toString() }
         val pairedUltraWideUris = specialClips.map { it.ultraWideUri.toString() }.toSet()
         val videos = ArrayList<MediaGalleryVideo>()
@@ -84,10 +94,15 @@ class MediaGalleryRepository(context: Context) {
                 while (cursor.moveToNext() && videos.size < MAX_ITEMS) {
                     val mediaId = cursor.getLong(idColumn)
                     val uri = ContentUris.withAppendedId(collection, mediaId)
-                    if (uri.toString() in pairedUltraWideUris) continue
+                    val mediaIdentity = mediaStoreIdentity(uri)
+                    if ((mediaIdentity != null && mediaIdentity in pairedUltraWideIdentities) ||
+                        uri.toString() in pairedUltraWideUris) {
+                        continue
+                    }
 
                     val name = if (nameColumn >= 0) cursor.getString(nameColumn).orEmpty() else ""
-                    val specialClip = specialByMainUri[uri.toString()]
+                    val specialClip = mediaIdentity?.let { specialByMainIdentity[it] }
+                        ?: specialByMainUri[uri.toString()]
                     val ownerPackage = if (ownerColumn >= 0) cursor.getString(ownerColumn) else null
                     val description = if (descriptionColumn >= 0) cursor.getString(descriptionColumn).orEmpty() else ""
                     val dateTaken = if (dateTakenColumn >= 0) cursor.getLong(dateTakenColumn) else 0L
@@ -116,6 +131,14 @@ class MediaGalleryRepository(context: Context) {
         }
 
         return videos.sortedByDescending { it.timestamp }
+    }
+
+    private fun mediaStoreIdentity(uri: Uri): String? {
+        val segments = uri.pathSegments
+        if (segments.size < 3) return null
+        val collectionPath = segments.takeLast(3)
+        if (collectionPath[0] !in setOf("video", "image", "audio")) return null
+        return "${uri.authority}/${collectionPath.joinToString("/")}"
     }
 
     companion object {

@@ -6924,7 +6924,8 @@ class Camera2Engine(private val context: Context) {
                         orientationHint = activeOrientHint,
                         isFront = isFront,
                         sensorOrientation = sensorOrient,
-                        deviceRotation = currentRot
+                        deviceRotation = currentRot,
+                        preserveInputPresentationTimestamps = specialVideoRecordingRequested
                     )
                 } catch (t: Throwable) {
                     Log.e(TAG, "Failed starting normal video recording: ${t.message}", t)
@@ -6968,7 +6969,8 @@ class Camera2Engine(private val context: Context) {
                             orientationHint = activeOrientHint,
                             isFront = false,
                             sensorOrientation = ultraWideSensorOrientation,
-                            deviceRotation = currentRot
+                            deviceRotation = currentRot,
+                            preserveInputPresentationTimestamps = true
                         )
                         specialVideoUltraWideTempFile = ultraWideTemp
                         Log.i(TAG, "[SPECIAL_VIDEO] Independent ultra-wide encoder started")
