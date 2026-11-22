@@ -1,6 +1,5 @@
 package com.example.camera.stabilization
 
-import com.example.BuildConfig
 import android.util.Log
 import java.io.File
 import java.util.Locale
@@ -36,7 +35,7 @@ internal class MgcEisDiagnosticTrace(
     @Synchronized
     fun start(width: Int, height: Int, frontFacing: Boolean, strength: Float) {
         entries.clear()
-        active = BuildConfig.DEBUG
+        active = true
         snapshotQueued = false
         gyroCount = 0
         frameCount = 0
@@ -104,9 +103,10 @@ internal class MgcEisDiagnosticTrace(
         val savedFrameCount = frameCount
         writer.execute {
             try {
-                val directory = File(cacheDirectory, "mgc-eis-traces").apply { mkdirs() }
+                val directory = File(cacheDirectory, EisPlusDiagnosticLog.LOG_DIRECTORY_NAME).apply { mkdirs() }
                 val file = File(directory, "mgc-eis-${System.currentTimeMillis()}.csv")
                 file.writeText(content, Charsets.UTF_8)
+                EisPlusDiagnosticLog.event("NATIVE_TRACE", "SAVED", "file=${file.name}, gyro=$savedGyroCount, frames=$savedFrameCount")
                 Log.i(
                     TAG,
                     String.format(
@@ -118,6 +118,7 @@ internal class MgcEisDiagnosticTrace(
                     ),
                 )
             } catch (error: Throwable) {
+                EisPlusDiagnosticLog.event("NATIVE_TRACE", "SAVE_FAILED", error.toString(), "ERROR")
                 Log.e(TAG, "Unable to save MGC differential trace", error)
             }
         }
