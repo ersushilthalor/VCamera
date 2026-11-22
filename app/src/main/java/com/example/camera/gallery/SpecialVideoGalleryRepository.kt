@@ -81,6 +81,7 @@ class SpecialVideoGalleryRepository(context: Context) {
      * Moves legacy Special Video ultra-wide MP4s out of public MediaStore.
      * A companion is rewritten to a file:// URI only after its bytes are copied successfully.
      */
+    @Synchronized
     fun migrateLegacyUltraWideClipsToPrivateStorage() {
         val clips = getClips()
         var changed = false
