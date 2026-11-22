@@ -7058,6 +7058,9 @@ class Camera2Engine(private val context: Context) {
                     previewHeight = viewfinderHeight,
                     initialAdjustments = currentVideoAdjustments,
                     initialSpecialVideoPiPEnabled = false,
+                    secondarySensorOrientation = if (isSpecialVideoRecording && uwLensForRec != null) {
+                        getCharacteristics(uwLensForRec.cameraId)?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: sensorOrient
+                    } else sensorOrient,
                     secondaryEncoderTargetSurface = if (isSpecialVideoRecording) specialVideoUltraWideSurface else null
                 )
                 if (relay.isRelayReady) {
@@ -7109,6 +7112,13 @@ class Camera2Engine(private val context: Context) {
                         } else {
                             DualStreamingMode.NONE
                         }
+                        if (isSpecialVideoRecording && dualMode == DualStreamingMode.NONE) {
+                            cleanupFailedRecording(
+                                onError,
+                                "This device does not support simultaneous main and ultra-wide camera streams. Turn Special Video off to record normally."
+                            )
+                            return@post
+                        }
 
                         // Prewarm standby recording session in parallel when Main and Ultra-Wide are separate CameraDevices
                         if (shouldKeepUltraWideStreamReady() &&
@@ -7155,6 +7165,14 @@ class Camera2Engine(private val context: Context) {
                             val relay = dualCameraRecordingRelay
                             val mainRecSurf = relay?.mainRecorderSurface ?: activeLensRecorderSurface
                             val uwRecSurf = relay?.ultraWideRecorderSurface
+
+                            if (isSpecialVideoRecording && (uwRecSurf == null || !uwRecSurf.isValid || uwPrevSurf == null || !uwPrevSurf.isValid)) {
+                                cleanupFailedRecording(
+                                    onError,
+                                    "The ultra-wide recording output could not be attached to this camera session. Try a lower recording resolution or turn Special Video off."
+                                )
+                                return@post
+                            }
 
                             if (physIds.contains(uwPhysId) && uwPrevSurf != null && uwPrevSurf.isValid && uwPrevSurf !== mainPrevSurf) {
                                 activeSessionPhysicalCameraId = if (isUwSelected) uwPhysId else mainPhysId
@@ -7344,7 +7362,14 @@ class Camera2Engine(private val context: Context) {
                                         camera.createCaptureSession(sessionCfg4)
                                         return@post
                                     } catch (e: Exception) {
-                                        Log.w(TAG, "4-output logical physical recording setup exception, trying 3-output: ${e.message}")
+                                        Log.w(TAG, "4-output logical physical recording setup exception: ${e.message}")
+                                        if (isSpecialVideoRecording) {
+                                            cleanupFailedRecording(
+                                                onError,
+                                                "The camera rejected simultaneous main and ultra-wide recording surfaces. Try 1080p 30fps or disable Special Video."
+                                            )
+                                            return@post
+                                        }
                                     }
                                 }
                             }
@@ -7792,6 +7817,7 @@ class Camera2Engine(private val context: Context) {
     ) {
         if (rawRecordedFile == null || !rawRecordedFile.exists() || rawRecordedFile.length() <= 0L) {
             Log.w(TAG, "Recorded file was null or empty, cannot finalize video")
+            try { ultraWideRecordedFile?.delete() } catch (_: Throwable) {}
             notifyComplete(null)
             return
         }
