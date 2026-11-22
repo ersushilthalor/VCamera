@@ -60,7 +60,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _cameraMode = MutableStateFlow(preferences.cameraMode)
     val cameraMode: StateFlow<CameraMode> = _cameraMode.asStateFlow()
 
-    private val _selectedAspectRatio = MutableStateFlow(CameraAspectRatio.RATIO_9_16)
+    private val _selectedAspectRatio = MutableStateFlow(
+        if (preferences.cameraMode == CameraMode.PHOTO) CameraAspectRatio.RATIO_4_3
+        else CameraAspectRatio.RATIO_9_16
+    )
     val selectedAspectRatio: StateFlow<CameraAspectRatio> = _selectedAspectRatio.asStateFlow()
 
     private val _tapFocusConfig = MutableStateFlow(preferences.getModeTapFocusConfig(preferences.cameraMode))
@@ -751,10 +754,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
 
 
-        // Restore initial mode aspect ratio:
-        // - Cinema mode: mode-specific cinema aspect ratio (16:9, IMAX, Cinematic)
-        // - All other video modes: fixed 9:16
-        if (initialMode == CameraMode.CINEMA) {
+        // Restore the mode-specific viewfinder framing.
+        // Photo uses 3:4 portrait (4:3 sensor), Video uses 9:16, Cinema uses its selected ratio.
+        if (initialMode == CameraMode.PHOTO) {
+            _selectedAspectRatio.value = CameraAspectRatio.RATIO_4_3
+            engine.setPreviewAspectRatio(4f / 3f)
+        } else if (initialMode == CameraMode.CINEMA) {
             val aspect = engine.cinemaConfig.value.aspectRatio
             _selectedAspectRatio.value = when (aspect) {
                 com.example.camera.model.CinemaAspectRatio.IMAX -> CameraAspectRatio.RATIO_IMAX
@@ -844,7 +849,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         // 3. Immediately synchronize aspect ratio:
         // Cinema mode uses selected cinema aspect ratio (16:9, IMAX, Cinematic).
         // Video mode keeps 9:16 aspect ratio.
-        if (mode == CameraMode.CINEMA) {
+        if (mode == CameraMode.PHOTO) {
+            _selectedAspectRatio.value = CameraAspectRatio.RATIO_4_3
+            engine.setPreviewAspectRatio(4f / 3f)
+        } else if (mode == CameraMode.CINEMA) {
             val aspect = engine.cinemaConfig.value.aspectRatio
             _selectedAspectRatio.value = when (aspect) {
                 com.example.camera.model.CinemaAspectRatio.IMAX -> CameraAspectRatio.RATIO_IMAX
@@ -1793,7 +1801,37 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun onMainActionButtonClick() {
-        triggerVideoCapture()
+        if (_cameraMode.value == CameraMode.PHOTO) {
+            triggerPhotoCapture()
+        } else {
+            triggerVideoCapture()
+        }
+    }
+
+    private fun triggerPhotoCapture() {
+        if (engine.isCapturing.value) return
+
+        val delaySeconds = _timerMode.value.seconds
+        if (delaySeconds > 0) {
+            timerJob?.cancel()
+            timerJob = viewModelScope.launch {
+                for (remaining in delaySeconds downTo 1) {
+                    _activeTimerCountdown.value = remaining
+                    delay(1000L)
+                }
+                _activeTimerCountdown.value = null
+                executePhotoCapture()
+            }
+        } else {
+            executePhotoCapture()
+        }
+    }
+
+    private fun executePhotoCapture() {
+        com.example.camera.sound.CameraSoundManager.playShutter()
+        engine.takePhoto { uri ->
+            showToast(if (uri != null) "Photo saved to DCIM/Camera" else "Failed to save photo")
+        }
     }
 
     private fun triggerVideoCapture() {
