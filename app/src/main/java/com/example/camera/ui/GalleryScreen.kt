@@ -229,8 +229,7 @@ private fun MediaGridScreen(
     val filteredVideos = videos
         .filter {
             searchQuery.isBlank() ||
-                it.displayName.contains(searchQuery, ignoreCase = true) ||
-
+                it.displayName.contains(searchQuery, ignoreCase = true)
         }
         .let { list -> if (oldestFirst) list.sortedBy { it.timestamp } else list.sortedByDescending { it.timestamp } }
 
