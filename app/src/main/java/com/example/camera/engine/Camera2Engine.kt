@@ -83,8 +83,14 @@ class Camera2Engine(private val context: Context) {
     private val videoEisPlusBindingsByCameraId = ConcurrentHashMap<String, VideoEisPlusBinding>()
     private val videoEisPlusBindingsBySource = ConcurrentHashMap<PreviewStreamSource, VideoEisPlusBinding>()
 
+    // One logical CameraDevice can own both main and ultra-wide physical sensors.
+    // Keep the two sensor pipelines independently addressable even though sessionCameraId matches.
+    private fun videoEisPlusBindingKey(sessionCameraId: String, source: PreviewStreamSource): String =
+        "$sessionCameraId::${source.name}"
+
     private val cameraManager: CameraManager? =
         context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+    private val cameraCharacteristicsCache = ConcurrentHashMap<String, CameraCharacteristics>()
 
     // Background threads
     private var backgroundThread: HandlerThread? = null
@@ -129,12 +135,34 @@ class Camera2Engine(private val context: Context) {
 
     fun getCharacteristics(cameraId: String): CameraCharacteristics? {
         val mgr = cameraManager ?: return null
-        return try {
-            mgr.getCameraCharacteristics(cameraId)
-        } catch (t: Throwable) {
-            Log.w(TAG, "Failed to get characteristics for camera $cameraId", t)
-            null
+        cameraCharacteristicsCache[cameraId]?.let { return it }
+
+        // Physical IDs belonging to a logical multi-camera are not always exposed through
+        // CameraManager.cameraIdList. Resolve them from the owning logical camera instead of
+        // treating a valid Ultra-Wide sensor as an unavailable camera.
+        val direct = runCatching { mgr.getCameraCharacteristics(cameraId) }.getOrNull()
+        if (direct != null) {
+            cameraCharacteristicsCache.putIfAbsent(cameraId, direct)
+            return direct
         }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            for (logicalId in runCatching { mgr.cameraIdList }.getOrDefault(emptyArray())) {
+                val logical = runCatching { mgr.getCameraCharacteristics(logicalId) }.getOrNull() ?: continue
+                if (cameraId !in logical.physicalCameraIds) continue
+                val physical = runCatching {
+                    logical.getPhysicalCameraCharacteristics(cameraId)
+                }.getOrNull()
+                if (physical != null) {
+                    cameraCharacteristicsCache.putIfAbsent(cameraId, physical)
+                    Log.i(TAG, "Resolved physical camera characteristics: physical=$cameraId logical=$logicalId")
+                    return physical
+                }
+            }
+        }
+
+        Log.w(TAG, "Camera characteristics unavailable for camera $cameraId")
+        return null
     }
 
     /**
@@ -1669,8 +1697,14 @@ class Camera2Engine(private val context: Context) {
                     preferences.videoEisPlusEnabled &&
                     previewVideoEisPlusRelay != null &&
                     activeVideoEisPlusPipeline?.isRunning == true
-                val hasPreviewEisPlus = videoEisPlusBindingsByCameraId[existingStandbyCam.id]
-                    ?.pipeline?.isRunning == true
+                val standbySource = if (standbyLens.lensType == LensType.ULTRAWIDE) {
+                    PreviewStreamSource.ULTRAWIDE
+                } else {
+                    PreviewStreamSource.MAIN
+                }
+                val hasPreviewEisPlus = videoEisPlusBindingsByCameraId[
+                    videoEisPlusBindingKey(existingStandbyCam.id, standbySource)
+                ]?.pipeline?.isRunning == true
                 val previewEisPlusConfigMatches = if (shouldHavePreviewEisPlus) {
                     hasPreviewEisPlus
                 } else {
@@ -7456,19 +7490,23 @@ class Camera2Engine(private val context: Context) {
         val targetShort = min(preferredWidth, preferredHeight)
         val targetArea = targetLong.toLong() * targetShort.toLong()
         val targetRatio = targetLong.toFloat() / targetShort.toFloat()
-        val candidates = sizes.filter { size ->
-            val longEdge = max(size.width, size.height)
-            val shortEdge = min(size.width, size.height)
-            shortEdge >= 360 && longEdge >= 640 &&
-                kotlin.math.abs(longEdge.toFloat() / shortEdge.toFloat() - targetRatio) <= 0.025f
-        }
-        if (candidates.isEmpty()) return null
-        return candidates.firstOrNull { it.width == targetLong && it.height == targetShort }
-            ?: candidates.filter { it.width.toLong() * it.height.toLong() <= targetArea }
-                .maxByOrNull { it.width.toLong() * it.height.toLong() }
-            ?: candidates.minByOrNull {
-                kotlin.math.abs(it.width.toLong() * it.height.toLong() - targetArea)
-            }
+
+        // Ultra-wide sensors often advertise a smaller YUV size or a slightly different
+        // aspect ratio from the main sensor. Do not reject the whole EIS+ path for that.
+        val validSizes = sizes.filter { it.width > 0 && it.height > 0 }
+        if (validSizes.isEmpty()) return null
+        val preferredSizes = validSizes.filter {
+            max(it.width, it.height) >= 320 && min(it.width, it.height) >= 240
+        }.ifEmpty { validSizes }
+        return preferredSizes.firstOrNull {
+            (it.width == targetLong && it.height == targetShort) ||
+                (it.width == targetShort && it.height == targetLong)
+        } ?: preferredSizes.minWithOrNull(
+            compareBy<Size>(
+                { kotlin.math.abs(max(it.width, it.height).toFloat() / min(it.width, it.height).toFloat() - targetRatio) },
+                { kotlin.math.abs(it.width.toLong() * it.height.toLong() - targetArea) }
+            )
+        )
     }
 
     private fun findBestFpsRange(chars: CameraCharacteristics, targetFps: Int): Range<Int>? {
@@ -7627,7 +7665,10 @@ class Camera2Engine(private val context: Context) {
         binding: VideoEisPlusBinding,
         relay: DualCameraRecordingRelay
     ) {
-        val oldForCamera = videoEisPlusBindingsByCameraId.put(binding.sessionCameraId, binding)
+        val oldForCamera = videoEisPlusBindingsByCameraId.put(
+            videoEisPlusBindingKey(binding.sessionCameraId, binding.source),
+            binding
+        )
         val oldForSource = videoEisPlusBindingsBySource.put(binding.source, binding)
         if (oldForCamera != null && oldForCamera !== binding) {
             val oldSourceWasStillOwned = videoEisPlusBindingsBySource.remove(oldForCamera.source, oldForCamera)
@@ -7639,7 +7680,10 @@ class Camera2Engine(private val context: Context) {
         if (oldForSource != null && oldForSource !== binding &&
             oldForSource.sessionCameraId != binding.sessionCameraId
         ) {
-            videoEisPlusBindingsByCameraId.remove(oldForSource.sessionCameraId, oldForSource)
+            videoEisPlusBindingsByCameraId.remove(
+                videoEisPlusBindingKey(oldForSource.sessionCameraId, oldForSource.source),
+                oldForSource
+            )
             runCatching { oldForSource.pipeline.stop() }
         }
         relay.setEisPlusPipelineForSource(binding.source, binding.pipeline)
@@ -7654,7 +7698,10 @@ class Camera2Engine(private val context: Context) {
         binding: VideoEisPlusBinding,
         relay: DualCameraRecordingRelay
     ) {
-        videoEisPlusBindingsByCameraId.remove(binding.sessionCameraId, binding)
+        videoEisPlusBindingsByCameraId.remove(
+            videoEisPlusBindingKey(binding.sessionCameraId, binding.source),
+            binding
+        )
         val removedSourceOwner = videoEisPlusBindingsBySource.remove(binding.source, binding)
         if (removedSourceOwner) {
             relay.setEisPlusPipelineForSource(binding.source, null)
@@ -7674,8 +7721,13 @@ class Camera2Engine(private val context: Context) {
         result: TotalCaptureResult
     ): VideoEisPlusBinding? {
         val cameraId = runCatching { session.device.id }.getOrNull() ?: return null
-        val binding = videoEisPlusBindingsByCameraId[cameraId] ?: return null
-        if (binding.pipeline.isRunning) {
+        val bindings = videoEisPlusBindingsByCameraId.values
+            .filter { it.sessionCameraId == cameraId && it.pipeline.isRunning }
+        if (bindings.isEmpty()) return null
+
+        // One logical Camera2 result can carry metadata for both physical sensors.
+        // Feed each EIS+ coordinator only the result belonging to its own sensor.
+        bindings.forEach { binding ->
             binding.pipeline.submitCaptureResult(
                 result = result,
                 request = request,
@@ -7683,14 +7735,17 @@ class Camera2Engine(private val context: Context) {
                 outputPhysicalCameraId = binding.physicalCameraId
             )
         }
-        return binding
+        val activeSource = dualCameraRecordingRelay?.activeSource
+            ?: previewVideoEisPlusRelay?.activeSource
+            ?: _displayedPreviewSource.value
+        return bindings.firstOrNull { it.source == activeSource } ?: bindings.firstOrNull()
     }
 
     private fun activateVideoEisPlusForSource(source: PreviewStreamSource, sessionCameraId: String?) {
         val binding = videoEisPlusBindingsBySource[source]
             ?.takeIf { sessionCameraId == null || it.sessionCameraId == sessionCameraId }
             ?: sessionCameraId?.let { cameraId ->
-                videoEisPlusBindingsByCameraId[cameraId]?.takeIf { it.source == source }
+                videoEisPlusBindingsByCameraId[videoEisPlusBindingKey(cameraId, source)]
             }
         if (binding != null && binding.pipeline.isRunning) {
             activeVideoEisPlusPipeline = binding.pipeline
@@ -7768,7 +7823,6 @@ class Camera2Engine(private val context: Context) {
             isSpecialVideoRecordingActive ||
             isSoftwareCinemaRecording ||
             activeRecordingStreamConfig?.is10Bit == true ||
-            camera.id == cameraDevice?.id ||
             (activeVideoEisPlusPipeline?.isRunning != true &&
                 videoEisPlusBindingsByCameraId.values.none { it.pipeline.isRunning })
         ) return null
@@ -8474,9 +8528,7 @@ class Camera2Engine(private val context: Context) {
                 val preferredEisPlusPhysicalId = when {
                     Build.VERSION.SDK_INT < Build.VERSION_CODES.P -> null
                     isKeepUwReadyBack -> {
-                        // The EIS+ image, gyro calibration and CaptureResult must belong to
-                        // the same physical sensor as the active recording source. Do not keep
-                        // feeding main-camera YUV while the relay is recording ultra-wide.
+                        // Bind MGC to the actual physical sensor selected as the relay source.
                         val activePhysicalLens = if (lens.lensType == LensType.ULTRAWIDE) {
                             uwLensForRec
                         } else {
@@ -8486,7 +8538,7 @@ class Camera2Engine(private val context: Context) {
                             ?.takeIf { it.supportsPhysicalStream }
                             ?.physicalCameraId
                     }
-                    !eisPlusLogicalZoom -> lens.physicalCameraId
+                    lens.supportsPhysicalStream -> lens.physicalCameraId
                     else -> null
                 }
                 val eisPlusPhysicalId = preferredEisPlusPhysicalId?.takeIf {
