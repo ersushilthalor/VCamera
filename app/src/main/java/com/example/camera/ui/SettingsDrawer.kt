@@ -83,6 +83,13 @@ fun SettingsDrawer(
     // Legacy EIS values are retained only for source compatibility; the UI never exposes EIS.
     isVideoStabilizationEnabled: Boolean = false,
     isHardwareEisActive: Boolean = false,
+    videoEisPlusEnabled: Boolean = false,
+    videoEisPlusStatus: String = "Disabled",
+    onVideoEisPlusToggle: (Boolean) -> Unit = {},
+    videoEisPlusStrength: Float = 1.0f,
+    onVideoEisPlusStrengthChange: (Float) -> Unit = {},
+    videoEisPlusLookahead: Int = 7,
+    onVideoEisPlusLookaheadChange: (Int) -> Unit = {},
     isOisEnabled: Boolean = true,
     isOisHardwareActive: Boolean = false,
     isHorizontalLockSettingEnabled: Boolean = true,
@@ -308,6 +315,13 @@ fun SettingsDrawer(
                             isVideoStabilizationEnabled = isVideoStabilizationEnabled,
                             onStabilizationToggle = onStabilizationToggle,
                             isHardwareEisActive = isHardwareEisActive,
+                            videoEisPlusEnabled = videoEisPlusEnabled,
+                            videoEisPlusStatus = videoEisPlusStatus,
+                            onVideoEisPlusToggle = onVideoEisPlusToggle,
+                            videoEisPlusStrength = videoEisPlusStrength,
+                            onVideoEisPlusStrengthChange = onVideoEisPlusStrengthChange,
+                            videoEisPlusLookahead = videoEisPlusLookahead,
+                            onVideoEisPlusLookaheadChange = onVideoEisPlusLookaheadChange,
                             isOisPreferred = isOisEnabled,
                             onOisToggle = onOisToggle,
                             isHorizontalLockSettingEnabled = isHorizontalLockSettingEnabled,
@@ -850,6 +864,13 @@ private fun VideoSettingsPage(
     isVideoStabilizationEnabled: Boolean,
     onStabilizationToggle: (Boolean) -> Unit,
     isHardwareEisActive: Boolean = false,
+    videoEisPlusEnabled: Boolean = false,
+    videoEisPlusStatus: String = "Disabled",
+    onVideoEisPlusToggle: (Boolean) -> Unit = {},
+    videoEisPlusStrength: Float = 1.0f,
+    onVideoEisPlusStrengthChange: (Float) -> Unit = {},
+    videoEisPlusLookahead: Int = 7,
+    onVideoEisPlusLookaheadChange: (Int) -> Unit = {},
     isOisPreferred: Boolean = true,
     onOisToggle: (Boolean) -> Unit = {},
     isHorizontalLockSettingEnabled: Boolean = true,
@@ -859,6 +880,8 @@ private fun VideoSettingsPage(
     isDollyZoomSettingEnabled: Boolean = false,
     onDollyZoomSettingToggle: (Boolean) -> Unit = {}
 ) {
+    var showEisPlusDiagnosticLogs by remember { mutableStateOf(false) }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -895,6 +918,109 @@ private fun VideoSettingsPage(
                 selectedOption = videoFps,
                 onOptionSelected = onVideoFpsSelected
             )
+        }
+
+        item {
+            SettingsSwitchCard(
+                title = "Photon EIS+ (Gyro Stabilization)",
+                description = if (videoEisPlusEnabled) {
+                    "MGC rolling-shutter correction for supported SDR single-camera video. Requires a realtime sensor clock, gyro and matching YUV frames."
+                } else {
+                    "Gyro-based MGC stabilization for supported SDR single-camera video. Adds look-ahead latency and requires a compatible camera timestamp pipeline."
+                },
+                isChecked = videoEisPlusEnabled,
+                onCheckedChange = onVideoEisPlusToggle,
+                tag = "toggle_photon_eis_plus"
+            )
+        }
+
+        item {
+            Text(
+                text = "Status: $videoEisPlusStatus",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp),
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = 11.sp
+            )
+        }
+
+        item {
+            OutlinedButton(
+                onClick = { showEisPlusDiagnosticLogs = true },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                border = BorderStroke(1.dp, Color(0xFFFFA04A).copy(alpha = 0.65f)),
+            ) {
+                Text("View EIS+ Diagnostic Logs", color = Color(0xFFFFA04A), fontSize = 13.sp)
+            }
+        }
+
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("EIS+ Strength", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    Text("${(videoEisPlusStrength * 100f).roundToInt()}%", color = Color(0xFFFF8A32), fontSize = 12.sp)
+                }
+                Slider(
+                    value = videoEisPlusStrength.coerceIn(0f, 1f),
+                    onValueChange = onVideoEisPlusStrengthChange,
+                    valueRange = 0f..1f,
+                    steps = 19,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFFFF8A32),
+                        activeTrackColor = Color(0xFFFF8A32),
+                        inactiveTrackColor = Color.White.copy(alpha = 0.15f)
+                    )
+                )
+                Text(
+                    "Higher strength crops more aggressively to compensate for motion.",
+                    color = Color.White.copy(alpha = 0.55f),
+                    fontSize = 11.sp
+                )
+            }
+        }
+
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Look-ahead Frames", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    Text(videoEisPlusLookahead.coerceIn(3, 10).toString(), color = Color(0xFFFF8A32), fontSize = 12.sp)
+                }
+                Slider(
+                    value = videoEisPlusLookahead.coerceIn(3, 10).toFloat(),
+                    onValueChange = { onVideoEisPlusLookaheadChange(it.roundToInt()) },
+                    valueRange = 3f..10f,
+                    steps = 6,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFFFF8A32),
+                        activeTrackColor = Color(0xFFFF8A32),
+                        inactiveTrackColor = Color.White.copy(alpha = 0.15f)
+                    )
+                )
+                Text(
+                    "3–10 future frames; higher values smooth motion more but add queue latency.",
+                    color = Color.White.copy(alpha = 0.55f),
+                    fontSize = 11.sp
+                )
+            }
         }
 
         item {
@@ -969,6 +1095,10 @@ private fun VideoSettingsPage(
                 )
             }
         }
+    }
+
+    if (showEisPlusDiagnosticLogs) {
+        EisPlusDiagnosticLogsDialog(onDismiss = { showEisPlusDiagnosticLogs = false })
     }
 }
 
@@ -2817,6 +2947,10 @@ fun CameraSettingsScreen(
     val videoFps by viewModel.videoFps.collectAsStateWithLifecycle()
     val videoBitrate by viewModel.videoBitrateOption.collectAsStateWithLifecycle()
     val isVideoStabilizationEnabled by viewModel.isVideoStabilizationEnabled.collectAsStateWithLifecycle()
+    val videoEisPlusEnabled by viewModel.videoEisPlusEnabled.collectAsStateWithLifecycle()
+    val videoEisPlusStatus by viewModel.videoEisPlusStatus.collectAsStateWithLifecycle()
+    val videoEisPlusStrength by viewModel.videoEisPlusStrength.collectAsStateWithLifecycle()
+    val videoEisPlusLookahead by viewModel.videoEisPlusLookahead.collectAsStateWithLifecycle()
     val actualEisHardwareActive by viewModel.actualEisHardwareActive.collectAsStateWithLifecycle()
     val isOisEnabled by viewModel.isOisEnabled.collectAsStateWithLifecycle()
     val actualOisHardwareActive by viewModel.actualOisHardwareActive.collectAsStateWithLifecycle()
@@ -2873,6 +3007,13 @@ fun CameraSettingsScreen(
         videoBitrate = videoBitrate,
         isVideoStabilizationEnabled = false,
         isHardwareEisActive = false,
+        videoEisPlusEnabled = videoEisPlusEnabled,
+        videoEisPlusStatus = videoEisPlusStatus,
+        onVideoEisPlusToggle = { viewModel.setVideoEisPlusEnabled(it) },
+        videoEisPlusStrength = videoEisPlusStrength,
+        onVideoEisPlusStrengthChange = { viewModel.setVideoEisPlusStrength(it) },
+        videoEisPlusLookahead = videoEisPlusLookahead,
+        onVideoEisPlusLookaheadChange = { viewModel.setVideoEisPlusLookahead(it) },
         isOisEnabled = isOisEnabled,
         isOisHardwareActive = actualOisHardwareActive,
         isAudioEnabled = isAudioEnabled,

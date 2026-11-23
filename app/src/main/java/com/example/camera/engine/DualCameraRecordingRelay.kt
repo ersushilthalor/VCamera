@@ -9,6 +9,7 @@ import android.opengl.EGLExt
 import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import android.opengl.GLES30
 import android.opengl.Matrix
 import android.os.Build
 import android.os.Handler
@@ -17,10 +18,13 @@ import android.util.Log
 import android.view.Surface
 import com.example.camera.model.LensInfo
 import com.example.camera.model.LensType
+import com.example.camera.stabilization.EisPlusDiagnosticLog
+import com.example.camera.stabilization.MgcEisYuvRenderer
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -40,8 +44,8 @@ import kotlin.math.min
  *   while [setActiveSource] atomically switches which Camera2 stream is written into the encoder
  *   with a strictly monotonic presentation timestamp timeline.
  */
-class DualCameraRecordingRelay(
-    private val encoderTargetSurface: Surface,
+class DualCameraRecordingRelay internal constructor(
+    private val encoderTargetSurface: Surface?,
     private val bufferWidth: Int,
     private val bufferHeight: Int,
     private val fps: Int,
@@ -58,11 +62,13 @@ class DualCameraRecordingRelay(
     private val initialSpecialVideoPiPEnabled: Boolean = false,
     private val secondarySensorOrientation: Int = sensorOrientation,
     private val secondaryEncoderTargetSurface: Surface? = null,
-    private val onSpecialVideoTimelineStarted: ((Long) -> Unit)? = null
+    private val onSpecialVideoTimelineStarted: ((Long) -> Unit)? = null,
+    private val eisPlusPipeline: VideoEisPlusPipeline? = null
 ) {
     companion object {
         private const val TAG = "DualCamRecRelay"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
+        private const val EGL_OPENGL_ES3_BIT = 0x0040
         private const val EGL_GL_COLORSPACE_KHR = 0x309D
         private const val EGL_GL_COLORSPACE_BT2020_PQ_EXT = 0x3340
     }
@@ -82,6 +88,11 @@ class DualCameraRecordingRelay(
     fun setSpecialVideoPiPEnabled(enabled: Boolean) {
         specialVideoPiPEnabled = enabled
     }
+
+    /** Sensor-specific pipelines. Never share one lens' transform history with the other. */
+    private val eisPlusPipelinesBySource = ConcurrentHashMap<PreviewStreamSource, VideoEisPlusPipeline>()
+    // Accessed only from the relay GL thread; prevents one warning per raw camera frame.
+    private var loggedEisPlusSourceBypass: PreviewStreamSource? = null
 
     @Volatile
     var activeSource: PreviewStreamSource = initialSource
@@ -134,7 +145,10 @@ class DualCameraRecordingRelay(
     private var eglDisplay: EGLDisplay? = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext? = EGL14.EGL_NO_CONTEXT
     private var eglSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
+    /** Tiny pbuffer keeps GLES resources compilable in the preview-only (no encoder) state. */
+    private var eglScratchSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
     private var eglPreviewSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
+    private var eglConfig: EGLConfig? = null
     private var eglSecondaryRecordSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
     private val secondaryRecordingEnabled = AtomicBoolean(false)
     private val specialVideoRecordingTimeline = SpecialVideoRecordingTimeline()
@@ -144,6 +158,19 @@ class DualCameraRecordingRelay(
     val ultraWideRecordedFrameCount = AtomicLong(0L)
     private var programId: Int = 0
     private var passthroughProgramId: Int = 0
+    private var eisPlusRenderer: MgcEisYuvRenderer? = null
+    private var eisPlusRenderFailureCount = 0L
+    // Coalesce camera-thread notifications so a slow GL thread receives one drain task,
+    // rather than an unbounded runnable per stabilized frame.
+    private val eisPlusRenderTaskScheduled = AtomicBoolean(false)
+    private var eisPlusProgramId: Int = 0
+    private var eisPlusPassthroughProgramId: Int = 0
+    private var eisPlusVadJHandles: VideoAdjustmentsPipeline.VideoAdjustmentsShaderHandles? = null
+    private var eisPlusUMvpHandle: Int = -1
+    private var eisPlusUStHandle: Int = -1
+    private var eisPlusAPositionHandle: Int = -1
+    private var eisPlusATexCoordHandle: Int = -1
+    private var eisPlusSamplerHandle: Int = -1
     private var vadjHandles: VideoAdjustmentsPipeline.VideoAdjustmentsShaderHandles? = null
     private var mainOesTexId: Int = 0
     private var ultraWideOesTexId: Int = 0
@@ -154,6 +181,113 @@ class DualCameraRecordingRelay(
         get() = (eglPreviewSurface != null && eglPreviewSurface != EGL14.EGL_NO_SURFACE)
 
     fun hasPreviewSurface(): Boolean = isRelayPreviewActive
+
+    /**
+     * Attach the UI preview surface only after Camera2 has configured the recording session.
+     * Until that session replaces the old preview session, Camera2 still owns this Surface as
+     * its producer and EGL must not try to connect to the same BufferQueue.
+     */
+    fun attachPreviewTargetSurface(onAttached: (Boolean) -> Unit) {
+        val handler = glHandler
+        if (handler == null) {
+            onAttached(false)
+            return
+        }
+        if (!handler.post {
+            var attached = false
+            try {
+                val display = eglDisplay
+                val config = eglConfig
+                val target = previewTargetSurface
+                if (!isReleased.get() && display != null && display != EGL14.EGL_NO_DISPLAY &&
+                    config != null && target != null && target.isValid
+                ) {
+                    val existing = eglPreviewSurface
+                    if (existing != null && existing != EGL14.EGL_NO_SURFACE) {
+                        EGL14.eglDestroySurface(display, existing)
+                    }
+                    val created = EGL14.eglCreateWindowSurface(
+                        display,
+                        config,
+                        target,
+                        intArrayOf(EGL14.EGL_NONE),
+                        0,
+                    )
+                    val context = eglContext
+                    val encoder = eglSurface
+                    val restoreSurface = if (encoder != null && encoder != EGL14.EGL_NO_SURFACE) {
+                        encoder
+                    } else {
+                        eglScratchSurface
+                    }
+                    val previewCurrent = created != null && created != EGL14.EGL_NO_SURFACE &&
+                        context != null && context != EGL14.EGL_NO_CONTEXT &&
+                        EGL14.eglMakeCurrent(display, created, created, context)
+                    // Preview-only relays restore the pbuffer rather than relying on EGL_KHR_surfaceless_context.
+                    val encoderRestored = context != null && context != EGL14.EGL_NO_CONTEXT &&
+                        restoreSurface != null && restoreSurface != EGL14.EGL_NO_SURFACE &&
+                        EGL14.eglMakeCurrent(display, restoreSurface, restoreSurface, context)
+                    if (previewCurrent && encoderRestored) {
+                        eglPreviewSurface = created
+                        attached = true
+                        Log.i(TAG, "Attached and validated EGL preview surface after Camera2 handoff")
+                    } else {
+                        if (created != null && created != EGL14.EGL_NO_SURFACE) {
+                            runCatching { EGL14.eglDestroySurface(display, created) }
+                        }
+                        eglPreviewSurface = EGL14.EGL_NO_SURFACE
+                        Log.w(
+                            TAG,
+                            "EGL preview attach/current failed after Camera2 handoff: " +
+                                "previewCurrent=$previewCurrent encoderRestored=$encoderRestored " +
+                                "error=0x${Integer.toHexString(EGL14.eglGetError())}",
+                        )
+                    }
+                } else {
+                    Log.w(TAG, "EGL preview attach skipped: relay/context/target is unavailable")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "EGL preview attach failed: ${t.message}", t)
+                eglPreviewSurface = EGL14.EGL_NO_SURFACE
+            }
+            try {
+                onAttached(attached)
+            } catch (t: Throwable) {
+                Log.w(TAG, "EGL preview attach callback failed: ${t.message}", t)
+            }
+        }) {
+            onAttached(false)
+        }
+    }
+
+    /** Drain sensor-matched MGC outputs from either camera on the relay's GL thread. */
+    fun notifyEisPlusFrameAvailable() {
+        if (isReleased.get() || eisPlusPipelinesBySource.values.none { it.isRunning }) return
+        val handler = glHandler ?: run {
+            EisPlusDiagnosticLog.event("RELAY", "GL_HANDLER_MISSING", "EIS+ frame callback has no GL handler", "ERROR")
+            return
+        }
+        if (!eisPlusRenderTaskScheduled.compareAndSet(false, true)) return
+        val accepted = handler.post {
+            try {
+                renderEisPlusFrames()
+            } catch (t: Throwable) {
+                EisPlusDiagnosticLog.event("RELAY", "RENDER_EXCEPTION", "${t.javaClass.simpleName}: ${t.message}", "ERROR")
+                Log.e(TAG, "MGC EIS+ relay render failed; keeping GL thread alive: ${t.message}", t)
+            } finally {
+                eisPlusRenderTaskScheduled.set(false)
+                // Close the lost-wakeup window after the queues have been drained.
+                if (!isReleased.get() && hasPendingEisPlusFrames()) {
+                    notifyEisPlusFrameAvailable()
+                }
+            }
+        }
+        if (!accepted) {
+            eisPlusRenderTaskScheduled.set(false)
+            EisPlusDiagnosticLog.event("RELAY", "GL_POST_REJECTED", "GL thread stopped accepting EIS+ frame tasks", "ERROR")
+            Log.w(TAG, "Unable to schedule timestamp-matched MGC EIS+ frame")
+        }
+    }
 
     fun hasSecondaryRecordingSurface(): Boolean {
         val surface = eglSecondaryRecordSurface
@@ -221,11 +355,14 @@ class DualCameraRecordingRelay(
 
     val mainRecorderSurface: Surface
         get() = internalMainSurface ?: encoderTargetSurface
+            ?: throw IllegalStateException("Main relay input surface is unavailable")
 
     val ultraWideRecorderSurface: Surface
         get() = internalUltraWideSurface ?: encoderTargetSurface
+            ?: throw IllegalStateException("Ultra-wide relay input surface is unavailable")
 
     init {
+        eisPlusPipeline?.let { eisPlusPipelinesBySource[initialSource] = it }
         prepare()
     }
 
@@ -366,17 +503,39 @@ class DualCameraRecordingRelay(
             switchCount.incrementAndGet()
             cinemaRecorder?.setActiveStreamSource(source)
             Log.i(TAG, "[RECORDING_RELAY] Switched active recording stream to $source (switches=${switchCount.get()})")
+            EisPlusDiagnosticLog.event(
+                "RELAY", "EIS_PLUS_SOURCE_SWITCH",
+                "activeSource=$source pipelineReady=${eisPlusPipelinesBySource[source]?.isRunning == true}"
+            )
+            notifyEisPlusFrameAvailable()
         } else {
             cinemaRecorder?.setActiveStreamSource(source)
         }
     }
 
+    /** Attach/detach the EIS+ input for one camera without restarting encoder or GL relay. */
+    internal fun setEisPlusPipelineForSource(source: PreviewStreamSource, pipeline: VideoEisPlusPipeline?) {
+        if (pipeline != null && pipeline.isRunning) {
+            eisPlusPipelinesBySource[source] = pipeline
+            EisPlusDiagnosticLog.event("RELAY", "EIS_PLUS_PIPELINE_ATTACHED", "source=$source running=true")
+        } else {
+            eisPlusPipelinesBySource.remove(source)
+            EisPlusDiagnosticLog.event("RELAY", "EIS_PLUS_PIPELINE_DETACHED", "source=$source")
+        }
+        notifyEisPlusFrameAvailable()
+    }
+
+    private fun hasPendingEisPlusFrames(): Boolean =
+        eisPlusPipelinesBySource.values.any { it.isRunning && it.pendingFrameCount > 0 }
+
     fun getRecorderSurfaceForLens(lens: LensInfo?): Surface {
         val isUw = lens?.lensType == LensType.ULTRAWIDE
         return if (isUw) {
-            internalUltraWideSurface ?: encoderTargetSurface
+            internalUltraWideSurface ?: internalMainSurface ?: encoderTargetSurface
+                ?: throw IllegalStateException("Ultra-wide relay input surface is unavailable")
         } else {
             internalMainSurface ?: encoderTargetSurface
+                ?: throw IllegalStateException("Main relay input surface is unavailable")
         }
     }
 
@@ -437,7 +596,7 @@ class DualCameraRecordingRelay(
                 EGL14.EGL_GREEN_SIZE, 10,
                 EGL14.EGL_BLUE_SIZE, 10,
                 EGL14.EGL_ALPHA_SIZE, 2,
-                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_RENDERABLE_TYPE, if (eisPlusPipeline != null) EGL_OPENGL_ES3_BIT else EGL14.EGL_OPENGL_ES2_BIT,
                 EGL_RECORDABLE_ANDROID, 1,
                 EGL14.EGL_NONE
             )
@@ -450,7 +609,7 @@ class DualCameraRecordingRelay(
                 EGL14.EGL_GREEN_SIZE, 8,
                 EGL14.EGL_BLUE_SIZE, 8,
                 EGL14.EGL_ALPHA_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_RENDERABLE_TYPE, if (eisPlusPipeline != null) EGL_OPENGL_ES3_BIT else EGL14.EGL_OPENGL_ES2_BIT,
                 EGL_RECORDABLE_ANDROID, 1,
                 EGL14.EGL_NONE
             )
@@ -461,7 +620,7 @@ class DualCameraRecordingRelay(
                     EGL14.EGL_GREEN_SIZE, 8,
                     EGL14.EGL_BLUE_SIZE, 8,
                     EGL14.EGL_ALPHA_SIZE, 8,
-                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL14.EGL_RENDERABLE_TYPE, if (eisPlusPipeline != null) EGL_OPENGL_ES3_BIT else EGL14.EGL_OPENGL_ES2_BIT,
                     EGL14.EGL_NONE
                 )
                 configChosen = EGL14.eglChooseConfig(display, fallbackAttribs, 0, configs, 0, 1, numConfigs, 0) && numConfigs[0] > 0
@@ -471,9 +630,10 @@ class DualCameraRecordingRelay(
             }
         }
         val chosenConfig = configs[0] ?: throw IllegalStateException("EGLConfig is null")
+        eglConfig = chosenConfig
 
         val contextAttribs = intArrayOf(
-            EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
+            EGL14.EGL_CONTEXT_CLIENT_VERSION, if (eisPlusPipeline != null) 3 else 2,
             EGL14.EGL_NONE
         )
         val context = EGL14.eglCreateContext(display, chosenConfig, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
@@ -483,11 +643,29 @@ class DualCameraRecordingRelay(
         eglContext = context
 
         val surfaceAttribs = intArrayOf(EGL14.EGL_NONE)
-        val surface = EGL14.eglCreateWindowSurface(display, chosenConfig, encoderTargetSurface, surfaceAttribs, 0)
-        if (surface == null || surface == EGL14.EGL_NO_SURFACE) {
-            throw IllegalStateException("eglCreateWindowSurface failed")
+        val encoderTarget = encoderTargetSurface
+        if (encoderTarget != null && encoderTarget.isValid) {
+            val surface = EGL14.eglCreateWindowSurface(display, chosenConfig, encoderTarget, surfaceAttribs, 0)
+            if (surface == null || surface == EGL14.EGL_NO_SURFACE) {
+                throw IllegalStateException("eglCreateWindowSurface failed")
+            }
+            eglSurface = surface
+        } else {
+            // A preview-only EIS+ relay owns a GLES context and input SurfaceTextures but
+            // intentionally has no encoder output until recording starts. Keep a pbuffer
+            // current so shader compilation does not depend on EGL_KHR_surfaceless_context.
+            val pbuffer = EGL14.eglCreatePbufferSurface(
+                display,
+                chosenConfig,
+                intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE),
+                0
+            )
+            if (pbuffer == null || pbuffer == EGL14.EGL_NO_SURFACE) {
+                throw IllegalStateException("eglCreatePbufferSurface failed for preview-only EIS+")
+            }
+            eglScratchSurface = pbuffer
+            eglSurface = EGL14.EGL_NO_SURFACE
         }
-        eglSurface = surface
 
         if (secondaryEncoderTargetSurface != null && secondaryEncoderTargetSurface.isValid) {
             val secondarySurface = EGL14.eglCreateWindowSurface(display, chosenConfig, secondaryEncoderTargetSurface, surfaceAttribs, 0)
@@ -497,22 +675,14 @@ class DualCameraRecordingRelay(
             eglSecondaryRecordSurface = secondarySurface
         }
 
-        if (previewTargetSurface != null && previewTargetSurface.isValid) {
-            try {
-                val prevSurf = EGL14.eglCreateWindowSurface(display, chosenConfig, previewTargetSurface, surfaceAttribs, 0)
-                if (prevSurf != null && prevSurf != EGL14.EGL_NO_SURFACE) {
-                    eglPreviewSurface = prevSurf
-                    Log.i(TAG, "Created EGL preview surface for real-time video adjustments preview")
-                } else {
-                    eglPreviewSurface = EGL14.EGL_NO_SURFACE
-                }
-            } catch (t: Throwable) {
-                Log.w(TAG, "Failed creating EGL surface for previewTargetSurface: ${t.message}")
-                eglPreviewSurface = EGL14.EGL_NO_SURFACE
-            }
+        val initialSurface = if (eglSurface != null && eglSurface != EGL14.EGL_NO_SURFACE) {
+            eglSurface
+        } else {
+            eglScratchSurface
         }
-
-        if (!EGL14.eglMakeCurrent(display, surface, surface, context)) {
+        val initialSurfaceReady = initialSurface != null && initialSurface != EGL14.EGL_NO_SURFACE &&
+            EGL14.eglMakeCurrent(display, initialSurface, initialSurface, context)
+        if (!initialSurfaceReady) {
             throw IllegalStateException("eglMakeCurrent failed")
         }
 
@@ -554,6 +724,50 @@ class DualCameraRecordingRelay(
         aPositionHandle = GLES20.glGetAttribLocation(programId, "aPosition")
         aTextureCoordHandle = GLES20.glGetAttribLocation(programId, "aTextureCoord")
         sTextureHandle = GLES20.glGetUniformLocation(programId, "sTexture")
+
+        if (eisPlusPipeline != null) {
+            val eisVertexShader = """
+                #version 300 es
+                uniform mat4 uMVPMatrix;
+                uniform mat4 uSTMatrix;
+                in vec4 aPosition;
+                in vec4 aTextureCoord;
+                out vec2 vTextureCoord;
+                void main() {
+                    gl_Position = uMVPMatrix * aPosition;
+                    vTextureCoord = (uSTMatrix * aTextureCoord).xy;
+                }
+            """.trimIndent()
+            val eisPassFragment = """
+                #version 300 es
+                precision mediump float;
+                in vec2 vTextureCoord;
+                uniform sampler2D sTexture;
+                out vec4 fragColor;
+                void main() { fragColor = texture(sTexture, vTextureCoord); }
+            """.trimIndent()
+            val eisAdjustFragment = VideoAdjustmentsPipeline.GLES_VIDEO_ADJUSTMENTS_FRAGMENT_SHADER
+                .replace("#extension GL_OES_EGL_image_external : require", "#version 300 es")
+                .replace("varying vec2 vTextureCoord;", "in vec2 vTextureCoord;")
+                .replace("uniform samplerExternalOES sTexture;", "uniform sampler2D sTexture;")
+                .replace("texture2D(", "texture(")
+                .replace("gl_FragColor", "fragColor")
+                .replace("void main() {", "out vec4 fragColor;\nvoid main() {")
+            eisPlusPassthroughProgramId = createProgram(eisVertexShader, eisPassFragment)
+            eisPlusProgramId = createProgram(eisVertexShader, eisAdjustFragment)
+            eisPlusVadJHandles = if (eisPlusProgramId != 0) {
+                VideoAdjustmentsPipeline.VideoAdjustmentsShaderHandles(eisPlusProgramId)
+            } else null
+            eisPlusUMvpHandle = GLES30.glGetUniformLocation(eisPlusProgramId, "uMVPMatrix")
+            eisPlusUStHandle = GLES30.glGetUniformLocation(eisPlusProgramId, "uSTMatrix")
+            eisPlusAPositionHandle = GLES30.glGetAttribLocation(eisPlusProgramId, "aPosition")
+            eisPlusATexCoordHandle = GLES30.glGetAttribLocation(eisPlusProgramId, "aTextureCoord")
+            eisPlusSamplerHandle = GLES30.glGetUniformLocation(eisPlusProgramId, "sTexture")
+            eisPlusRenderer = MgcEisYuvRenderer(TAG)
+            if (eisPlusProgramId == 0 || eisPlusPassthroughProgramId == 0) {
+                throw IllegalStateException("Could not create GLES 3 MGC EIS+ shaders")
+            }
+        }
 
         vertexBuffer = ByteBuffer.allocateDirect(4 * 3 * 4)
             .order(ByteOrder.nativeOrder())
@@ -654,6 +868,24 @@ class DualCameraRecordingRelay(
 
         if (isPaused.get() || !isStreamingActive.get()) return
 
+        // Do not let raw OES overwrite a stabilized frame for this exact sensor.
+        // If the selected lens has no live matching pipeline, preserve the safe raw fallback.
+        val activeEisPlusRunning = eisPlusPipelinesBySource[activeSource]?.isRunning == true
+        if (activeEisPlusRunning) {
+            loggedEisPlusSourceBypass = null
+            return
+        }
+        if (eisPlusPipelinesBySource.values.any { it.isRunning } &&
+            loggedEisPlusSourceBypass != activeSource
+        ) {
+            loggedEisPlusSourceBypass = activeSource
+            EisPlusDiagnosticLog.event(
+                "RELAY", "EIS_PLUS_SOURCE_BYPASS",
+                "activeSource=$activeSource has no matching EIS+ pipeline; using raw active OES fallback",
+                "WARN",
+            )
+        }
+
         val rawTimestampNs = st.timestamp.takeIf { it > 0L } ?: System.nanoTime()
         val isSpecialDualRecording = secondaryRecordingEnabled.get()
         val specialFramePtsNs = if (isSpecialDualRecording) {
@@ -703,7 +935,7 @@ class DualCameraRecordingRelay(
             return
         }
 
-        if (!encoderTargetSurface.isValid) return
+        if (encoderTargetSurface?.isValid != true) return
 
         try {
 
@@ -976,6 +1208,321 @@ class DualCameraRecordingRelay(
         }
     }
 
+
+    private fun renderEisPlusFrames() {
+        val display = eglDisplay ?: return
+        val context = eglContext ?: return
+        val encoderSurface = eglSurface
+        val previewSurface = eglPreviewSurface
+        if (isReleased.get() || display == EGL14.EGL_NO_DISPLAY ||
+            context == EGL14.EGL_NO_CONTEXT ||
+            ((encoderSurface == null || encoderSurface == EGL14.EGL_NO_SURFACE) &&
+                (previewSurface == null || previewSurface == EGL14.EGL_NO_SURFACE))
+        ) return
+
+        // Both sensors keep independent Camera2 metadata, gyro timelines, look-ahead queues,
+        // calibration and native state. Drain both here; encode only the active source.
+        for ((source, pipeline) in eisPlusPipelinesBySource.entries.toList()) {
+            if (!pipeline.isRunning) continue
+            while (true) {
+                val pending = pipeline.dequeueFrame() ?: break
+                if (source != activeSource || isPaused.get() || !isStreamingActive.get()) {
+                    if (source == activeSource) {
+                        EisPlusDiagnosticLog.event(
+                            "RELAY", "FRAME_SKIPPED",
+                            "timestampNs=${pending.timestampNs} activeSource=$activeSource source=$source " +
+                                "paused=${isPaused.get()} streaming=${isStreamingActive.get()}",
+                            "WARN"
+                        )
+                    }
+                    // Release inactive queue entries so ImageReader never stalls while a lens
+                    // is in standby. Its next active frames continue from its own timeline.
+                    pending.image.close()
+                    continue
+                }
+                val renderer = eisPlusRenderer
+                if (renderer == null) {
+                    EisPlusDiagnosticLog.event("RELAY", "RENDERER_MISSING", "matched timestampNs=${pending.timestampNs}", "ERROR")
+                    pending.image.close()
+                    Log.e(TAG, "MGC EIS+ renderer is unavailable; dropping matched frame")
+                    continue
+                }
+                val frame = renderer.render(pending)
+                if (frame == null) {
+                    eisPlusRenderFailureCount += 1L
+                    if (eisPlusRenderFailureCount <= 3L || eisPlusRenderFailureCount % 30L == 0L) {
+                        EisPlusDiagnosticLog.event(
+                            "RELAY", "YUV_RENDER_RETURNED_NULL",
+                            "count=$eisPlusRenderFailureCount timestampNs=${pending.timestampNs}", "ERROR"
+                        )
+                    }
+                    continue
+                }
+
+                val sourceTimestampNs = frame.timestampNs
+                if (recordingStartMonotonicNs <= 0L) recordingStartMonotonicNs = sourceTimestampNs
+                if (sourceTimestampNs < recordingStartMonotonicNs) continue
+                val frameIntervalNs = 1_000_000_000L / fps.coerceAtLeast(1)
+                var presentationNs = sourceTimestampNs - recordingStartMonotonicNs - totalPausedDurationNs
+                // OES callbacks are suppressed for a matched EIS+ source; consume the same
+                // PTS handoff here or a sensor switch can leave an old clock offset in place.
+                if (pendingClockSyncOnSwitch) {
+                    pendingClockSyncOnSwitch = false
+                    if (lastOutputPtsNs > 0L) {
+                        val expectedNext = lastOutputPtsNs + frameIntervalNs
+                        if (kotlin.math.abs(presentationNs - expectedNext) > 150_000_000L) {
+                            streamClockOffsetNs += expectedNext - presentationNs
+                            presentationNs = expectedNext
+                        }
+                    }
+                }
+                presentationNs += streamClockOffsetNs
+                if (presentationNs < 0L) presentationNs = 0L
+                if (lastOutputPtsNs >= 0L && presentationNs <= lastOutputPtsNs) {
+                    presentationNs = lastOutputPtsNs + max(1_000_000L, frameIntervalNs / 4)
+                }
+
+                val hasEncoder = encoderSurface != null && encoderSurface != EGL14.EGL_NO_SURFACE
+                val encoded = if (hasEncoder) {
+                    renderEisPlusOutput(
+                        display, context, encoderSurface!!, frame, presentationNs, bufferWidth, bufferHeight
+                    )
+                } else true
+                if (!encoded) {
+                    eisPlusRenderFailureCount += 1L
+                    if (eisPlusRenderFailureCount <= 3L || eisPlusRenderFailureCount % 30L == 0L) {
+                        EisPlusDiagnosticLog.event(
+                            "RELAY", "ENCODER_RENDER_FAILED",
+                            "count=$eisPlusRenderFailureCount source=$source sourceTsNs=$sourceTimestampNs ptsNs=$presentationNs " +
+                                "size=${frame.width}x${frame.height} glError=0x${GLES30.glGetError().toString(16)}",
+                            "ERROR"
+                        )
+                    }
+                    continue
+                }
+                lastOutputPtsNs = presentationNs
+                val renderedOutputCount = relayedFrameCount.incrementAndGet()
+                if (hasEncoder && (renderedOutputCount <= 3L || renderedOutputCount % 30L == 0L)) {
+                    EisPlusDiagnosticLog.event(
+                        "RELAY", "ENCODER_FRAME_PRESENTED",
+                        "count=$renderedOutputCount source=$source sourceTsNs=$sourceTimestampNs ptsNs=$presentationNs " +
+                            "frameSize=${frame.width}x${frame.height} outputSize=${bufferWidth}x$bufferHeight"
+                    )
+                }
+                if (hasEncoder) CameraPerformanceMonitor.onRecordingFrame()
+
+                if (previewSurface != null && previewSurface != EGL14.EGL_NO_SURFACE) {
+                    val pw = if (previewWidth > 0) previewWidth else bufferWidth
+                    val ph = if (previewHeight > 0) previewHeight else bufferHeight
+                    val previewRendered = renderEisPlusOutput(
+                        display, context, previewSurface, frame, presentationNs, pw, ph
+                    )
+                    if (!previewRendered && renderedOutputCount <= 3L) {
+                        EisPlusDiagnosticLog.event(
+                            "RELAY", "PREVIEW_RENDER_FAILED",
+                            "ptsNs=$presentationNs previewSize=${pw}x$ph", "WARN"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun renderEisPlusOutput(
+        display: EGLDisplay,
+        context: EGLContext,
+        targetSurface: EGLSurface,
+        frame: MgcEisYuvRenderer.Frame,
+        presentationNs: Long,
+        outputWidth: Int,
+        outputHeight: Int
+    ): Boolean {
+        if (targetSurface == EGL14.EGL_NO_SURFACE ||
+            !EGL14.eglMakeCurrent(display, targetSurface, targetSurface, context)
+        ) return false
+
+        val useAdjustments = !currentVideoAdjustments.isDefault
+        val activeProgram = if (useAdjustments) eisPlusProgramId else eisPlusPassthroughProgramId
+        if (activeProgram == 0) return false
+        // EGL window surfaces can have a different pixel size from the cached
+        // viewfinder layout dimensions. Query the actual target before setting the
+        // viewport or calculating the aspect crop; otherwise only part of the
+        // preview surface may be redrawn and the remainder stays black.
+        val targetSize = queryEglSurfaceSize(
+            display = display,
+            targetSurface = targetSurface,
+            fallbackWidth = outputWidth,
+            fallbackHeight = outputHeight
+        )
+        val targetWidth = targetSize.first
+        val targetHeight = targetSize.second
+        GLES30.glViewport(0, 0, targetWidth, targetHeight)
+        GLES30.glUseProgram(activeProgram)
+
+        // EGL reports the producer BufferQueue size. For the preview TextureView,
+        // that is the landscape Camera2 buffer size even though the visible
+        // viewfinder is portrait. Use the requested presentation dimensions for
+        // the transform/crop, while retaining the queried EGL dimensions only for
+        // the GL viewport. For the encoder these dimensions are already identical.
+        val presentationWidth = outputWidth.coerceAtLeast(2)
+        val presentationHeight = outputHeight.coerceAtLeast(2)
+
+        // The MGC YUV renderer outputs a regular GL_TEXTURE_2D whose row/texture
+        // convention is already normalized. Do not apply the OES SurfaceTexture
+        // flip/rotation heuristic here; it adds a second flip to the MGC result.
+        computeEisPlusPresentationMatrix(
+            isFront = isFrontFacing,
+            sensorOrientation = cameraSensorOrientation,
+            deviceRotation = activeDeviceRotation,
+            viewportWidth = presentationWidth,
+            viewportHeight = presentationHeight,
+            camBufferWidth = frame.width,
+            camBufferHeight = frame.height,
+            outMatrix = renderTexMatrix
+        )
+
+        val uMvp = if (useAdjustments) eisPlusUMvpHandle else GLES30.glGetUniformLocation(activeProgram, "uMVPMatrix")
+        val uSt = if (useAdjustments) eisPlusUStHandle else GLES30.glGetUniformLocation(activeProgram, "uSTMatrix")
+        val aPos = if (useAdjustments) eisPlusAPositionHandle else GLES30.glGetAttribLocation(activeProgram, "aPosition")
+        val aTex = if (useAdjustments) eisPlusATexCoordHandle else GLES30.glGetAttribLocation(activeProgram, "aTextureCoord")
+        val sampler = if (useAdjustments) eisPlusSamplerHandle else GLES30.glGetUniformLocation(activeProgram, "sTexture")
+        GLES30.glUniformMatrix4fv(uMvp, 1, false, mvpMatrix, 0)
+        GLES30.glUniformMatrix4fv(uSt, 1, false, renderTexMatrix, 0)
+        GLES30.glUniform1i(sampler, 0)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frame.textureId)
+
+        if (useAdjustments) {
+            eisPlusVadJHandles?.let {
+                VideoAdjustmentsPipeline.bindUniforms(
+                    handles = it,
+                    adjustments = currentVideoAdjustments,
+                    width = presentationWidth,
+                    height = presentationHeight,
+                    timeSec = presentationNs.toFloat() / 1_000_000_000f
+                )
+            }
+        }
+
+        if (vboVertexBufferId != 0 && vboTexCoordBufferId != 0) {
+            GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vboVertexBufferId)
+            GLES30.glVertexAttribPointer(aPos, 3, GLES30.GL_FLOAT, false, 0, 0)
+            GLES30.glEnableVertexAttribArray(aPos)
+            GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vboTexCoordBufferId)
+            GLES30.glVertexAttribPointer(aTex, 2, GLES30.GL_FLOAT, false, 0, 0)
+            GLES30.glEnableVertexAttribArray(aTex)
+            GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+            GLES30.glDisableVertexAttribArray(aPos)
+            GLES30.glDisableVertexAttribArray(aTex)
+            GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0)
+        } else {
+            val vb = vertexBuffer ?: return false
+            val tb = texCoordBuffer ?: return false
+            vb.position(0)
+            GLES30.glVertexAttribPointer(aPos, 3, GLES30.GL_FLOAT, false, 0, vb)
+            GLES30.glEnableVertexAttribArray(aPos)
+            tb.position(0)
+            GLES30.glVertexAttribPointer(aTex, 2, GLES30.GL_FLOAT, false, 0, tb)
+            GLES30.glEnableVertexAttribArray(aTex)
+            GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+            GLES30.glDisableVertexAttribArray(aPos)
+            GLES30.glDisableVertexAttribArray(aTex)
+        }
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
+        if (targetSurface == eglSurface) {
+            EGLExt.eglPresentationTimeANDROID(display, targetSurface, presentationNs)
+        }
+        return EGL14.eglSwapBuffers(display, targetSurface)
+    }
+
+    private fun queryEglSurfaceSize(
+        display: EGLDisplay,
+        targetSurface: EGLSurface,
+        fallbackWidth: Int,
+        fallbackHeight: Int
+    ): Pair<Int, Int> {
+        val width = IntArray(1)
+        val height = IntArray(1)
+        val queried = runCatching {
+            EGL14.eglQuerySurface(display, targetSurface, 0x3057, width, 0) &&
+                EGL14.eglQuerySurface(display, targetSurface, 0x3056, height, 0)
+        }.getOrDefault(false)
+        return if (queried && width[0] > 0 && height[0] > 0) {
+            width[0] to height[0]
+        } else {
+            fallbackWidth.coerceAtLeast(2) to fallbackHeight.coerceAtLeast(2)
+        }
+    }
+
+    /**
+     * Builds a presentation matrix for the MGC output texture (GL_TEXTURE_2D).
+     *
+     * Unlike a Camera2 SurfaceTexture/OES input, MgcEisYuvRenderer has already
+     * converted the top-first YUV image into a correctly oriented 2D texture.
+     * Therefore this matrix applies only sensor-to-display rotation, optional
+     * front-camera horizontal mirroring, and a center crop to fill the target.
+     */
+    internal fun computeEisPlusPresentationMatrix(
+        isFront: Boolean,
+        sensorOrientation: Int,
+        deviceRotation: Int,
+        viewportWidth: Int,
+        viewportHeight: Int,
+        camBufferWidth: Int,
+        camBufferHeight: Int,
+        outMatrix: FloatArray
+    ) {
+        require(outMatrix.size >= 16) { "EIS+ presentation matrix must contain 16 values" }
+
+        val rotationDegrees = Math.floorMod(
+            if (isFront) sensorOrientation + deviceRotation else sensorOrientation - deviceRotation,
+            360
+        )
+        val radians = Math.toRadians(rotationDegrees.toDouble())
+        val cosine = kotlin.math.cos(radians).toFloat()
+        val sine = kotlin.math.sin(radians).toFloat()
+
+        val sourceWidth = if (rotationDegrees == 90 || rotationDegrees == 270) {
+            camBufferHeight
+        } else {
+            camBufferWidth
+        }.coerceAtLeast(1)
+        val sourceHeight = if (rotationDegrees == 90 || rotationDegrees == 270) {
+            camBufferWidth
+        } else {
+            camBufferHeight
+        }.coerceAtLeast(1)
+
+        val sourceAspect = sourceWidth.toFloat() / sourceHeight.toFloat()
+        val targetAspect = viewportWidth.coerceAtLeast(1).toFloat() /
+            viewportHeight.coerceAtLeast(1).toFloat()
+        val cropX: Float
+        val cropY: Float
+        if (targetAspect > sourceAspect) {
+            cropX = 1f
+            cropY = sourceAspect / targetAspect
+        } else {
+            cropX = targetAspect / sourceAspect
+            cropY = 1f
+        }
+
+        // Map destination coordinates back into the sensor texture: inverse
+        // sensor rotation, then the optional horizontal selfie mirror in display
+        // space, with a centered fill crop. Mirroring only the first matrix
+        // column composes the mirror after rotation instead of mirroring the
+        // sensor X axis before rotation.
+        val displayMirror = if (isFront) -1f else 1f
+        outMatrix.fill(0f)
+        outMatrix[0] = displayMirror * cropX * cosine
+        outMatrix[4] = -cropY * sine
+        outMatrix[12] = 0.5f - 0.5f * outMatrix[0] - 0.5f * outMatrix[4]
+        outMatrix[1] = displayMirror * cropX * sine
+        outMatrix[5] = cropY * cosine
+        outMatrix[13] = 0.5f - 0.5f * outMatrix[1] - 0.5f * outMatrix[5]
+        outMatrix[10] = 1f
+        outMatrix[15] = 1f
+    }
+
     /**
      * Writes each ultra-wide OES frame to the independent Special Video encoder surface.
      * This is deliberately separate from the main encoder's active-source switching path.
@@ -1227,6 +1774,16 @@ class DualCameraRecordingRelay(
                         GLES20.glDeleteProgram(passthroughProgramId)
                         passthroughProgramId = 0
                     }
+                    eisPlusRenderer?.release()
+                    eisPlusRenderer = null
+                    if (eisPlusProgramId != 0) {
+                        GLES30.glDeleteProgram(eisPlusProgramId)
+                        eisPlusProgramId = 0
+                    }
+                    if (eisPlusPassthroughProgramId != 0) {
+                        GLES30.glDeleteProgram(eisPlusPassthroughProgramId)
+                        eisPlusPassthroughProgramId = 0
+                    }
                     if (programId != 0) {
                         GLES20.glDeleteProgram(programId)
                         programId = 0
@@ -1258,6 +1815,11 @@ class DualCameraRecordingRelay(
                             try { EGL14.eglDestroySurface(display, secondarySurface) } catch (_: Throwable) {}
                             eglSecondaryRecordSurface = EGL14.EGL_NO_SURFACE
                         }
+                        val scratchSurface = eglScratchSurface
+                        if (scratchSurface != null && scratchSurface != EGL14.EGL_NO_SURFACE) {
+                            try { EGL14.eglDestroySurface(display, scratchSurface) } catch (_: Throwable) {}
+                            eglScratchSurface = EGL14.EGL_NO_SURFACE
+                        }
                         val prevSurface = eglPreviewSurface
                         if (prevSurface != null && prevSurface != EGL14.EGL_NO_SURFACE) {
                             try { EGL14.eglDestroySurface(display, prevSurface) } catch (_: Throwable) {}
@@ -1271,6 +1833,7 @@ class DualCameraRecordingRelay(
                         try { EGL14.eglTerminate(display) } catch (_: Throwable) {}
                         eglDisplay = EGL14.EGL_NO_DISPLAY
                     }
+                    eglConfig = null
                 } catch (_: Throwable) {
                 } finally {
                     latch.countDown()

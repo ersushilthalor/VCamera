@@ -672,6 +672,27 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _isVideoStabilizationEnabled = MutableStateFlow(preferences.getModeVideoStabilization(preferences.cameraMode))
     val isVideoStabilizationEnabled: StateFlow<Boolean> = _isVideoStabilizationEnabled.asStateFlow()
 
+    private val _videoEisPlusEnabled = MutableStateFlow(preferences.videoEisPlusEnabled)
+    val videoEisPlusEnabled: StateFlow<Boolean> = _videoEisPlusEnabled.asStateFlow()
+    val videoEisPlusStatus: StateFlow<String> = combine(
+        _videoEisPlusEnabled,
+        engine.videoEisPlusStatus
+    ) { enabled, status ->
+        when {
+            !enabled -> "Disabled"
+            status == "Disabled" -> "Ready for supported SDR video"
+            else -> status
+        }
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000L),
+        if (preferences.videoEisPlusEnabled) "Ready for supported SDR video" else "Disabled"
+    )
+    private val _videoEisPlusStrength = MutableStateFlow(preferences.videoEisPlusStrength)
+    val videoEisPlusStrength: StateFlow<Float> = _videoEisPlusStrength.asStateFlow()
+    private val _videoEisPlusLookahead = MutableStateFlow(preferences.videoEisPlusLookahead)
+    val videoEisPlusLookahead: StateFlow<Int> = _videoEisPlusLookahead.asStateFlow()
+
     private val _videoBitrateOption = MutableStateFlow(preferences.getModeVideoBitrate(preferences.cameraMode))
     val videoBitrateOption: StateFlow<VideoBitrateOption> = _videoBitrateOption.asStateFlow()
 
@@ -1607,6 +1628,24 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         engine.updatePreviewSettings()
     }
 
+    fun setVideoEisPlusEnabled(enabled: Boolean) {
+        _videoEisPlusEnabled.value = enabled
+        engine.setVideoEisPlusEnabled(enabled)
+        showToast(if (enabled) "Photon EIS+ enabled for live Video preview" else "Photon EIS+ disabled")
+    }
+
+    fun setVideoEisPlusStrength(strength: Float) {
+        val value = strength.coerceIn(0f, 1f)
+        _videoEisPlusStrength.value = value
+        preferences.videoEisPlusStrength = value
+    }
+
+    fun setVideoEisPlusLookahead(frames: Int) {
+        val value = frames.coerceIn(3, 10)
+        _videoEisPlusLookahead.value = value
+        preferences.videoEisPlusLookahead = value
+    }
+
     fun toggleVideoStabilization() = setVideoStabilization(false)
 
     fun setVideoStabilizationMode(@Suppress("UNUSED_PARAMETER") mode: VideoStabilizationMode) =
@@ -1794,9 +1833,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         engine.videoStabilizationMode = VideoStabilizationMode.OFF
     }
 
-    fun setMainCameraStabilizationMode(@Suppress("UNUSED_PARAMETER") mode: MainCameraStabilizationMode) {
-        // The legacy OFF option is ignored: OIS remains permanently enabled.
-        setOisEnabled(true)
+    fun setMainCameraStabilizationMode(mode: MainCameraStabilizationMode) {
+        setOisEnabled(mode == MainCameraStabilizationMode.OIS_ONLY)
     }
 
     fun cycleStabilizationMode() {
@@ -1809,16 +1847,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         setHybridStabilizationConfig(hybridStabilizationConfig.value)
     }
 
-    fun setOisEnabled(@Suppress("UNUSED_PARAMETER") enabled: Boolean) {
-        _isOisEnabled.value = true
-        preferences.isOisEnabled = true
-        preferences.isOisPreferred = true
-        engine.isOisEnabled = true
+    fun setOisEnabled(enabled: Boolean) {
+        _isOisEnabled.value = enabled
+        preferences.isOisEnabled = enabled
+        preferences.isOisPreferred = enabled
+        engine.isOisEnabled = enabled
 
         val updated = hybridStabilizationConfig.value.copy(
             isHybridEnabled = false,
-            isOisPreferred = true,
-            isOisEnabled = true,
+            isOisPreferred = enabled,
+            isOisEnabled = enabled,
             isEisPreferred = false,
             isAdaptiveFpsLens = false,
             isUltraStabilizationEnabled = false,
@@ -1826,7 +1864,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         )
         setHybridStabilizationConfig(updated)
         engine.updatePreviewSettings()
-        showToast("Optical Image Stabilization (OIS): ON")
+        showToast(if (enabled) "Optical Image Stabilization (OIS): ON" else "Optical Image Stabilization (OIS): OFF")
     }
 
     fun setOisPreferred(enabled: Boolean) {

@@ -16,7 +16,10 @@ import android.hardware.camera2.params.TonemapCurve
 import android.hardware.camera2.params.DynamicRangeProfiles
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import android.media.CamcorderProfile
 import android.media.Image
 import android.media.ImageReader
@@ -42,6 +45,7 @@ import android.view.Surface
 import com.example.camera.model.*
 import com.example.camera.data.CubeLutParser
 import com.example.camera.gallery.SpecialVideoGalleryRepository
+import com.example.camera.stabilization.EisPlusDiagnosticLog
 import java.io.ByteArrayInputStream
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -66,8 +70,27 @@ enum class PreviewStreamSource {
 
 class Camera2Engine(private val context: Context) {
 
+    /** Per-device EIS+ pipeline and the exact camera/sensor that owns its timestamps. */
+    private data class VideoEisPlusBinding(
+        val sessionCameraId: String,
+        val pipelineCameraId: String,
+        val physicalCameraId: String?,
+        val source: PreviewStreamSource,
+        val pipeline: VideoEisPlusPipeline,
+        val generation: Long
+    )
+
+    private val videoEisPlusBindingsByCameraId = ConcurrentHashMap<String, VideoEisPlusBinding>()
+    private val videoEisPlusBindingsBySource = ConcurrentHashMap<PreviewStreamSource, VideoEisPlusBinding>()
+
+    // One logical CameraDevice can own both main and ultra-wide physical sensors.
+    // Keep the two sensor pipelines independently addressable even though sessionCameraId matches.
+    private fun videoEisPlusBindingKey(sessionCameraId: String, source: PreviewStreamSource): String =
+        "$sessionCameraId::${source.name}"
+
     private val cameraManager: CameraManager? =
         context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+    private val cameraCharacteristicsCache = ConcurrentHashMap<String, CameraCharacteristics>()
 
     // Background threads
     private var backgroundThread: HandlerThread? = null
@@ -87,6 +110,16 @@ class Camera2Engine(private val context: Context) {
     private var imageReaderYuv: ImageReader? = null
     private var mediaRecorder: MediaRecorder? = null
     private var activeRecordingSurface: Surface? = null
+    private var activeVideoEisPlusPipeline: VideoEisPlusPipeline? = null
+    private var activeVideoEisPlusSurface: Surface? = null
+    /** Preview-only EGL relay; it is released before the recording session takes ownership. */
+    private var previewVideoEisPlusRelay: DualCameraRecordingRelay? = null
+    @Volatile private var previewEisPlusUnavailableForSession: Boolean = false
+    /** Physical sensor that produces the EIS+ YUV stream, independent of the active preview route. */
+    private var activeVideoEisPlusPhysicalCameraId: String? = null
+    private var activeVideoEisPlusSessionCameraId: String? = null
+    @Volatile private var videoEisPlusOisDisabledForSession: Boolean = false
+    @Volatile private var videoEisPlusCaptureGeneration: Long = 0L
     private var videoRecordingFileDescriptor: ParcelFileDescriptor? = null
     private var currentRecordingTempFile: File? = null
     private var currentVideoUri: Uri? = null
@@ -102,12 +135,19 @@ class Camera2Engine(private val context: Context) {
 
     fun getCharacteristics(cameraId: String): CameraCharacteristics? {
         val mgr = cameraManager ?: return null
-        return try {
+        cameraCharacteristicsCache[cameraId]?.let { return it }
+
+        // API 29+ allows CameraManager.getCameraCharacteristics() to resolve physical IDs
+        // that are only addressable through their logical multi-camera parent. API 28 exposes
+        // those physical IDs through cameraIdList, so the same call works there as well.
+        val characteristics = runCatching {
             mgr.getCameraCharacteristics(cameraId)
-        } catch (t: Throwable) {
-            Log.w(TAG, "Failed to get characteristics for camera $cameraId", t)
-            null
-        }
+        }.onFailure {
+            Log.w(TAG, "Failed to get characteristics for camera/physical sensor $cameraId", it)
+        }.getOrNull() ?: return null
+
+        cameraCharacteristicsCache.putIfAbsent(cameraId, characteristics)
+        return characteristics
     }
 
     /**
@@ -293,6 +333,8 @@ class Camera2Engine(private val context: Context) {
     @Volatile
     private var standbyConfiguredForRecording: Boolean = false
     @Volatile
+    private var standbyPreviewEisPlusConfigured: Boolean = false
+    @Volatile
     private var standbyRecordingSessionFailed: Boolean = false
     @Volatile
     private var logicalMultiCamRecordingFailed: Boolean = false
@@ -341,6 +383,30 @@ class Camera2Engine(private val context: Context) {
             request: CaptureRequest,
             result: TotalCaptureResult
         ) {
+            // Each persistent CameraCaptureSession keeps this callback after active/standby swaps.
+            val standbyBinding = submitVideoEisPlusCaptureResult(session, request, result)
+            if (session === captureSession &&
+                standbyBinding?.pipeline?.shouldDisableOisForMissingTelemetry == true &&
+                !videoEisPlusOisDisabledForSession
+            ) {
+                videoEisPlusOisDisabledForSession = true
+                Log.w(TAG, "Photon EIS+ OIS decision: active standby camera has no usable optical telemetry; requesting OIS OFF")
+                try {
+                    synchronized(previewRequestLock) {
+                        previewRequestBuilder?.let { builder ->
+                            applyHardwareOisRequest(
+                                builder,
+                                oisAllowed = isOisAllowedForCurrentSession(),
+                                physicalCameraId = activeSessionPhysicalCameraId,
+                                vendorCameraIdOverride = cameraDevice?.id
+                            )
+                            session.setRepeatingRequest(builder.build(), this, backgroundHandler)
+                        }
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Could not update OIS for the switched EIS+ camera", t)
+                }
+            }
             val currentTexture = if (_selectedLens.value?.lensType == LensType.ULTRAWIDE) {
                 previewSurfaceTexture ?: fallbackMainSurfaceTexture
             } else {
@@ -1053,7 +1119,8 @@ class Camera2Engine(private val context: Context) {
     private fun configureStandbySessionOnDevice(
         camera: CameraDevice,
         standbyLens: LensInfo,
-        includeJpegReader: Boolean = false
+        includeJpegReader: Boolean = false,
+        allowEisPlus: Boolean = true
     ) {
         try {
             val standbyPreviewSurf = if (standbyLens.lensType == LensType.ULTRAWIDE) {
@@ -1069,6 +1136,7 @@ class Camera2Engine(private val context: Context) {
             try { ultraWideStandbyCaptureSession?.close() } catch (_: Throwable) {}
             ultraWideStandbyCaptureSession = null
             standbyConfiguredWithJpegReader = false
+            standbyPreviewEisPlusConfigured = false
 
             val isRecordingActive = (_isRecordingVideo.value || isStartingRecording.get()) && dualCameraRecordingRelay != null
             val isVideo = (currentMode == CameraMode.VIDEO || currentMode == CameraMode.CINEMA || isRecordingActive)
@@ -1092,6 +1160,7 @@ class Camera2Engine(private val context: Context) {
             // When video recording is active, configure the standby session with BOTH the preview surface
             // AND its dedicated recording surface at the active recording configuration/FPS/dynamic range.
             if (isRecordingActive && standbyRecorderSurf != null && standbyRecorderSurf.isValid) {
+                val recordingRelay = relay ?: return
                 val recConfig = activeRecordingStreamConfig
                 val requestedVideoRes = recConfig?.videoResolution
                     ?: (userSelectedVideoResolution ?: _selectedVideoResolution.value ?: CameraResolution(1920, 1080))
@@ -1100,19 +1169,11 @@ class Camera2Engine(private val context: Context) {
                     max(resolvedStandbyRes.width, resolvedStandbyRes.height),
                     min(resolvedStandbyRes.width, resolvedStandbyRes.height)
                 )
-                relay?.updateInputBufferSize(
+                recordingRelay?.updateInputBufferSize(
                     isUltraWide = (standbyLens.lensType == LensType.ULTRAWIDE),
                     width = effectiveStandbyVideoSize.width,
                     height = effectiveStandbyVideoSize.height
                 )
-
-                val recordBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                    addTarget(standbyPreviewSurf)
-                    addTarget(standbyRecorderSurf)
-                    applySynchronizedStandbySettings(this, standbyLens)
-                    set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
-                }
-                ultraWideStandbyRequestBuilder = recordBuilder
 
                 val targetPhysId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
                     standbyLens.physicalCameraId != null &&
@@ -1120,9 +1181,43 @@ class Camera2Engine(private val context: Context) {
                     standbyLens.physicalCameraId != standbyLens.cameraId) {
                     standbyLens.physicalCameraId
                 } else null
+                val standbyEisPlusBinding = startStandbyVideoEisPlusPipeline(
+                    camera = camera,
+                    standbyLens = standbyLens,
+                    recordingSize = effectiveStandbyVideoSize,
+                    physicalCameraId = targetPhysId,
+                    relay = recordingRelay
+                )
+                val standbyEisPlusSurface = standbyEisPlusBinding?.pipeline?.surface?.takeIf { it.isValid }
+
+                val recordBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                    addTarget(standbyPreviewSurf)
+                    addTarget(standbyRecorderSurf)
+                    standbyEisPlusSurface?.let(::addTarget)
+                    applySynchronizedStandbySettings(this, standbyLens)
+                    if (standbyEisPlusBinding != null) {
+                        applyHardwareEisRequest(this)
+                        applyHardwareOisRequest(
+                            this,
+                            oisAllowed = isOisAllowed && isOisSupportedForLens(standbyLens, targetPhysId),
+                            physicalCameraId = targetPhysId,
+                            vendorCameraIdOverride = camera.id
+                        )
+                        if (standbyEisPlusBinding.pipeline.shouldRequestOisSamples &&
+                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                        ) {
+                            runCatching {
+                                set(CaptureRequest.STATISTICS_OIS_DATA_MODE, CaptureRequest.STATISTICS_OIS_DATA_MODE_ON)
+                            }
+                        }
+                    }
+                    set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
+                }
+                ultraWideStandbyRequestBuilder = recordBuilder
                 val is10BitStandby = recConfig?.is10Bit == true
 
                 var retriedWithoutAdvancedConfig = false
+                var retriedWithoutEisPlus = false
                 val recordingStandbyCallback = object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         val currentExpectedTexture = if (standbyLens.lensType == LensType.ULTRAWIDE) {
@@ -1141,6 +1236,7 @@ class Camera2Engine(private val context: Context) {
                             !isTextureValid) {
                             isPreparingUltraWideStandby.set(false)
                             try { session.close() } catch (_: Throwable) {}
+                            standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, recordingRelay) }
                             return
                         }
                         ultraWideStandbyCaptureSession = session
@@ -1151,6 +1247,22 @@ class Camera2Engine(private val context: Context) {
 
                         try {
                             applySynchronizedStandbySettings(recordBuilder, standbyLens)
+                            if (standbyEisPlusBinding != null) {
+                                applyHardwareEisRequest(recordBuilder)
+                                applyHardwareOisRequest(
+                                    recordBuilder,
+                                    oisAllowed = isOisAllowed && isOisSupportedForLens(standbyLens, targetPhysId),
+                                    physicalCameraId = targetPhysId,
+                                    vendorCameraIdOverride = camera.id
+                                )
+                                if (standbyEisPlusBinding.pipeline.shouldRequestOisSamples &&
+                                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                                ) {
+                                    runCatching {
+                                        recordBuilder.set(CaptureRequest.STATISTICS_OIS_DATA_MODE, CaptureRequest.STATISTICS_OIS_DATA_MODE_ON)
+                                    }
+                                }
+                            }
                             recordBuilder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
                             session.setRepeatingRequest(recordBuilder.build(), standbyCaptureCallback, backgroundHandler)
                             Log.i(TAG, "[KEEP_ULTRAWIDE_READY] Prewarmed recording-capable standby session active on ID ${camera.id} (${standbyLens.lensType})")
@@ -1160,6 +1272,7 @@ class Camera2Engine(private val context: Context) {
                             if (ultraWideStandbyCaptureSession == session) {
                                 ultraWideStandbyCaptureSession = null
                             }
+                            standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, recordingRelay) }
                             standbyConfiguredForRecording = false
                             standbyRecordingSessionFailed = true
                             isPreparingUltraWideStandby.set(false)
@@ -1172,6 +1285,7 @@ class Camera2Engine(private val context: Context) {
                     }
 
                     override fun onClosed(session: CameraCaptureSession) {
+                        standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, recordingRelay) }
                         if (ultraWideStandbyCaptureSession == session) {
                             ultraWideStandbyCaptureSession = null
                             isUltraWideStreaming.set(false)
@@ -1187,7 +1301,24 @@ class Camera2Engine(private val context: Context) {
                     override fun onConfigureFailed(session: CameraCaptureSession) {
                         try { session.close() } catch (_: Throwable) {}
                         if (configToken != standbySessionGeneration.get()) {
+                            standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, recordingRelay) }
                             isPreparingUltraWideStandby.set(false)
+                            return
+                        }
+                        if (standbyEisPlusBinding != null && !retriedWithoutEisPlus) {
+                            retriedWithoutEisPlus = true
+                            Log.w(TAG, "[KEEP_ULTRAWIDE_READY] Standby session rejected secondary EIS+ output; retrying without it")
+                            unregisterVideoEisPlusBinding(standbyEisPlusBinding, recordingRelay)
+                            standbyEisPlusSurface?.let { surface -> runCatching { recordBuilder.removeTarget(surface) } }
+                            createRecordingCaptureSession(
+                                camera = camera,
+                                previewSurface = standbyPreviewSurf,
+                                recorderSurface = standbyRecorderSurf,
+                                is10Bit = is10BitStandby,
+                                physicalCameraId = targetPhysId,
+                                updateActivePhysicalId = false,
+                                callback = this
+                            )
                             return
                         }
                         if (!retriedWithoutAdvancedConfig && (is10BitStandby || targetPhysId != null)) {
@@ -1221,20 +1352,79 @@ class Camera2Engine(private val context: Context) {
                     is10Bit = is10BitStandby,
                     physicalCameraId = targetPhysId,
                     updateActivePhysicalId = false,
+                    stabilizationSurface = standbyEisPlusSurface,
+                    stabilizationPhysicalCameraId = targetPhysId,
                     callback = recordingStandbyCallback
                 )
                 return
             }
 
             standbyConfiguredForRecording = false
+
+            // Idle Video preview uses the same relay as the active lens. Keep a second
+            // sensor-specific pipeline alive on the prewarmed camera so switching lenses
+            // changes the selected EIS+ source, not the stabilization state.
+            val previewEisPlusRelay = previewVideoEisPlusRelay?.takeIf {
+                allowEisPlus &&
+                    !isRecordingActive &&
+                    currentMode == CameraMode.VIDEO &&
+                    preferences.videoEisPlusEnabled &&
+                    activeVideoEisPlusPipeline?.isRunning == true &&
+                    !previewEisPlusUnavailableForSession
+            }
+            val previewEisPlusBinding = previewEisPlusRelay?.let { eisRelay ->
+                val requestedPreviewRes = _selectedVideoResolution.value
+                    ?: CameraResolution(1920, 1080)
+                val effectivePreviewRes = resolveEffectiveVideoResolutionForLens(standbyLens, requestedPreviewRes)
+                val previewVideoSize = Size(
+                    max(effectivePreviewRes.width, effectivePreviewRes.height),
+                    min(effectivePreviewRes.width, effectivePreviewRes.height)
+                )
+                val targetPhysId = if (
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                    standbyLens.physicalCameraId != null &&
+                    standbyLens.supportsPhysicalStream &&
+                    standbyLens.physicalCameraId != standbyLens.cameraId
+                ) standbyLens.physicalCameraId else null
+                startStandbyVideoEisPlusPipeline(
+                    camera = camera,
+                    standbyLens = standbyLens,
+                    recordingSize = previewVideoSize,
+                    physicalCameraId = targetPhysId,
+                    relay = eisRelay
+                )
+            }
+            val previewEisPlusSurface = previewEisPlusBinding?.pipeline?.surface?.takeIf { it.isValid }
+
             val template = if (isVideo) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW
             val builder = camera.createCaptureRequest(template).apply {
                 addTarget(standbyPreviewSurf)
+                previewEisPlusSurface?.let(::addTarget)
                 applySynchronizedStandbySettings(this, standbyLens)
+                if (previewEisPlusBinding != null) {
+                    applyHardwareEisRequest(this)
+                    applyHardwareOisRequest(
+                        this,
+                        oisAllowed = isOisAllowed && isOisSupportedForLens(
+                            standbyLens,
+                            previewEisPlusBinding.physicalCameraId
+                        ),
+                        physicalCameraId = previewEisPlusBinding.physicalCameraId,
+                        vendorCameraIdOverride = camera.id
+                    )
+                    if (previewEisPlusBinding.pipeline.shouldRequestOisSamples &&
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                    ) {
+                        runCatching {
+                            set(CaptureRequest.STATISTICS_OIS_DATA_MODE, CaptureRequest.STATISTICS_OIS_DATA_MODE_ON)
+                        }
+                    }
+                }
             }
             ultraWideStandbyRequestBuilder = builder
 
             val sessionSurfaces = mutableListOf<Surface>(standbyPreviewSurf)
+            previewEisPlusSurface?.takeIf { it.isValid }?.let(sessionSurfaces::add)
             if (includeJpegReader) {
                 try {
                     val photoSize = getOptimalPhotoSizeForLens(standbyLens, standbyLens.cameraId)
@@ -1258,6 +1448,7 @@ class Camera2Engine(private val context: Context) {
                 } catch (_: Throwable) {}
             }
 
+            var retriedWithoutPreviewEisPlus = false
             val stateCallback = object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     val currentExpectedTexture = if (standbyLens.lensType == LensType.ULTRAWIDE) {
@@ -1276,10 +1467,14 @@ class Camera2Engine(private val context: Context) {
                         !isTextureValid) {
                         isPreparingUltraWideStandby.set(false)
                         try { session.close() } catch (_: Throwable) {}
+                        previewEisPlusBinding?.let { binding ->
+                            previewEisPlusRelay?.let { unregisterVideoEisPlusBinding(binding, it) }
+                        }
                         return
                     }
                     ultraWideStandbyCaptureSession = session
                     standbyConfiguredWithJpegReader = includeJpegReader && ultraWideStandbyJpegReader?.surface?.isValid == true
+                    standbyPreviewEisPlusConfigured = previewEisPlusBinding != null
                     isPreparingUltraWideStandby.set(false)
 
                     try {
@@ -1290,6 +1485,10 @@ class Camera2Engine(private val context: Context) {
                         try { session.close() } catch (_: Throwable) {}
                         if (ultraWideStandbyCaptureSession == session) {
                             ultraWideStandbyCaptureSession = null
+                        }
+                        standbyPreviewEisPlusConfigured = false
+                        previewEisPlusBinding?.let { binding ->
+                            previewEisPlusRelay?.let { unregisterVideoEisPlusBinding(binding, it) }
                         }
                         isPreparingUltraWideStandby.set(false)
                         isUltraWideStreaming.set(false)
@@ -1311,9 +1510,13 @@ class Camera2Engine(private val context: Context) {
                 }
 
                 override fun onClosed(session: CameraCaptureSession) {
+                    previewEisPlusBinding?.let { binding ->
+                        previewEisPlusRelay?.let { unregisterVideoEisPlusBinding(binding, it) }
+                    }
                     if (ultraWideStandbyCaptureSession == session) {
                         ultraWideStandbyCaptureSession = null
                         standbyConfiguredWithJpegReader = false
+                        standbyPreviewEisPlusConfigured = false
                         isUltraWideStreaming.set(false)
                         _ultraWideStreamStatus.value = BackgroundCameraStatus.OFF
                         if (shouldKeepUltraWideStreamReady() && !isClosingCamera) {
@@ -1325,14 +1528,38 @@ class Camera2Engine(private val context: Context) {
                 override fun onConfigureFailed(session: CameraCaptureSession) {
                     try { session.close() } catch (_: Throwable) {}
                     if (configToken != standbySessionGeneration.get()) {
+                        previewEisPlusBinding?.let { binding ->
+                            previewEisPlusRelay?.let { unregisterVideoEisPlusBinding(binding, it) }
+                        }
                         isPreparingUltraWideStandby.set(false)
+                        return
+                    }
+                    if (previewEisPlusBinding != null && !retriedWithoutPreviewEisPlus) {
+                        retriedWithoutPreviewEisPlus = true
+                        Log.w(TAG, "[KEEP_ULTRAWIDE_READY] Standby preview session rejected EIS+ output; retrying without EIS+")
+                        previewEisPlusRelay?.let { unregisterVideoEisPlusBinding(previewEisPlusBinding, it) }
+                        previewEisPlusSurface?.let { surface ->
+                            runCatching { builder.removeTarget(surface) }
+                            sessionSurfaces.remove(surface)
+                        }
+                        configureStandbySessionOnDevice(
+                            camera,
+                            standbyLens,
+                            includeJpegReader = includeJpegReader,
+                            allowEisPlus = false
+                        )
                         return
                     }
                     if (includeJpegReader && sessionSurfaces.size > 1) {
                         Log.w(TAG, "[KEEP_ULTRAWIDE_READY] Standby session with JPEG reader rejected; retrying with preview surface only")
                         try { ultraWideStandbyJpegReader?.close() } catch (_: Throwable) {}
                         ultraWideStandbyJpegReader = null
-                        configureStandbySessionOnDevice(camera, standbyLens, includeJpegReader = false)
+                        configureStandbySessionOnDevice(
+                            camera,
+                            standbyLens,
+                            includeJpegReader = false,
+                            allowEisPlus = allowEisPlus
+                        )
                         return
                     }
                     isPreparingUltraWideStandby.set(false)
@@ -1454,6 +1681,24 @@ class Camera2Engine(private val context: Context) {
                 val targetRatio = getTargetAspectRatioForMode(currentMode)
                 val optimalStandbySize = getOptimalPreviewSize(resolvePreviewStreamCameraId(standbyLens), targetRatio, standbyLens.lensType)
                 val isVideo = (currentMode == CameraMode.VIDEO || currentMode == CameraMode.CINEMA || isRecordingNow)
+                val shouldHavePreviewEisPlus = !isRecordingNow &&
+                    currentMode == CameraMode.VIDEO &&
+                    preferences.videoEisPlusEnabled &&
+                    previewVideoEisPlusRelay != null &&
+                    activeVideoEisPlusPipeline?.isRunning == true
+                val standbySource = if (standbyLens.lensType == LensType.ULTRAWIDE) {
+                    PreviewStreamSource.ULTRAWIDE
+                } else {
+                    PreviewStreamSource.MAIN
+                }
+                val hasPreviewEisPlus = videoEisPlusBindingsByCameraId[
+                    videoEisPlusBindingKey(existingStandbyCam.id, standbySource)
+                ]?.pipeline?.isRunning == true
+                val previewEisPlusConfigMatches = if (shouldHavePreviewEisPlus) {
+                    hasPreviewEisPlus
+                } else {
+                    !standbyPreviewEisPlusConfigured
+                }
                 val sizeMatches = standbyConfiguredPreviewSize != null &&
                     max(standbyConfiguredPreviewSize!!.width, standbyConfiguredPreviewSize!!.height) == max(optimalStandbySize.width, optimalStandbySize.height) &&
                     min(standbyConfiguredPreviewSize!!.width, standbyConfiguredPreviewSize!!.height) == min(optimalStandbySize.width, optimalStandbySize.height)
@@ -1461,7 +1706,8 @@ class Camera2Engine(private val context: Context) {
                 if (ultraWideStandbyCaptureSession != null &&
                     sizeMatches &&
                     standbyConfiguredForRecording == isRecordingNow &&
-                    standbyConfiguredWithJpegReader == includeSpecialPhotoReader) {
+                    standbyConfiguredWithJpegReader == includeSpecialPhotoReader &&
+                    previewEisPlusConfigMatches) {
                     isUltraWideStreaming.set(true)
                     _ultraWideStreamStatus.value = BackgroundCameraStatus.READY_QUIET
                     syncStandbyStreamSettings()
@@ -1598,6 +1844,7 @@ class Camera2Engine(private val context: Context) {
         standbyConfiguredPreviewSize = null
         standbyConfiguredIsVideoMode = false
         standbyConfiguredForRecording = false
+        standbyPreviewEisPlusConfigured = false
         standbyRecordingSessionFailed = false
 
         if (ultraWideStandbySurface != null && ultraWideStandbySurface !== ultraWideViewfinderSurface) {
@@ -1982,16 +2229,43 @@ class Camera2Engine(private val context: Context) {
     private val _actualEisHardwareActive = MutableStateFlow(false)
     val actualEisHardwareActive: StateFlow<Boolean> = _actualEisHardwareActive.asStateFlow()
 
-    // OIS is permanently requested ON. Legacy UI/preferences cannot disable the hardware request.
+    private val _videoEisPlusStatus = MutableStateFlow(
+        if (preferences.videoEisPlusEnabled) "Ready for live Video preview" else "Disabled"
+    )
+    val videoEisPlusStatus: StateFlow<String> = _videoEisPlusStatus.asStateFlow()
+
+    /** Changes EIS+ immediately in the idle Video preview; recording transitions rebuild their own session. */
+    fun setVideoEisPlusEnabled(enabled: Boolean) {
+        preferences.videoEisPlusEnabled = enabled
+        previewEisPlusUnavailableForSession = false
+        if (_isRecordingVideo.value || isStartingRecording.get() || isStoppingRecording.get()) {
+            _videoEisPlusStatus.value = if (enabled) "Will activate after recording" else "Disabled"
+            return
+        }
+        val task = Runnable {
+            if (cameraDevice != null) {
+                createCameraCaptureSession()
+            } else {
+                _videoEisPlusStatus.value = if (enabled) "Ready for live Video preview" else "Disabled"
+            }
+        }
+        val handler = backgroundHandler ?: mainHandler
+        if (handler != null) handler.post(task) else task.run()
+    }
+
+    /** Normal OIS behavior follows the saved preference; EIS+ may override per recording. */
     val isOisAllowed: Boolean
-        get() = true
+        get() = preferences.isOisEnabled
 
     var isOisEnabled: Boolean
-        get() = true
-        set(@Suppress("UNUSED_PARAMETER") value) {
-            preferences.isOisEnabled = true
+        get() = preferences.isOisEnabled
+        set(value) {
+            preferences.isOisEnabled = value
             val current = _hybridStabilizationConfig.value
-            _hybridStabilizationConfig.value = current.copy(isOisPreferred = true, isOisEnabled = true)
+            _hybridStabilizationConfig.value = current.copy(
+                isOisPreferred = value,
+                isOisEnabled = value
+            )
             updatePreviewSettings()
         }
 
@@ -2766,10 +3040,12 @@ class Camera2Engine(private val context: Context) {
                     val useUw = (lens.lensType == LensType.ULTRAWIDE)
                     val targetSource = if (useUw) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
                     if (_isRecordingVideo.value) {
-                        dualCameraRecordingRelay?.setActiveSource(targetSource)
+                        setActiveRecordingSource(targetSource, lens.cameraId)
                         dualCameraRecordingRelay?.getRecorderSurfaceForLens(lens)?.let { surf ->
                             if (surf.isValid) activeRecordingSurface = surf
                         }
+                    } else {
+                        setActivePreviewEisPlusSource(targetSource, lens.cameraId)
                     }
                     _isUsingUltraWideSurface.value = useUw
                     _displayedPreviewSource.value = targetSource
@@ -2822,7 +3098,9 @@ class Camera2Engine(private val context: Context) {
                 val useUw = (lens.lensType == LensType.ULTRAWIDE && shouldKeepUltraWideStreamReady() && activeLogicalMultiCamUltraWideConfigured)
                 val targetSource = if (lens.lensType == LensType.ULTRAWIDE) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
                 if (_isRecordingVideo.value) {
-                    dualCameraRecordingRelay?.setActiveSource(targetSource)
+                    setActiveRecordingSource(targetSource, lens.cameraId)
+                } else {
+                    setActivePreviewEisPlusSource(targetSource, lens.cameraId)
                 }
                 _isUsingUltraWideSurface.value = useUw
                 _displayedPreviewSource.value = if (useUw) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
@@ -2957,12 +3235,14 @@ class Camera2Engine(private val context: Context) {
                 val useUw = (targetLens.lensType == LensType.ULTRAWIDE)
                 val targetSource = if (useUw) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
                 if (_isRecordingVideo.value) {
-                    dualCameraRecordingRelay?.setActiveSource(targetSource)
+                    setActiveRecordingSource(targetSource, targetLens.cameraId)
                     dualCameraRecordingRelay?.getRecorderSurfaceForLens(targetLens)?.let { surf ->
                         if (surf.isValid) {
                             activeRecordingSurface = surf
                         }
                     }
+                } else {
+                    setActivePreviewEisPlusSource(targetSource, targetLens.cameraId)
                 }
                 _isUsingUltraWideSurface.value = useUw
                 _displayedPreviewSource.value = targetSource
@@ -3252,7 +3532,7 @@ class Camera2Engine(private val context: Context) {
                 val relay = dualCameraRecordingRelay
                 if (relay != null) {
                     val targetSource = if (targetLens.lensType == LensType.ULTRAWIDE) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
-                    relay.setActiveSource(targetSource)
+                    setActiveRecordingSource(targetSource, targetLens.cameraId)
                     val requestedRes = activeRecordingStreamConfig?.videoResolution
                         ?: (userSelectedVideoResolution ?: _selectedVideoResolution.value ?: CameraResolution(1920, 1080))
                     val effectiveRes = resolveEffectiveVideoResolutionForLens(targetLens, requestedRes)
@@ -3718,7 +3998,7 @@ class Camera2Engine(private val context: Context) {
                                 if (relay != null) {
                                     relay.updateCameraFacing(isTargetFront, targetSensorOrient)
                                     val targetSource = if (lens.lensType == LensType.ULTRAWIDE) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
-                                    relay.setActiveSource(targetSource)
+                                    setActiveRecordingSource(targetSource, lens.cameraId)
                                     val requestedRes = activeRecordingStreamConfig?.videoResolution
                                         ?: (userSelectedVideoResolution ?: _selectedVideoResolution.value ?: CameraResolution(1920, 1080))
                                     val effectiveRes = resolveEffectiveVideoResolutionForLens(lens, requestedRes)
@@ -4638,13 +4918,223 @@ class Camera2Engine(private val context: Context) {
         return surf?.takeIf { it.isValid }
     }
 
+    private fun applyPreviewEisPlusCaptureSettings(builder: CaptureRequest.Builder) {
+        val pipeline = activeVideoEisPlusPipeline ?: return
+        if (!pipeline.isRunning) return
+        applyHardwareEisRequest(builder)
+        applyHardwareOisRequest(builder, oisAllowed = isOisAllowedForCurrentSession())
+        if (pipeline.shouldRequestOisSamples && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching {
+                builder.set(
+                    CaptureRequest.STATISTICS_OIS_DATA_MODE,
+                    CaptureRequest.STATISTICS_OIS_DATA_MODE_ON
+                )
+            }.onFailure { Log.d(TAG, "Preview EIS+ OIS telemetry request unsupported", it) }
+        }
+    }
+
+    /**
+     * Starts the timestamp-matched MGC pipeline for idle Video preview. Camera2 feeds a
+     * relay-owned SurfaceTexture plus the matched YUV ImageReader; EGL alone owns the UI Surface.
+     */
+    private fun preparePreviewEisPlusRelay(
+        lens: LensInfo?,
+        previewTargetSurface: Surface,
+        forceLogicalStream: Boolean
+    ): DualCameraRecordingRelay? {
+        val shouldRun = preferences.videoEisPlusEnabled &&
+            currentMode == CameraMode.VIDEO &&
+            !_isRecordingVideo.value &&
+            !isStartingRecording.get() &&
+            !isStoppingRecording.get() &&
+            !previewEisPlusUnavailableForSession
+
+        if (!shouldRun) {
+            if (previewVideoEisPlusRelay != null) {
+                stopActiveVideoEisPlus(closeCameraSession = false)
+            }
+            if (!preferences.videoEisPlusEnabled) _videoEisPlusStatus.value = "Disabled"
+            return null
+        }
+
+        val camera = cameraDevice ?: return null
+        val streamCameraId = if (forceLogicalStream) {
+            camera.id
+        } else {
+            resolvePreviewStreamCameraId(lens, usePhysicalStream = true) ?: camera.id
+        }
+        val physicalId = streamCameraId.takeIf { it != camera.id }
+        val existingRelay = previewVideoEisPlusRelay
+        if (existingRelay != null &&
+            activeVideoEisPlusPipeline?.isRunning == true &&
+            activeVideoEisPlusPhysicalCameraId == physicalId
+        ) {
+            return existingRelay
+        }
+        if (existingRelay != null || activeVideoEisPlusPipeline != null) {
+            stopActiveVideoEisPlus(closeCameraSession = false)
+        }
+
+        val cameraChars = getCharacteristics(streamCameraId)
+        val timingChars = getCharacteristics(camera.id) ?: cameraChars
+        val requestedVideo = _selectedVideoResolution.value ?: CameraResolution(1920, 1080)
+        val yuvSize = resolveVideoEisPlusYuvSize(
+            streamCameraId,
+            max(requestedVideo.width, requestedVideo.height),
+            min(requestedVideo.width, requestedVideo.height)
+        )
+        val failure = when {
+            cameraChars == null -> "camera characteristics unavailable"
+            timingChars == null -> "sensor timestamp characteristics unavailable"
+            yuvSize == null -> "no matching YUV stream for ${requestedVideo.width}x${requestedVideo.height}"
+            else -> null
+        }
+        if (failure != null) {
+            _videoEisPlusStatus.value = "Unavailable: $failure"
+            EisPlusDiagnosticLog.event("CAMERA2", "PREVIEW_EIS_UNAVAILABLE", failure, "WARN")
+            return null
+        }
+        val resolvedCameraChars = cameraChars ?: return null
+        val resolvedTimingChars = timingChars ?: return null
+        val resolvedYuvSize = yuvSize ?: return null
+
+        val pipeline = VideoEisPlusPipeline(context)
+        val previewBuffer = _previewBufferSize.value ?: Size(requestedVideo.width, requestedVideo.height)
+        val isFront = lens?.facing == CameraCharacteristics.LENS_FACING_FRONT
+        val sensorOrientation = lens?.let {
+            getSensorOrientationForLens(it, if (isFront) 270 else 90)
+        } ?: (resolvedCameraChars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90)
+        val source = if (lens?.lensType == LensType.ULTRAWIDE) {
+            PreviewStreamSource.ULTRAWIDE
+        } else {
+            PreviewStreamSource.MAIN
+        }
+        val relay = DualCameraRecordingRelay(
+            encoderTargetSurface = null,
+            bufferWidth = previewBuffer.width,
+            bufferHeight = previewBuffer.height,
+            fps = videoFps.coerceAtLeast(1),
+            initialSource = source,
+            sensorOrientation = sensorOrientation,
+            deviceRotation = getEffectiveDeviceRotation(),
+            isFront = isFront,
+            previewTargetSurface = previewTargetSurface,
+            previewWidth = viewfinderWidth.takeIf { it > 0 } ?: previewBuffer.width,
+            previewHeight = viewfinderHeight.takeIf { it > 0 } ?: previewBuffer.height,
+            initialAdjustments = currentVideoAdjustments,
+            eisPlusPipeline = pipeline
+        )
+        if (!relay.isRelayReady) {
+            relay.release()
+            _videoEisPlusStatus.value = "Unavailable: preview GPU relay initialization failed"
+            EisPlusDiagnosticLog.event("CAMERA2", "PREVIEW_RELAY_FAILED", "preview-only relay did not initialize", "ERROR")
+            return null
+        }
+
+        pipeline.onRuntimeUnavailable = {
+            previewEisPlusUnavailableForSession = true
+            _videoEisPlusStatus.value = "Unavailable: HAL stabilization conflict"
+            (backgroundHandler ?: mainHandler)?.post {
+                if (!_isRecordingVideo.value && previewVideoEisPlusRelay === relay) {
+                    stopActiveVideoEisPlus(closeCameraSession = true)
+                    createCameraCaptureSession(forceLogicalStream = true)
+                }
+            }
+        }
+        val started = pipeline.start(
+            cameraId = streamCameraId,
+            characteristics = resolvedCameraChars,
+            timingCharacteristics = resolvedTimingChars,
+            width = resolvedYuvSize.width,
+            height = resolvedYuvSize.height,
+            frontFacing = isFront,
+            strength = preferences.videoEisPlusStrength,
+            lookaheadFrames = preferences.videoEisPlusLookahead,
+            imageHandler = backgroundHandler ?: mainHandler ?: Handler(Looper.getMainLooper()),
+            onFrameAvailable = { relay.notifyEisPlusFrameAvailable() },
+            onUnavailable = {
+                val reason = pipeline.lastStartFailureReason ?: "MGC preview pipeline failed to start"
+                _videoEisPlusStatus.value = "Unavailable: $reason"
+                EisPlusDiagnosticLog.event("CAMERA2", "PREVIEW_PIPELINE_START_FAILED", reason, "ERROR")
+            }
+        )
+        if (!started || pipeline.surface?.isValid != true) {
+            pipeline.stop()
+            relay.release()
+            _videoEisPlusStatus.value = "Unavailable: ${pipeline.lastStartFailureReason ?: "preview pipeline failed"}"
+            return null
+        }
+
+        previewVideoEisPlusRelay = relay
+        activeVideoEisPlusPipeline = pipeline
+        activeVideoEisPlusSurface = pipeline.surface
+        activeVideoEisPlusPhysicalCameraId = physicalId
+        val previewGeneration = videoEisPlusCaptureGeneration + 1L
+        videoEisPlusCaptureGeneration = previewGeneration
+        registerVideoEisPlusBinding(
+            VideoEisPlusBinding(
+                sessionCameraId = camera.id,
+                pipelineCameraId = streamCameraId,
+                physicalCameraId = physicalId,
+                source = source,
+                pipeline = pipeline,
+                generation = previewGeneration
+            ),
+            relay
+        )
+        activateVideoEisPlusForSource(source, camera.id)
+        videoEisPlusOisDisabledForSession = false
+        _videoEisPlusStatus.value = "Active · Live preview · $source"
+        _isGpuRelayPreviewActive.value = true
+        EisPlusDiagnosticLog.event(
+            "CAMERA2",
+            "PREVIEW_PIPELINE_ACTIVE",
+            "camera=$streamCameraId physicalId=$physicalId yuv=${resolvedYuvSize.width}x${resolvedYuvSize.height} preview=${previewBuffer.width}x${previewBuffer.height}"
+        )
+        return relay
+    }
+
+    /** Attach EGL to the viewfinder only after Camera2 has released that preview Surface. */
+    private fun attachPreviewEisPlusOutput(
+        session: CameraCaptureSession,
+        camera: CameraDevice,
+        configGeneration: Int
+    ): Boolean {
+        val relay = previewVideoEisPlusRelay ?: return true
+        val latch = CountDownLatch(1)
+        var attached = false
+        relay.attachPreviewTargetSurface {
+            attached = it
+            latch.countDown()
+        }
+        val completed = try {
+            latch.await(1800L, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+        if (captureSession !== session || cameraDevice !== camera ||
+            configGeneration != sessionConfigGeneration.get()
+        ) return false
+        if (!completed || !attached) {
+            previewEisPlusUnavailableForSession = true
+            _isGpuRelayPreviewActive.value = false
+            _videoEisPlusStatus.value = "Unavailable: preview Surface attachment failed"
+            stopActiveVideoEisPlus(closeCameraSession = true)
+            createCameraCaptureSession(forceLogicalStream = true)
+            return false
+        }
+        _isGpuRelayPreviewActive.value = true
+        return true
+    }
+
     private fun createCameraCaptureSession(forceLogicalStream: Boolean = false) {
         val camera = cameraDevice ?: run {
             completeLensSwitch()
             return
         }
         val activeLens = _selectedLens.value
-        val previewSurf = getEffectiveMainPreviewSurface(
+        val directPreviewSurf = getEffectiveMainPreviewSurface(
             forceLogicalStream = forceLogicalStream,
             surfaceLens = activeLens
         ) ?: run {
@@ -4652,7 +5142,7 @@ class Camera2Engine(private val context: Context) {
             return
         }
 
-        // Close previous session safely to avoid overlapping capture sessions
+        // Close previous session before giving the viewfinder BufferQueue to EGL.
         val oldSession = captureSession
         if (oldSession != null) {
             try {
@@ -4664,6 +5154,16 @@ class Camera2Engine(private val context: Context) {
             } catch (ignored: Throwable) {}
             captureSession = null
         }
+
+        val previewRelay = preparePreviewEisPlusRelay(
+            lens = activeLens,
+            previewTargetSurface = directPreviewSurf,
+            forceLogicalStream = forceLogicalStream
+        )
+        val previewSurf = previewRelay?.getRecorderSurfaceForLens(activeLens) ?: directPreviewSurf
+        val previewEisPlusSurface = if (previewRelay != null) {
+            activeVideoEisPlusSurface?.takeIf { it.isValid }
+        } else null
 
         isConfiguringSession = true
         _isCameraReady.value = false
@@ -4713,6 +5213,7 @@ class Camera2Engine(private val context: Context) {
                                 synchronized(previewRequestLock) {
                                     previewRequestBuilder?.let {
                                         applyCommonSettings(it)
+                                        if (previewEisPlusSurface != null) applyPreviewEisPlusCaptureSettings(it)
                                         session.setRepeatingRequest(it.build(), captureCallback, backgroundHandler)
                                     }
                                 }
@@ -4749,7 +5250,8 @@ class Camera2Engine(private val context: Context) {
             ?: backLenses.firstOrNull { it.lensType == LensType.WIDE && !it.isZoomPreset }
             ?: backLenses.firstOrNull { it.lensType == LensType.WIDE }
 
-        val canConfigureSimultaneousLogicalPhysical = !forceLogicalStream &&
+        val canConfigureSimultaneousLogicalPhysical = previewRelay == null &&
+            !forceLogicalStream &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
             shouldKeepUltraWideStreamReady() &&
             activeLens?.facing == CameraCharacteristics.LENS_FACING_BACK &&
@@ -4901,6 +5403,11 @@ class Camera2Engine(private val context: Context) {
                 val previewConfig = android.hardware.camera2.params.OutputConfiguration(previewSurf)
                 previewConfig.setPhysicalCameraId(activeLens.physicalCameraId)
                 outputConfigs.add(previewConfig)
+                previewEisPlusSurface?.let { surface ->
+                    val eisConfig = android.hardware.camera2.params.OutputConfiguration(surface)
+                    eisConfig.setPhysicalCameraId(activeLens.physicalCameraId)
+                    outputConfigs.add(eisConfig)
+                }
 
                 imageReaderJpeg?.surface?.let {
                     val jpegConfig = android.hardware.camera2.params.OutputConfiguration(it)
@@ -4942,7 +5449,9 @@ class Camera2Engine(private val context: Context) {
                 }
                 val builder = camera.createCaptureRequest(template).apply {
                     addTarget(previewSurf)
+                    previewEisPlusSurface?.let(::addTarget)
                     applyCommonSettings(this)
+                    if (previewEisPlusSurface != null) applyPreviewEisPlusCaptureSettings(this)
                 }
                 synchronized(previewRequestLock) {
                     previewRequestBuilder = builder
@@ -4960,11 +5469,13 @@ class Camera2Engine(private val context: Context) {
                                 return
                             }
                             captureSession = session
+                            if (!attachPreviewEisPlusOutput(session, camera, configGen)) return
                             try {
                                 activeSessionPhysicalCameraId = activeLens.physicalCameraId
                                 synchronized(previewRequestLock) {
                                     previewRequestBuilder?.let {
                                         applyCommonSettings(it)
+                                        if (previewEisPlusSurface != null) applyPreviewEisPlusCaptureSettings(it)
                                         session.setRepeatingRequest(it.build(), captureCallback, backgroundHandler)
                                     }
                                 }
@@ -5003,6 +5514,7 @@ class Camera2Engine(private val context: Context) {
             activeSessionPhysicalCameraId = null
             val surfaces = mutableListOf<Surface>()
             surfaces.add(previewSurf)
+            previewEisPlusSurface?.let { surfaces.add(it) }
 
             imageReaderJpeg?.surface?.let { surfaces.add(it) }
             imageReaderYuv?.surface?.let { surfaces.add(it) }
@@ -5022,7 +5534,9 @@ class Camera2Engine(private val context: Context) {
 
             val builder = camera.createCaptureRequest(template).apply {
                 addTarget(previewSurf)
+                previewEisPlusSurface?.let(::addTarget)
                 applyCommonSettings(this)
+                if (previewEisPlusSurface != null) applyPreviewEisPlusCaptureSettings(this)
             }
             synchronized(previewRequestLock) {
                 previewRequestBuilder = builder
@@ -5031,6 +5545,7 @@ class Camera2Engine(private val context: Context) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 val outputConfigs = mutableListOf<android.hardware.camera2.params.OutputConfiguration>()
                 outputConfigs.add(android.hardware.camera2.params.OutputConfiguration(previewSurf))
+                previewEisPlusSurface?.let { outputConfigs.add(android.hardware.camera2.params.OutputConfiguration(it)) }
 
                 imageReaderJpeg?.surface?.let { surf ->
                     val jpegConfig = android.hardware.camera2.params.OutputConfiguration(surf)
@@ -5065,11 +5580,13 @@ class Camera2Engine(private val context: Context) {
                                 return
                             }
                             captureSession = session
+                            if (!attachPreviewEisPlusOutput(session, camera, configGen)) return
                             try {
                                 activeSessionPhysicalCameraId = null
                                 synchronized(previewRequestLock) {
                                     previewRequestBuilder?.let {
                                         applyCommonSettings(it)
+                                        if (previewEisPlusSurface != null) applyPreviewEisPlusCaptureSettings(it)
                                         session.setRepeatingRequest(it.build(), captureCallback, backgroundHandler)
                                     }
                                 }
@@ -5089,6 +5606,12 @@ class Camera2Engine(private val context: Context) {
                         override fun onConfigureFailed(session: CameraCaptureSession) {
                             if (configGen != sessionConfigGeneration.get() || cameraDevice != camera) return
                             onSessionConfigurationFinished()
+                            if (previewRelay != null) {
+                                previewEisPlusUnavailableForSession = true
+                                stopActiveVideoEisPlus(closeCameraSession = true)
+                                createCameraCaptureSession(forceLogicalStream = true)
+                                return
+                            }
                             if (imageReaderYuv != null || imageReaderRaw != null) {
                                 Log.w(TAG, "Capture session rejected with auxiliary streams; retrying with Preview + JPEG only")
                                 try { imageReaderYuv?.close() } catch (ignored: Throwable) {}
@@ -5120,11 +5643,13 @@ class Camera2Engine(private val context: Context) {
                             return
                         }
                         captureSession = session
+                        if (!attachPreviewEisPlusOutput(session, camera, configGen)) return
                         try {
                             activeSessionPhysicalCameraId = null
                             synchronized(previewRequestLock) {
                                 previewRequestBuilder?.let {
                                     applyCommonSettings(it)
+                                    if (previewEisPlusSurface != null) applyPreviewEisPlusCaptureSettings(it)
                                     session.setRepeatingRequest(it.build(), captureCallback, backgroundHandler)
                                 }
                             }
@@ -5177,10 +5702,26 @@ class Camera2Engine(private val context: Context) {
             result: TotalCaptureResult
         ) {
             super.onCaptureCompleted(session, request, result)
+            // Route by the owning CameraDevice before filtering session identity: the callback
+            // object stays installed on its original session when active/standby references swap.
+            val sessionBinding = submitVideoEisPlusCaptureResult(session, request, result)
+            if (session !== captureSession) return
             lastCaptureResult = result
             CameraPerformanceMonitor.onPreviewFrame()
+            // Preview-only EIS+ is not registered in the recording binding map; preserve its
+            // original active-session metadata path. Recording sessions use their own binding.
+            if (sessionBinding == null) {
+                activeVideoEisPlusPipeline?.submitCaptureResult(
+                    result = result,
+                    request = request,
+                    generation = videoEisPlusCaptureGeneration,
+                    outputPhysicalCameraId = activeVideoEisPlusPhysicalCameraId
+                        ?: activeSessionPhysicalCameraId
+                )
+            }
 
-            // Verify OIS using the HAL's CaptureResult, not just the preference toggle.
+            // Verify the per-session OIS decision using CaptureResult. EIS+ stays alive when
+            // optical telemetry is missing; only the OIS request is changed for this recording.
             val actualOisMode = result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE)
             val requestedOisMode = request.get(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE)
             val isActualOisHwActive = (actualOisMode == CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_ON)
@@ -5194,11 +5735,26 @@ class Camera2Engine(private val context: Context) {
                 )
             }
 
+            val eisPlusPipeline = sessionBinding?.pipeline ?: activeVideoEisPlusPipeline
+            if (eisPlusPipeline?.shouldDisableOisForMissingTelemetry == true &&
+                !videoEisPlusOisDisabledForSession
+            ) {
+                videoEisPlusOisDisabledForSession = true
+                Log.w(
+                    TAG,
+                    "Photon EIS+ OIS decision: no usable OIS/lens-intrinsics telemetry after " +
+                        "5 CaptureResults; requesting OIS OFF for this recording",
+                )
+            }
+
+            val desiredOis = isOisAllowedForCurrentSession()
+            val desiredOisMode = if (desiredOis) {
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+            } else {
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
+            }
             val nowMs = android.os.SystemClock.uptimeMillis()
-            // A legacy request builder or a session transition can leave OIS OFF even after the
-            // user enables it. Repair the live repeating request once, without reopening camera.
-            if (isOisAllowed &&
-                requestedOisMode != CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON &&
+            if (requestedOisMode != desiredOisMode &&
                 nowMs - lastOisForceOnTimeMs >= 500L
             ) {
                 lastOisForceOnTimeMs = nowMs
@@ -5206,25 +5762,31 @@ class Camera2Engine(private val context: Context) {
                     synchronized(previewRequestLock) {
                         previewRequestBuilder?.let { builder ->
                             applyCommonSettings(builder)
-                            applyHardwareOisRequest(builder, oisAllowed = true)
                             captureSession?.setRepeatingRequest(builder.build(), this, backgroundHandler)
                         }
                     }
-                    Log.w(TAG, "OIS self-heal: repeating request was not ON; re-applied native OIS ON")
+                    Log.i(TAG, "OIS request reconciled with session policy: requested=$desiredOisMode")
                 } catch (t: Throwable) {
-                    Log.w(TAG, "OIS self-heal request failed", t)
+                    Log.w(TAG, "OIS request reconciliation failed", t)
                 }
             } else if (
-                isOisAllowed &&
-                requestedOisMode == CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON &&
+                desiredOis &&
                 actualOisMode != CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_ON &&
+                nowMs - lastOisIgnoredWarningTimeMs >= 2000L
+            ) {
+                lastOisIgnoredWarningTimeMs = nowMs
+                Log.w(TAG, "OIS was requested ON but HAL reports actualMode=$actualOisMode")
+            } else if (
+                !desiredOis &&
+                eisPlusPipeline?.isRunning == true &&
+                actualOisMode != CaptureResult.LENS_OPTICAL_STABILIZATION_MODE_OFF &&
                 nowMs - lastOisIgnoredWarningTimeMs >= 2000L
             ) {
                 lastOisIgnoredWarningTimeMs = nowMs
                 Log.w(
                     TAG,
-                    "OIS was requested ON but HAL reports actualMode=$actualOisMode; " +
-                        "check camera/lens OIS capability metadata and vendor HAL behavior"
+                    "Photon EIS+ requested OIS OFF but CaptureResult still reports actualMode=$actualOisMode; " +
+                        "keeping EIS+ active because this is not a video-stabilization conflict",
                 )
             }
 
@@ -5237,7 +5799,7 @@ class Camera2Engine(private val context: Context) {
                 _actualEisHardwareActive.value = isActualEisHwActive
             }
 
-            // OIS is forced ON; there is deliberately no HAL force-OFF path.
+            // OIS follows the saved preference unless the active EIS+ session has no usable telemetry.
 
             if (_isAutoSwitchToUltraWide.value && !_isRecordingVideo.value && !isSwitchingLens.get()) {
                 checkAutoLensSwitch(result)
@@ -5245,9 +5807,9 @@ class Camera2Engine(private val context: Context) {
 
 
 
-            // EIS has been removed: never run gyro crop compensation or mutate the repeating
-            // request crop region from capture callbacks. Camera2 OIS remains independently
-            // controlled through LENS_OPTICAL_STABILIZATION_MODE.
+            // Legacy crop-region EIS has been removed. MGC EIS+ runs only in the GPU relay path;
+            // never mutate the Camera2 crop region from these capture callbacks. OIS remains
+            // independently controlled through LENS_OPTICAL_STABILIZATION_MODE.
 
             // The imported engine uses Camera2 crop-region compensation, not the GPU relay's
             // offset path; keeping those offsets neutral prevents applying stabilization twice.
@@ -5492,19 +6054,29 @@ class Camera2Engine(private val context: Context) {
         return isOisSupportedForLens(lens, physicalId)
     }
 
+    /** OIS is disabled only during EIS+ when no usable optical telemetry is available. */
+    private fun isOisAllowedForCurrentSession(): Boolean {
+        val eisPlusRequiresOisOff =
+            activeVideoEisPlusPipeline?.isRunning == true && videoEisPlusOisDisabledForSession
+        return isOisAllowed && isOisSupportedForActiveLens() && !eisPlusRequiresOisOff
+    }
+
     /**
      * Apply native Camera2 OIS to the active request and, when this is a logical camera's
      * physical stream, also apply the physical-camera-specific override.
      */
     private fun applyHardwareOisRequest(
         builder: CaptureRequest.Builder,
-        @Suppress("UNUSED_PARAMETER") oisAllowed: Boolean,
+        oisAllowed: Boolean,
         // Only apply the physical-camera override if the active session explicitly routes to it.
         physicalCameraId: String? = activeSessionPhysicalCameraId,
         vendorCameraIdOverride: String? = null
     ) {
-        // Always request native OIS ON, even when camera metadata or a legacy preference says OFF.
-        val mode = CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+        val mode = if (oisAllowed) {
+            CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+        } else {
+            CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
+        }
         try {
             builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, mode)
             Log.d(
@@ -5532,8 +6104,8 @@ class Camera2Engine(private val context: Context) {
             }
         }
 
-        // Keep vendor-specific OIS aliases ON too; no preference path may turn them OFF.
-        applyVendorOisControls(builder, oisAllowed = true, cameraIdOverride = vendorCameraIdOverride)
+        // Keep vendor aliases consistent with the standard logical/physical Camera2 OIS keys.
+        applyVendorOisControls(builder, oisAllowed = oisAllowed, cameraIdOverride = vendorCameraIdOverride)
     }
 
     /**
@@ -5550,17 +6122,17 @@ class Camera2Engine(private val context: Context) {
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
             )
         } catch (t: Throwable) {
-            Log.d(TAG, "Camera2 EIS key unavailable; continuing with OIS-only stabilization", t)
+            Log.d(TAG, "Camera2 EIS key unavailable; continuing without hardware EIS", t)
         }
     }
 
     /**
-     * Force vendor-specific OIS controls ON as well as the standard Android OIS key.
-     * Restrict this to vendor keys so Android noise-reduction keys are never modified.
+     * Mirror the requested OIS state to vendor-specific aliases as well as the standard Android
+     * key. Restrict this to vendor keys so Android noise-reduction keys are never modified.
      */
     private fun applyVendorOisControls(
         builder: CaptureRequest.Builder,
-        @Suppress("UNUSED_PARAMETER") oisAllowed: Boolean,
+        oisAllowed: Boolean,
         cameraIdOverride: String? = null
     ) {
         try {
@@ -5571,7 +6143,7 @@ class Camera2Engine(private val context: Context) {
                 ?: return
             val chars = getCharacteristics(camId) ?: return
             val requestKeys = chars.availableCaptureRequestKeys ?: return
-            val intValue = 1
+            val intValue = if (oisAllowed) 1 else 0
             for (key in requestKeys) {
                 val keyName = key.name.lowercase(Locale.ROOT)
                 val isVendorOisKey = !keyName.startsWith("android.") &&
@@ -5590,7 +6162,7 @@ class Camera2Engine(private val context: Context) {
                             builder.set(typedKey, intValue.toByte())
                         } catch (_: Throwable) {
                             try {
-                                builder.set(typedKey, true)
+                                builder.set(typedKey, oisAllowed)
                             } catch (_: Throwable) {}
                         }
                     }
@@ -5778,10 +6350,10 @@ class Camera2Engine(private val context: Context) {
             }
         }
 
-        // Always force EIS OFF first, then apply hardware OIS to the active capture route.
-        // OIS is controlled only by the OIS preference and the active sensor's capability.
+        // Always force Camera2 EIS OFF first. OIS follows the saved preference and sensor,
+        // except when an EIS+ recording explicitly needs OIS OFF because telemetry is absent.
         applyHardwareEisRequest(builder)
-        val oisAllowed = isOisAllowed && isOisSupportedForActiveLens()
+        val oisAllowed = isOisAllowedForCurrentSession()
         applyHardwareOisRequest(builder, oisAllowed)
 
         // Preserve video recording capture intent and target FPS range across lens switches & setting updates
@@ -6226,7 +6798,9 @@ class Camera2Engine(private val context: Context) {
                     val useUw = (effectiveTargetLens.lensType == LensType.ULTRAWIDE)
                     val targetSource = if (useUw) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
                     if (_isRecordingVideo.value) {
-                        dualCameraRecordingRelay?.setActiveSource(targetSource)
+                        setActiveRecordingSource(targetSource, effectiveTargetLens.cameraId)
+                    } else {
+                        setActivePreviewEisPlusSource(targetSource, effectiveTargetLens.cameraId)
                     }
                     _isUsingUltraWideSurface.value = useUw
                     _displayedPreviewSource.value = targetSource
@@ -6891,6 +7465,39 @@ class Camera2Engine(private val context: Context) {
         )
     }
 
+
+    private fun resolveVideoEisPlusYuvSize(
+        cameraId: String,
+        preferredWidth: Int,
+        preferredHeight: Int
+    ): Size? {
+        val map = getCharacteristics(cameraId)
+            ?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return null
+        val sizes = map.getOutputSizes(ImageFormat.YUV_420_888)?.toList().orEmpty()
+        if (sizes.isEmpty() || preferredWidth <= 0 || preferredHeight <= 0) return null
+        val targetLong = max(preferredWidth, preferredHeight)
+        val targetShort = min(preferredWidth, preferredHeight)
+        val targetArea = targetLong.toLong() * targetShort.toLong()
+        val targetRatio = targetLong.toFloat() / targetShort.toFloat()
+
+        // Ultra-wide sensors often advertise a smaller YUV size or a slightly different
+        // aspect ratio from the main sensor. Do not reject the whole EIS+ path for that.
+        val validSizes = sizes.filter { it.width > 0 && it.height > 0 }
+        if (validSizes.isEmpty()) return null
+        val preferredSizes = validSizes.filter {
+            max(it.width, it.height) >= 320 && min(it.width, it.height) >= 240
+        }.ifEmpty { validSizes }
+        return preferredSizes.firstOrNull {
+            (it.width == targetLong && it.height == targetShort) ||
+                (it.width == targetShort && it.height == targetLong)
+        } ?: preferredSizes.minWithOrNull(
+            compareBy<Size>(
+                { kotlin.math.abs(max(it.width, it.height).toFloat() / min(it.width, it.height).toFloat() - targetRatio) },
+                { kotlin.math.abs(it.width.toLong() * it.height.toLong() - targetArea) }
+            )
+        )
+    }
+
     private fun findBestFpsRange(chars: CameraCharacteristics, targetFps: Int): Range<Int>? {
         val availableFpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
         if (availableFpsRanges.isEmpty()) return null
@@ -6920,6 +7527,9 @@ class Camera2Engine(private val context: Context) {
         is10Bit: Boolean,
         physicalCameraId: String? = null,
         updateActivePhysicalId: Boolean = true,
+        stabilizationSurface: Surface? = null,
+        stabilizationPhysicalCameraId: String? = physicalCameraId,
+        previewViaRelay: Boolean = false,
         callback: CameraCaptureSession.StateCallback
     ) {
         val executor = Executor { command -> backgroundHandler?.post(command) ?: command.run() }
@@ -6934,6 +7544,10 @@ class Camera2Engine(private val context: Context) {
                 physicalCameraId != null &&
                 physicalCameraId != camera.id &&
                 physicalIds.contains(physicalCameraId)
+        val useStabilizationPhysicalRouting = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                stabilizationPhysicalCameraId != null &&
+                stabilizationPhysicalCameraId != camera.id &&
+                physicalIds.contains(stabilizationPhysicalCameraId)
 
         if (updateActivePhysicalId) {
             activeSessionPhysicalCameraId = if (usePhysicalRouting) physicalCameraId else null
@@ -6984,10 +7598,22 @@ class Camera2Engine(private val context: Context) {
             }
         } else null
 
-        val outputConfigs = if (recorderConfig != null) {
-            listOf(previewConfig, recorderConfig)
-        } else {
-            listOf(previewConfig)
+        val stabilizationConfig = stabilizationSurface?.takeIf { it.isValid }?.let { surface ->
+            OutputConfiguration(surface).apply {
+                // The stabilization reader can intentionally follow a different physical
+                // sensor from the preview/encoder when Keep Ultra Wide Ready uses logical zoom.
+                if (useStabilizationPhysicalRouting) {
+                    setPhysicalCameraId(stabilizationPhysicalCameraId)
+                } else if (usePhysicalRouting) {
+                    setPhysicalCameraId(physicalCameraId)
+                }
+            }
+        }
+        val outputConfigs = mutableListOf<OutputConfiguration>().apply {
+            if (!previewViaRelay) add(previewConfig)
+            recorderConfig?.let(::add)
+            stabilizationConfig?.let(::add)
+            if (isEmpty()) add(previewConfig)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -7012,10 +7638,11 @@ class Camera2Engine(private val context: Context) {
             activeSessionPhysicalCameraId = null
         }
         @Suppress("DEPRECATION")
-        val surfaces = if (hasSeparateRecorder) {
-            listOf(previewSurface, recorderSurface!!)
-        } else {
-            listOf(previewSurface)
+        val surfaces = mutableListOf<Surface>().apply {
+            if (!previewViaRelay) add(previewSurface)
+            if (hasSeparateRecorder) add(recorderSurface!!)
+            stabilizationSurface?.takeIf { it.isValid }?.let(::add)
+            if (isEmpty()) add(previewSurface)
         }
         camera.createCaptureSession(surfaces, callback, backgroundHandler)
     }
@@ -7023,7 +7650,285 @@ class Camera2Engine(private val context: Context) {
     /**
      * Safely releases failed recording resources, restores preview, and notifies error callback.
      */
+    private fun registerVideoEisPlusBinding(
+        binding: VideoEisPlusBinding,
+        relay: DualCameraRecordingRelay
+    ) {
+        val oldForCamera = videoEisPlusBindingsByCameraId.put(
+            videoEisPlusBindingKey(binding.sessionCameraId, binding.source),
+            binding
+        )
+        val oldForSource = videoEisPlusBindingsBySource.put(binding.source, binding)
+        if (oldForCamera != null && oldForCamera !== binding) {
+            val oldSourceWasStillOwned = videoEisPlusBindingsBySource.remove(oldForCamera.source, oldForCamera)
+            if (oldSourceWasStillOwned) {
+                relay.setEisPlusPipelineForSource(oldForCamera.source, null)
+            }
+            runCatching { oldForCamera.pipeline.stop() }
+        }
+        if (oldForSource != null && oldForSource !== binding &&
+            oldForSource.sessionCameraId != binding.sessionCameraId
+        ) {
+            videoEisPlusBindingsByCameraId.remove(
+                videoEisPlusBindingKey(oldForSource.sessionCameraId, oldForSource.source),
+                oldForSource
+            )
+            runCatching { oldForSource.pipeline.stop() }
+        }
+        relay.setEisPlusPipelineForSource(binding.source, binding.pipeline)
+        EisPlusDiagnosticLog.event(
+            "CAMERA2", "EIS_PLUS_SENSOR_BOUND",
+            "source=${binding.source} sessionCamera=${binding.sessionCameraId} " +
+                "pipelineCamera=${binding.pipelineCameraId} physical=${binding.physicalCameraId}",
+        )
+    }
+
+    private fun unregisterVideoEisPlusBinding(
+        binding: VideoEisPlusBinding,
+        relay: DualCameraRecordingRelay
+    ) {
+        videoEisPlusBindingsByCameraId.remove(
+            videoEisPlusBindingKey(binding.sessionCameraId, binding.source),
+            binding
+        )
+        val removedSourceOwner = videoEisPlusBindingsBySource.remove(binding.source, binding)
+        if (removedSourceOwner) {
+            relay.setEisPlusPipelineForSource(binding.source, null)
+        }
+        if (activeVideoEisPlusPipeline === binding.pipeline) {
+            activeVideoEisPlusPipeline = null
+            activeVideoEisPlusSurface = null
+            activeVideoEisPlusPhysicalCameraId = null
+            activeVideoEisPlusSessionCameraId = null
+        }
+        runCatching { binding.pipeline.stop() }
+    }
+
+    private fun submitVideoEisPlusCaptureResult(
+        session: CameraCaptureSession,
+        request: CaptureRequest,
+        result: TotalCaptureResult
+    ): VideoEisPlusBinding? {
+        val cameraId = runCatching { session.device.id }.getOrNull() ?: return null
+        val bindings = videoEisPlusBindingsByCameraId.values
+            .filter { it.sessionCameraId == cameraId && it.pipeline.isRunning }
+        if (bindings.isEmpty()) return null
+
+        // One logical Camera2 result can carry metadata for both physical sensors.
+        // Feed each EIS+ coordinator only the result belonging to its own sensor.
+        bindings.forEach { binding ->
+            binding.pipeline.submitCaptureResult(
+                result = result,
+                request = request,
+                generation = binding.generation,
+                outputPhysicalCameraId = binding.physicalCameraId
+            )
+        }
+        val activeSource = dualCameraRecordingRelay?.activeSource
+            ?: previewVideoEisPlusRelay?.activeSource
+            ?: _displayedPreviewSource.value
+        return bindings.firstOrNull { it.source == activeSource } ?: bindings.firstOrNull()
+    }
+
+    private fun activateVideoEisPlusForSource(source: PreviewStreamSource, sessionCameraId: String?) {
+        val binding = videoEisPlusBindingsBySource[source]
+            ?.takeIf { sessionCameraId == null || it.sessionCameraId == sessionCameraId }
+            ?: sessionCameraId?.let { cameraId ->
+                videoEisPlusBindingsByCameraId[videoEisPlusBindingKey(cameraId, source)]
+            }
+        if (binding != null && binding.pipeline.isRunning) {
+            activeVideoEisPlusPipeline = binding.pipeline
+            activeVideoEisPlusSurface = binding.pipeline.surface
+            activeVideoEisPlusPhysicalCameraId = binding.physicalCameraId
+            activeVideoEisPlusSessionCameraId = binding.sessionCameraId
+            videoEisPlusOisDisabledForSession = false
+        } else {
+            // Never retain the previous lens' pipeline when this source has no matching
+            // sensor binding, even when both physical lenses share one logical CameraDevice.
+            activeVideoEisPlusPipeline = null
+            activeVideoEisPlusSurface = null
+            activeVideoEisPlusPhysicalCameraId = null
+            activeVideoEisPlusSessionCameraId = null
+            videoEisPlusOisDisabledForSession = false
+        }
+    }
+
+    private fun updateVideoEisPlusSourceStatus(source: PreviewStreamSource, preview: Boolean) {
+        if (!preferences.videoEisPlusEnabled) {
+            _videoEisPlusStatus.value = "Disabled"
+            return
+        }
+        val unsupportedMode = currentMode != CameraMode.VIDEO ||
+            isSpecialVideoRecordingActive ||
+            isSoftwareCinemaRecording ||
+            activeRecordingStreamConfig?.is10Bit == true
+        _videoEisPlusStatus.value = when {
+            unsupportedMode -> "Unavailable: Photon EIS+ is limited to standard SDR Video"
+            activeVideoEisPlusPipeline?.isRunning == true -> {
+                if (preview) "Active · Live preview · $source" else "Active · Recording · $source"
+            }
+            else -> "Unavailable: no sensor-matched EIS+ pipeline for $source; raw camera fallback"
+        }
+        EisPlusDiagnosticLog.event(
+            "CAMERA2",
+            "EIS_PLUS_RUNTIME_STATE",
+            "source=$source preview=$preview active=${activeVideoEisPlusPipeline?.isRunning == true} status=${_videoEisPlusStatus.value}",
+            if (activeVideoEisPlusPipeline?.isRunning == true) "INFO" else "WARN"
+        )
+    }
+
+    private fun setActivePreviewEisPlusSource(source: PreviewStreamSource, sessionCameraId: String?) {
+        previewVideoEisPlusRelay?.setActiveSource(source)
+        activateVideoEisPlusForSource(source, sessionCameraId)
+        updateVideoEisPlusSourceStatus(source, preview = true)
+    }
+
+    private fun setActiveRecordingSource(source: PreviewStreamSource, sessionCameraId: String?) {
+        val relay = dualCameraRecordingRelay
+        relay?.setActiveSource(source)
+        // Special Video can pin the primary encoder to MAIN while ULTRAWIDE is the
+        // companion stream. In that case keep EIS+ bound to MAIN's own pipeline.
+        val effectiveSource = relay?.activeSource ?: source
+        val effectiveCameraId = if (effectiveSource == source) sessionCameraId else null
+        activateVideoEisPlusForSource(effectiveSource, effectiveCameraId)
+        updateVideoEisPlusSourceStatus(effectiveSource, preview = false)
+        EisPlusDiagnosticLog.event(
+            "CAMERA2", "EIS_PLUS_ACTIVE_SOURCE",
+            "source=$effectiveSource sessionCamera=$effectiveCameraId " +
+                "pipelineReady=${activeVideoEisPlusPipeline?.isRunning == true} " +
+                "pipelineCamera=${activeVideoEisPlusSessionCameraId ?: "unbound"}"
+        )
+    }
+
+    private fun startStandbyVideoEisPlusPipeline(
+        camera: CameraDevice,
+        standbyLens: LensInfo,
+        recordingSize: Size,
+        physicalCameraId: String?,
+        relay: DualCameraRecordingRelay
+    ): VideoEisPlusBinding? {
+        if (!preferences.videoEisPlusEnabled ||
+            currentMode != CameraMode.VIDEO ||
+            isSpecialVideoRecordingActive ||
+            isSoftwareCinemaRecording ||
+            activeRecordingStreamConfig?.is10Bit == true ||
+            (activeVideoEisPlusPipeline?.isRunning != true &&
+                videoEisPlusBindingsByCameraId.values.none { it.pipeline.isRunning })
+        ) return null
+
+        val pipelineCameraId = physicalCameraId ?: camera.id
+        val characteristics = getCharacteristics(pipelineCameraId) ?: return null
+        val timingCharacteristics = getCharacteristics(camera.id) ?: characteristics
+        val yuvSize = resolveVideoEisPlusYuvSize(
+            pipelineCameraId,
+            recordingSize.width,
+            recordingSize.height
+        ) ?: run {
+            EisPlusDiagnosticLog.event("CAMERA2", "SECONDARY_EIS_PLUS_UNAVAILABLE",
+                "camera=${camera.id} reason=no_matching_yuv_size", "WARN")
+            return null
+        }
+        val candidate = VideoEisPlusPipeline(context)
+        val supportFailure = candidate.supportFailureReason(characteristics, timingCharacteristics)
+        if (supportFailure != null) {
+            EisPlusDiagnosticLog.event("CAMERA2", "SECONDARY_EIS_PLUS_UNAVAILABLE",
+                "camera=${camera.id} reason=$supportFailure", "WARN")
+            return null
+        }
+        val source = if (standbyLens.lensType == LensType.ULTRAWIDE) {
+            PreviewStreamSource.ULTRAWIDE
+        } else PreviewStreamSource.MAIN
+        val generation = videoEisPlusCaptureGeneration + 1L
+        val started = candidate.start(
+            cameraId = pipelineCameraId,
+            characteristics = characteristics,
+            timingCharacteristics = timingCharacteristics,
+            width = yuvSize.width,
+            height = yuvSize.height,
+            frontFacing = standbyLens.facing == CameraCharacteristics.LENS_FACING_FRONT,
+            strength = preferences.videoEisPlusStrength,
+            lookaheadFrames = preferences.videoEisPlusLookahead,
+            imageHandler = backgroundHandler ?: mainHandler,
+            onFrameAvailable = { relay.notifyEisPlusFrameAvailable() },
+            onUnavailable = {
+                EisPlusDiagnosticLog.event("CAMERA2", "SECONDARY_EIS_PLUS_RUNTIME_UNAVAILABLE",
+                    "camera=${camera.id} reason=${candidate.lastStartFailureReason.orEmpty()}", "WARN")
+            }
+        )
+        if (!started || candidate.surface?.isValid != true) {
+            runCatching { candidate.stop() }
+            EisPlusDiagnosticLog.event("CAMERA2", "SECONDARY_EIS_PLUS_START_FAILED",
+                "camera=${camera.id} reason=${candidate.lastStartFailureReason.orEmpty()}", "WARN")
+            return null
+        }
+        videoEisPlusCaptureGeneration = generation
+        return VideoEisPlusBinding(
+            sessionCameraId = camera.id,
+            pipelineCameraId = pipelineCameraId,
+            physicalCameraId = physicalCameraId,
+            source = source,
+            pipeline = candidate,
+            generation = generation
+        ).also { registerVideoEisPlusBinding(it, relay) }
+    }
+
+    private fun stopActiveVideoEisPlus(closeCameraSession: Boolean = false) {
+        val pipeline = activeVideoEisPlusPipeline
+        val wasOisForcedOff = videoEisPlusOisDisabledForSession
+        if (pipeline != null && closeCameraSession) {
+            try { captureSession?.stopRepeating() } catch (_: Throwable) {}
+            try { captureSession?.abortCaptures() } catch (_: Throwable) {}
+            try { captureSession?.close() } catch (_: Throwable) {}
+            captureSession = null
+        }
+        activeVideoEisPlusPipeline = null
+        activeVideoEisPlusSurface = null
+        activeVideoEisPlusPhysicalCameraId = null
+        activeVideoEisPlusSessionCameraId = null
+        val pipelinesToStop = (videoEisPlusBindingsByCameraId.values.map { it.pipeline } +
+            listOfNotNull(pipeline)).distinct()
+        videoEisPlusBindingsByCameraId.clear()
+        videoEisPlusBindingsBySource.clear()
+        val previewRelay = previewVideoEisPlusRelay
+        previewVideoEisPlusRelay = null
+        try { previewRelay?.release() } catch (t: Throwable) {
+            Log.w(TAG, "Failed to release preview-only EIS+ relay", t)
+        }
+        _isGpuRelayPreviewActive.value = false
+        videoEisPlusOisDisabledForSession = false
+        videoEisPlusCaptureGeneration += 1L
+        pipelinesToStop.forEach { eisPipeline ->
+            try { eisPipeline.stop() } catch (t: Throwable) {
+                EisPlusDiagnosticLog.event("CAMERA2", "PIPELINE_STOP_EXCEPTION", t.toString(), "ERROR")
+                Log.w(TAG, "Failed to stop Photon EIS+ input pipeline", t)
+            }
+        }
+        EisPlusDiagnosticLog.finish("camera2_recording_cleanup closeCameraSession=$closeCameraSession")
+        if (_videoEisPlusStatus.value.startsWith("Active")) {
+            _videoEisPlusStatus.value = "Ready for supported SDR video"
+        }
+
+        // When the session remains open, immediately restore the saved OIS preference.
+        // Session-close paths build a fresh preview request through applyCommonSettings instead.
+        if (wasOisForcedOff && !closeCameraSession) {
+            try {
+                synchronized(previewRequestLock) {
+                    val builder = previewRequestBuilder
+                    val session = captureSession
+                    if (builder != null && session != null) {
+                        applyCommonSettings(builder)
+                        session.setRepeatingRequest(builder.build(), captureCallback, backgroundHandler)
+                        Log.i(TAG, "Restored normal OIS behavior after Photon EIS+ stopped")
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not restore normal OIS request after Photon EIS+ stopped", t)
+            }
+        }
+    }
+
     private fun cleanupFailedRecording(onError: (String) -> Unit, message: String) {
+        stopActiveVideoEisPlus(closeCameraSession = true)
         isStartingRecording.set(false)
         isStoppingRecording.set(false)
         _isRecordingVideo.value = false
@@ -7097,6 +8002,16 @@ class Camera2Engine(private val context: Context) {
         }
         if (!isStartingRecording.compareAndSet(false, true)) return
         _isRecordingPaused.value = false
+
+        if (previewVideoEisPlusRelay != null) {
+            try {
+                captureSession?.stopRepeating()
+                captureSession?.abortCaptures()
+                captureSession?.close()
+            } catch (_: Throwable) {}
+            captureSession = null
+            stopActiveVideoEisPlus(closeCameraSession = false)
+        }
 
         val camera = cameraDevice ?: run {
             isStartingRecording.set(false)
@@ -7594,6 +8509,95 @@ class Camera2Engine(private val context: Context) {
                     uwLensForRec != null &&
                     mainLensForRec != null
 
+                // Photon EIS+ consumes the active recording sensor's Camera2 YUV stream.
+                // Special Video keeps its independent ultra-wide companion encoder; EIS+ is
+                // applied to the primary relay stream without changing the companion recording.
+                // Cinema and 10-bit/HDR continue to use their existing dedicated recording paths.
+                val eisPlusLogicalZoom = canUseLogicalZoomForLens(camera.id, lens, currentZoom)
+                val preferredEisPlusPhysicalId = when {
+                    Build.VERSION.SDK_INT < Build.VERSION_CODES.P -> null
+                    isKeepUwReadyBack -> {
+                        // Bind MGC to the actual physical sensor selected as the relay source.
+                        val activePhysicalLens = if (lens.lensType == LensType.ULTRAWIDE) {
+                            uwLensForRec
+                        } else {
+                            mainLensForRec
+                        }
+                        activePhysicalLens
+                            ?.takeIf { it.supportsPhysicalStream }
+                            ?.physicalCameraId
+                    }
+                    lens.supportsPhysicalStream -> lens.physicalCameraId
+                    else -> null
+                }
+                val eisPlusPhysicalId = preferredEisPlusPhysicalId?.takeIf {
+                    it != camera.id && chars?.physicalCameraIds?.contains(it) == true
+                }
+                val eisPlusCameraId = eisPlusPhysicalId ?: camera.id
+                val eisPlusCameraChars = getCharacteristics(eisPlusCameraId)
+                val eisPlusTimingChars = getCharacteristics(camera.id) ?: chars ?: eisPlusCameraChars
+                val eisPlusYuvSize = resolveVideoEisPlusYuvSize(
+                    eisPlusCameraId,
+                    max(videoRes.width, videoRes.height),
+                    min(videoRes.width, videoRes.height)
+                )
+                val eisPlusModeFailureReason = when {
+                    currentMode != CameraMode.VIDEO -> "standard Video mode only"
+                    isSoftwareCinema -> "Cinema recording is not supported"
+                    is10BitSession -> "10-bit/HDR recording is not supported"
+                    else -> null
+                }
+                val eisPlusEligible = preferences.videoEisPlusEnabled &&
+                    eisPlusModeFailureReason == null
+                val eisPlusPipelineProbe = if (
+                    eisPlusEligible && eisPlusCameraChars != null &&
+                    eisPlusTimingChars != null && eisPlusYuvSize != null
+                ) {
+                    VideoEisPlusPipeline(context)
+                } else null
+                val eisPlusSupportFailureReason = if (
+                    eisPlusPipelineProbe != null &&
+                    eisPlusCameraChars != null && eisPlusTimingChars != null
+                ) {
+                    eisPlusPipelineProbe.supportFailureReason(eisPlusCameraChars, eisPlusTimingChars)
+                } else null
+                val eisPlusCandidate = eisPlusPipelineProbe?.takeIf {
+                    eisPlusSupportFailureReason == null
+                }
+                val eisPlusUnavailableReason = when {
+                    !preferences.videoEisPlusEnabled -> "disabled in Settings"
+                    eisPlusModeFailureReason != null -> eisPlusModeFailureReason
+                    eisPlusCameraChars == null -> "camera characteristics unavailable"
+                    eisPlusTimingChars == null -> "sensor timestamp characteristics unavailable"
+                    eisPlusYuvSize == null ->
+                        "no matching YUV stream size for ${videoRes.width}x${videoRes.height}"
+                    eisPlusSupportFailureReason != null -> eisPlusSupportFailureReason
+                    else -> "available"
+                }
+                if (preferences.videoEisPlusEnabled) {
+                    EisPlusDiagnosticLog.beginIfNeeded(
+                        context.applicationContext,
+                        "mode=$currentMode camera=${camera.id} lens=${lens.lensType} resolution=${videoRes.width}x${videoRes.height} fps=$targetFps " +
+                            "tenBit=$is10BitSession specialVideo=$isSpecialVideoRecording keepUltraWideReady=$isKeepUwReadyBack",
+                    )
+                    EisPlusDiagnosticLog.event(
+                        "CAMERA2", "ELIGIBILITY",
+                        "eligible=$eisPlusEligible reason=$eisPlusUnavailableReason yuvSize=${eisPlusYuvSize?.width}x${eisPlusYuvSize?.height} " +
+                            "logicalZoomRequested=$eisPlusLogicalZoom physicalRouting=${eisPlusPhysicalId != null} " +
+                                "logicalMultiCamera=${chars?.physicalCameraIds?.isNotEmpty() == true} pipelineCameraId=$eisPlusCameraId " +
+                                "activeLensCameraId=${lens.cameraId} activeLensPhysicalId=${lens.physicalCameraId} " +
+                                "pipelinePhysicalCameraId=$eisPlusPhysicalId",
+                        if (eisPlusCandidate == null) "WARN" else "INFO",
+                    )
+                }
+                if (preferences.videoEisPlusEnabled && eisPlusCandidate == null) {
+                    _videoEisPlusStatus.value = "Unavailable: $eisPlusUnavailableReason"
+                    Log.w(TAG, "Photon EIS+ unavailable: $eisPlusUnavailableReason")
+                    EisPlusDiagnosticLog.event("CAMERA2", "EIS_UNAVAILABLE", eisPlusUnavailableReason, "ERROR")
+                } else if (!preferences.videoEisPlusEnabled) {
+                    _videoEisPlusStatus.value = "Disabled"
+                }
+
                 // Initialize DualCameraRecordingRelay as the live GPU processing surface:
                 // Camera2 Surface -> GPU/EGL relay -> VideoAdjustments shader -> split to:
                 // 1. Preview surface (viewfinder)
@@ -7609,7 +8613,7 @@ class Camera2Engine(private val context: Context) {
                     sensorOrientation = sensorOrient,
                     deviceRotation = currentRot,
                     isFront = isFront,
-                    previewTargetSurface = null,
+                    previewTargetSurface = if (eisPlusCandidate != null) previewSurf else null,
                     previewWidth = viewfinderWidth,
                     previewHeight = viewfinderHeight,
                     initialAdjustments = currentVideoAdjustments,
@@ -7620,8 +8624,97 @@ class Camera2Engine(private val context: Context) {
                     secondaryEncoderTargetSurface = if (isSpecialVideoRecording) specialVideoUltraWideSurface else null,
                     onSpecialVideoTimelineStarted = if (isSpecialVideoRecording) {
                         { _ -> normalVideoRecorder.startDeferredAudioRecording() }
-                    } else null
+                    } else null,
+                    eisPlusPipeline = eisPlusCandidate
                 )
+                // EGL preview attachment is deferred until Camera2 has replaced the old preview session.
+                // The relay can still encode stabilized YUV frames if its optional preview output fails.
+                var eisPlusPreviewViaRelay = eisPlusCandidate != null && relay.isRelayReady
+                var eisPlusStarted = false
+                if (eisPlusCandidate != null && !eisPlusPreviewViaRelay) {
+                    val reason = "GPU recording relay preview path unavailable"
+                    _videoEisPlusStatus.value = "Unavailable: $reason"
+                    EisPlusDiagnosticLog.event("CAMERA2", "RELAY_NOT_READY", reason, "ERROR")
+                    Log.w(TAG, "Photon EIS+ unavailable: $reason; using synchronized relay fallback")
+                }
+                if (eisPlusPreviewViaRelay && eisPlusCandidate != null && eisPlusYuvSize != null &&
+                    eisPlusCameraChars != null && eisPlusTimingChars != null
+                ) {
+                    eisPlusCandidate.onRuntimeUnavailable = {
+                        _videoEisPlusStatus.value = "Disabled by HAL conflict"
+                        Log.w(
+                            TAG,
+                            "Photon EIS+ fallback: HAL kept CONTROL_VIDEO_STABILIZATION_MODE non-OFF after an OFF request",
+                        )
+                    }
+                    val started = eisPlusCandidate.start(
+                        cameraId = eisPlusCameraId,
+                        characteristics = eisPlusCameraChars,
+                        timingCharacteristics = eisPlusTimingChars,
+                        width = eisPlusYuvSize.width,
+                        height = eisPlusYuvSize.height,
+                        frontFacing = isFront,
+                        strength = preferences.videoEisPlusStrength,
+                        lookaheadFrames = preferences.videoEisPlusLookahead,
+                        imageHandler = backgroundHandler ?: mainHandler,
+                        onFrameAvailable = { relay.notifyEisPlusFrameAvailable() },
+                        onUnavailable = {
+                            val reason = eisPlusCandidate.lastStartFailureReason
+                                ?: "input pipeline did not start"
+                            _videoEisPlusStatus.value = "Unavailable: $reason"
+                            Log.w(TAG, "Photon EIS+ fallback reason: $reason; using synchronized relay frames")
+                        }
+                    )
+                    if (started && eisPlusCandidate.surface?.isValid == true) {
+                        activeVideoEisPlusPipeline = eisPlusCandidate
+                        activeVideoEisPlusSurface = eisPlusCandidate.surface
+                        activeVideoEisPlusPhysicalCameraId = eisPlusPhysicalId
+                        activeVideoEisPlusSessionCameraId = camera.id
+                        videoEisPlusCaptureGeneration += 1L
+                        registerVideoEisPlusBinding(
+                            VideoEisPlusBinding(
+                                sessionCameraId = camera.id,
+                                pipelineCameraId = eisPlusCameraId,
+                                physicalCameraId = eisPlusPhysicalId,
+                                source = initialStreamSource,
+                                pipeline = eisPlusCandidate,
+                                generation = videoEisPlusCaptureGeneration
+                            ),
+                            relay
+                        )
+                        eisPlusStarted = true
+                        _videoEisPlusStatus.value = "Active"
+                        EisPlusDiagnosticLog.event(
+                            "CAMERA2", "PIPELINE_READY",
+                            "camera=$eisPlusCameraId physicalCameraId=$eisPlusPhysicalId activeLens=${lens.lensType} " +
+                                "outputYuv=${eisPlusYuvSize.width}x${eisPlusYuvSize.height}"
+                        )
+                        Log.i(
+                            TAG,
+                            "Photon EIS+ started: camera=$eisPlusCameraId yuv=${eisPlusYuvSize.width}x${eisPlusYuvSize.height} " +
+                                "lookahead=${preferences.videoEisPlusLookahead}",
+                        )
+                    } else {
+                        eisPlusCandidate.stop()
+                        val reason = eisPlusCandidate.lastStartFailureReason
+                            ?: "input pipeline initialization failed"
+                        _videoEisPlusStatus.value = "Unavailable: $reason"
+                        EisPlusDiagnosticLog.event("CAMERA2", "PIPELINE_START_FAILED", reason, "ERROR")
+                        Log.w(TAG, "Photon EIS+ fallback reason: $reason; using unwarped relay frames")
+                    }
+                }
+
+                // Keep the user's normal OIS request during a short result-based probe. Static
+                // capability metadata can under-report legacy OIS samples on older HALs.
+                videoEisPlusOisDisabledForSession = false
+                if (eisPlusStarted) {
+                    Log.i(
+                        TAG,
+                        "Photon EIS+ OIS decision: preferenceEnabled=$isOisAllowed, " +
+                            "advertisedOpticalTelemetry=${activeVideoEisPlusPipeline?.supportsOpticalTelemetry}, " +
+                            "probingCaptureResults=true, forceOisOff=false",
+                    )
+                }
                 if (relay.isRelayReady) {
                     if (isKeepUwReadyBack && uwLensForRec != null && mainLensForRec != null) {
                         val bestUwRes = resolveEffectiveVideoResolutionForLens(uwLensForRec, videoRes)
@@ -7703,6 +8796,26 @@ class Camera2Engine(private val context: Context) {
                             val uwPhysId = uwLensForRec.physicalCameraId!!
                             val mainPhysId = mainLensForRec.physicalCameraId?.takeIf {
                                 mainLensForRec.supportsPhysicalStream && physIds.contains(it) && it != camera.id
+                            }
+                            // The EIS+ reader must be an actual output in the same Camera2 session.
+                            // Route it to the active physical sensor selected for the EIS+ gyro/timing pipeline.
+                            val eisPlusSessionSurface = activeVideoEisPlusSurface?.takeIf {
+                                eisPlusStarted && it.isValid
+                            }
+                            val eisPlusOutputPhysicalId = eisPlusPhysicalId?.takeIf { physIds.contains(it) }
+                            val eisPlusOutputConfig = eisPlusSessionSurface?.let { surface ->
+                                OutputConfiguration(surface).apply {
+                                    eisPlusOutputPhysicalId?.let(::setPhysicalCameraId)
+                                }
+                            }
+                            if (eisPlusSessionSurface != null) {
+                                EisPlusDiagnosticLog.event(
+                                    "CAMERA2",
+                                    "KEEP_ULTRAWIDE_EIS_PLUS_OUTPUT",
+                                    "surfaceValid=${eisPlusSessionSurface.isValid} activeLens=${lens.lensType} " +
+                                        "pipelineCameraId=$eisPlusCameraId physicalCameraId=$eisPlusOutputPhysicalId " +
+                                        "yuvSize=${eisPlusYuvSize?.width}x${eisPlusYuvSize?.height}",
+                                )
                             }
                             val isUwSelected = (lens.lensType == LensType.ULTRAWIDE)
                             configurePreviewSurfaceBufferSize(
@@ -7797,6 +8910,7 @@ class Camera2Engine(private val context: Context) {
                                             addTarget(mainPrevSurf)
                                             addTarget(uwPrevSurf)
                                             addTarget(activeLensRecorderSurface)
+                                            eisPlusSessionSurface?.let(::addTarget)
                                             applyCommonSettings(this)
                                             set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
                                             if (matchedFpsRange != null) {
@@ -7805,7 +8919,7 @@ class Camera2Engine(private val context: Context) {
                                         }
                                         val sessionCfg3 = SessionConfiguration(
                                             SessionConfiguration.SESSION_REGULAR,
-                                            listOf(mPrevCfg, uPrevCfg, sharedRecCfg),
+                                            listOfNotNull(mPrevCfg, uPrevCfg, sharedRecCfg, eisPlusOutputConfig),
                                             executor,
                                             object : CameraCaptureSession.StateCallback() {
                                                 override fun onConfigured(s3: CameraCaptureSession) {
@@ -7857,6 +8971,7 @@ class Camera2Engine(private val context: Context) {
                                             addTarget(uwPrevSurf)
                                             addTarget(mainRecSurf)
                                             addTarget(uwRecSurf)
+                                            eisPlusSessionSurface?.let(::addTarget)
                                             applyCommonSettings(this)
                                             set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
                                             if (matchedFpsRange != null) {
@@ -7865,7 +8980,7 @@ class Camera2Engine(private val context: Context) {
                                         }
                                         val sessionCfg4 = SessionConfiguration(
                                             SessionConfiguration.SESSION_REGULAR,
-                                            listOf(mPrevCfg, uPrevCfg, mRecCfg, uRecCfg),
+                                            listOfNotNull(mPrevCfg, uPrevCfg, mRecCfg, uRecCfg, eisPlusOutputConfig),
                                             executor,
                                             object : CameraCaptureSession.StateCallback() {
                                                 override fun onConfigured(s4: CameraCaptureSession) {
@@ -7883,6 +8998,7 @@ class Camera2Engine(private val context: Context) {
                                                         val fallbackBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                                                             addTarget(previewSurf)
                                                             addTarget(activeLensRecorderSurface)
+                                                            activeVideoEisPlusSurface?.takeIf { eisPlusStarted && it.isValid }?.let(::addTarget)
                                                             applyCommonSettings(this)
                                                             set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
                                                         }
@@ -7892,7 +9008,8 @@ class Camera2Engine(private val context: Context) {
                                                             previewSurface = previewSurf,
                                                             recorderSurface = activeLensRecorderSurface,
                                                             is10Bit = is10BitSession,
-                                                            physicalCameraId = null,
+                                                            physicalCameraId = eisPlusPhysicalId,
+                                                            stabilizationSurface = activeVideoEisPlusSurface?.takeIf { eisPlusStarted && it.isValid },
                                                             callback = object : CameraCaptureSession.StateCallback() {
                                                                 override fun onConfigured(fs: CameraCaptureSession) {
                                                                     captureSession = fs
@@ -7939,8 +9056,11 @@ class Camera2Engine(private val context: Context) {
                         activeSessionPhysicalCameraId = targetPhysId
 
                         val recordBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                            addTarget(previewSurf)
+                            if (!eisPlusPreviewViaRelay) addTarget(previewSurf)
                             addTarget(activeLensRecorderSurface)
+                            if (eisPlusStarted) {
+                                activeVideoEisPlusSurface?.takeIf { it.isValid }?.let(::addTarget)
+                            }
                             applyCommonSettings(this)
                             set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
                             if (matchedFpsRange != null) {
@@ -7949,57 +9069,138 @@ class Camera2Engine(private val context: Context) {
                             applyHardwareEisRequest(this)
                             applyHardwareOisRequest(
                                 this,
-                                oisAllowed = isOisAllowed && isOisSupportedForActiveLens()
+                                oisAllowed = isOisAllowedForCurrentSession()
                             )
+                            if (activeVideoEisPlusPipeline?.shouldRequestOisSamples == true &&
+                                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                            ) {
+                                runCatching {
+                                    set(CaptureRequest.STATISTICS_OIS_DATA_MODE, CaptureRequest.STATISTICS_OIS_DATA_MODE_ON)
+                                }.onFailure { Log.d(TAG, "OIS motion telemetry request unsupported", it) }
+                            }
                         }
                         synchronized(previewRequestLock) {
                             previewRequestBuilder = recordBuilder
                         }
 
                         var isFallbackActive = false
-                        val sessionCallback = object : CameraCaptureSession.StateCallback() {
-                            override fun onConfigured(session: CameraCaptureSession) {
-                                Log.i(TAG, "[RECORDING_SESSION] Video recording session configured")
-                                captureSession = session
-                                try {
-                                    synchronized(previewRequestLock) {
-                                        applyCommonSettings(recordBuilder)
-                                        applyHardwareEisRequest(recordBuilder)
-                                        applyHardwareOisRequest(
-                                            recordBuilder,
-                                            oisAllowed = isOisAllowed && isOisSupportedForActiveLens()
-                                        )
-                                        session.setRepeatingRequest(recordBuilder.build(), captureCallback, backgroundHandler)
+                        fun startConfiguredRecordingSession(session: CameraCaptureSession) {
+                            Log.i(TAG, "[RECORDING_SESSION] Video recording session configured")
+                            captureSession = session
+                            try {
+                                synchronized(previewRequestLock) {
+                                    applyCommonSettings(recordBuilder)
+                                    applyHardwareEisRequest(recordBuilder)
+                                    applyHardwareOisRequest(
+                                        recordBuilder,
+                                        oisAllowed = isOisAllowedForCurrentSession()
+                                    )
+                                    if (activeVideoEisPlusPipeline?.shouldRequestOisSamples == true &&
+                                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                                    ) {
+                                        runCatching {
+                                            recordBuilder.set(
+                                                CaptureRequest.STATISTICS_OIS_DATA_MODE,
+                                                CaptureRequest.STATISTICS_OIS_DATA_MODE_ON
+                                            )
+                                        }
                                     }
-                                    if (!isSoftwareCinema) {
-                                        mediaRecorder?.start()
-                                    }
-                                    dualCameraRecordingRelay?.startRecording()
-                                    _isRecordingVideo.value = true
-                                    isStartingRecording.set(false)
-                                    startVideoTimer()
-                                    val is4kRec = maxOf(videoRes.width, videoRes.height) >= 3840
-                                    if (shouldKeepUltraWideStreamReady() && !is4kRec) {
-                                        ensureUltraWideSimultaneousReady()
-                                    }
-                                    if (pendingLensWhileSwitching != null || pendingZoomWhileSwitching != null) {
-                                        completeLensSwitch(lens)
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Failed starting repeating request or recorder", e)
-                                    cleanupFailedRecording(onError, "Failed to start recording: ${e.message}")
+                                    session.setRepeatingRequest(recordBuilder.build(), captureCallback, backgroundHandler)
                                 }
+                                if (!isSoftwareCinema) {
+                                    mediaRecorder?.start()
+                                }
+                                dualCameraRecordingRelay?.startRecording()
+                                EisPlusDiagnosticLog.event("CAMERA2", "VIDEO_RECORDING_STARTED", "eisPlusActive=${activeVideoEisPlusPipeline?.isRunning} relayReady=${dualCameraRecordingRelay?.isRelayReady}")
+                                _isRecordingVideo.value = true
+                                isStartingRecording.set(false)
+                                startVideoTimer()
+                                val is4kRec = maxOf(videoRes.width, videoRes.height) >= 3840
+                                if (shouldKeepUltraWideStreamReady() && !is4kRec) {
+                                    ensureUltraWideSimultaneousReady()
+                                }
+                                if (pendingLensWhileSwitching != null || pendingZoomWhileSwitching != null) {
+                                    completeLensSwitch(lens)
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Failed starting repeating request or recorder", e)
+                                cleanupFailedRecording(onError, "Failed to start recording: ${e.message}")
+                            }
+                        }
+                        var sessionCallback: CameraCaptureSession.StateCallback? = null
+                        sessionCallback = object : CameraCaptureSession.StateCallback() {
+                            override fun onConfigured(session: CameraCaptureSession) {
+                                captureSession = session
+                                if (eisPlusPreviewViaRelay && !relay.isRelayPreviewActive) {
+                                    // This callback runs only after Camera2 has replaced its previous
+                                    // preview session, so the viewfinder BufferQueue is now free for EGL.
+                                    relay.attachPreviewTargetSurface { attached ->
+                                        (backgroundHandler ?: mainHandler).post {
+                                            if (captureSession !== session || isStoppingRecording.get()) {
+                                                return@post
+                                            }
+                                            if (attached) {
+                                                _isGpuRelayPreviewActive.value = true
+                                                startConfiguredRecordingSession(session)
+                                            } else {
+                                                Log.w(
+                                                    TAG,
+                                                    "EIS+ preview attachment failed; keeping stabilized encoder output and restoring direct Camera2 preview",
+                                                )
+                                                eisPlusPreviewViaRelay = false
+                                                _isGpuRelayPreviewActive.value = false
+                                                runCatching { recordBuilder.addTarget(previewSurf) }
+                                                    .onFailure {
+                                                        cleanupFailedRecording(
+                                                            onError,
+                                                            "Could not restore the direct preview surface: ${it.message}",
+                                                        )
+                                                        return@post
+                                                    }
+                                                createRecordingCaptureSession(
+                                                    camera = camera,
+                                                    previewSurface = previewSurf,
+                                                    recorderSurface = activeLensRecorderSurface,
+                                                    is10Bit = is10BitSession,
+                                                    physicalCameraId = targetPhysId,
+                                                    stabilizationSurface = if (eisPlusStarted) activeVideoEisPlusSurface else null,
+                                                    stabilizationPhysicalCameraId = eisPlusPhysicalId,
+
+                                                    previewViaRelay = false,
+                                                    callback = sessionCallback
+                                                        ?: run {
+                                                            cleanupFailedRecording(onError, "Recording session callback was unavailable")
+                                                            return@post
+                                                        },
+                                                )
+                                            }
+                                        }
+                                    }
+                                    return
+                                }
+                                startConfiguredRecordingSession(session)
                             }
 
                             override fun onConfigureFailed(session: CameraCaptureSession) {
+                                EisPlusDiagnosticLog.event("CAMERA2", "RECORDING_SESSION_CONFIGURE_FAILED", "Camera2 rejected recording output surfaces including EIS+ YUV", "ERROR")
                                 Log.w(TAG, "[RECORDING_SESSION] Video capture session configuration failed, trying safe standard fallback")
+                                if (activeVideoEisPlusPipeline != null) {
+                                    val reason = "Camera2 rejected the recording session with the MGC EIS+ YUV output"
+                                    _videoEisPlusStatus.value = "Unavailable: $reason"
+                                    Log.w(TAG, "Photon EIS+ fallback reason: $reason")
+                                }
+                                stopActiveVideoEisPlus()
+                                // The failed Camera2 session never handed the viewfinder Surface to EGL.
+                                // Restore that Surface as a direct Camera2 output for the safe fallback.
+                                eisPlusPreviewViaRelay = false
+                                _isGpuRelayPreviewActive.value = false
                                 activeSessionPhysicalCameraId = null
                                 if (!isFallbackActive) {
                                     isFallbackActive = true
                                     try {
                                         // Build safe fallback capture request: standard FPS, standard template
                                         val safeBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                                            addTarget(previewSurf)
+                                            if (!eisPlusPreviewViaRelay) addTarget(previewSurf)
                                             addTarget(activeLensRecorderSurface)
                                             applyCommonSettings(this)
                                             set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
@@ -8015,7 +9216,10 @@ class Camera2Engine(private val context: Context) {
                                         }
 
                                         @Suppress("DEPRECATION")
-                                        val fallbackSurfaces = listOf(previewSurf, activeLensRecorderSurface)
+                                        val fallbackSurfaces = mutableListOf<Surface>().apply {
+                                            if (!eisPlusPreviewViaRelay) add(previewSurf)
+                                            add(activeLensRecorderSurface)
+                                        }
                                         camera.createCaptureSession(fallbackSurfaces, object : CameraCaptureSession.StateCallback() {
                                             override fun onConfigured(fallbackSession: CameraCaptureSession) {
                                                 Log.i(TAG, "[RECORDING_SESSION] Fallback video recording session configured successfully")
@@ -8049,7 +9253,7 @@ class Camera2Engine(private val context: Context) {
                                                 // Extreme hardware compatibility fallback (e.g. LEGACY or budget devices)
                                                 try {
                                                     val previewTemplateBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                                                        addTarget(previewSurf)
+                                                        if (!eisPlusPreviewViaRelay) addTarget(previewSurf)
                                                         addTarget(activeLensRecorderSurface)
                                                         applyCommonSettings(this)
                                                     }
@@ -8106,7 +9310,11 @@ class Camera2Engine(private val context: Context) {
                             recorderSurface = activeLensRecorderSurface,
                             is10Bit = is10BitSession,
                             physicalCameraId = targetPhysId,
-                            callback = sessionCallback
+                            stabilizationSurface = if (eisPlusStarted) activeVideoEisPlusSurface else null,
+                                                     stabilizationPhysicalCameraId = eisPlusPhysicalId,
+
+                            previewViaRelay = eisPlusPreviewViaRelay,
+                            callback = checkNotNull(sessionCallback) { "Recording session callback was unavailable" }
                         )
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to create recording capture session", e)
@@ -8138,6 +9346,7 @@ class Camera2Engine(private val context: Context) {
         isStoppingRecording.set(false)
         if (sessionRestoredForStop.compareAndSet(false, true)) {
             backgroundHandler?.post {
+                stopActiveVideoEisPlus(closeCameraSession = true)
                 try {
                     val previewSurf = getActivePreviewSurface()
                     if (previewSurf != null && previewSurf.isValid && cameraDevice != null && captureSession != null) {
@@ -9634,6 +10843,7 @@ class Camera2Engine(private val context: Context) {
         pendingReconfigureSession = false
 
         closeCameraCaptureSession()
+        stopActiveVideoEisPlus()
         releaseUltraWideStandby()
         activeRecordingStreamConfig = null
         standbyConfiguredForRecording = false
