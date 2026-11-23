@@ -184,8 +184,6 @@ fun SettingsDrawer(
     onFloatingWindowBlurStrengthChange: (Float) -> Unit = {},
     onFloatingWindowAppearanceChange: (FloatingWindowAppearanceConfig) -> Unit = {},
     onResetFloatingWindowAppearance: () -> Unit = {},
-    preferredGalleryPackage: String? = null,
-    onOpenGalleryChooser: () -> Unit = {},
     viewfinderCornerRadiusDp: Int = 0,
     onViewfinderCornerRadiusChange: (Int) -> Unit = {},
     lensSwitchOverlapDurationSec: Float = 0.3f,
@@ -405,8 +403,6 @@ fun SettingsDrawer(
                             onThermalProtectionToggle = onThermalProtectionToggle,
                             isAiAutoFramingEnabled = isAiAutoFramingEnabled,
                             onAiAutoFramingToggle = onAiAutoFramingToggle,
-                            preferredGalleryPackage = preferredGalleryPackage,
-                            onOpenGalleryChooser = onOpenGalleryChooser,
                             onResetAll = onResetAllSettings
                         )
                         SettingsPage.ABOUT -> AboutSettingsPage(
@@ -2550,8 +2546,6 @@ private fun GeneralSettingsPage(
     onThermalProtectionToggle: (Boolean) -> Unit,
     isAiAutoFramingEnabled: Boolean,
     onAiAutoFramingToggle: (Boolean) -> Unit,
-    preferredGalleryPackage: String?,
-    onOpenGalleryChooser: () -> Unit,
     onResetAll: () -> Unit
 ) {
     LazyColumn(
@@ -2627,14 +2621,6 @@ private fun GeneralSettingsPage(
             )
         }
 
-        item {
-            SettingsActionCard(
-                title = "Preferred Gallery App",
-                description = preferredGalleryPackage ?: "System Default Gallery",
-                actionText = "CHANGE",
-                onClick = onOpenGalleryChooser
-            )
-        }
     }
 }
 
@@ -2985,7 +2971,6 @@ fun CameraSettingsScreen(
     val uiCustomizationState by viewModel.uiCustomizationState.collectAsStateWithLifecycle()
     val instantSwitchState by viewModel.instantSwitchState.collectAsStateWithLifecycle()
     val floatingWindowAppearance by viewModel.floatingWindowAppearance.collectAsStateWithLifecycle()
-    val preferredGalleryPackage by viewModel.preferredGalleryPackage.collectAsStateWithLifecycle()
 
     // With EIS removed, the only supported stabilization mode is hardware OIS or Off.
     val mainCameraStabilizationMode = remember(isOisEnabled) {
@@ -3106,8 +3091,6 @@ fun CameraSettingsScreen(
         onFloatingWindowBlurStrengthChange = { viewModel.setFloatingWindowBlurStrength(it) },
         onFloatingWindowAppearanceChange = { viewModel.setFloatingWindowAppearance(it) },
         onResetFloatingWindowAppearance = { viewModel.resetFloatingWindowAppearance() },
-        preferredGalleryPackage = preferredGalleryPackage,
-        onOpenGalleryChooser = { viewModel.setGallerySelectionDialogOpen(true) },
         onDismiss = onDismiss
     )
 }
