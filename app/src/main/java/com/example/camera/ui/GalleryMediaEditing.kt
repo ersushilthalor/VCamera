@@ -57,6 +57,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.FileProvider
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
@@ -200,11 +201,19 @@ internal object GalleryMediaActions {
     }
 
     fun shareMedia(context: Context, uri: Uri, isVideo: Boolean, title: String) {
+        val shareUri = if (uri.scheme == "file") {
+            val path = uri.path ?: throw IllegalArgumentException("Missing file path")
+            FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.gallery-files",
+                File(path)
+            )
+        } else uri
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = if (isVideo) "video/*" else "image/*"
-            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_STREAM, shareUri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            clipData = android.content.ClipData.newUri(context.contentResolver, title, uri)
+            clipData = android.content.ClipData.newUri(context.contentResolver, title, shareUri)
         }
         context.startActivity(Intent.createChooser(intent, "Share $title"))
     }
