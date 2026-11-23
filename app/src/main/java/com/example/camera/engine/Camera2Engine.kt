@@ -166,6 +166,27 @@ class Camera2Engine(private val context: Context) {
     }
 
     /**
+     * Update lens identity and its physical sensor orientation as one camera-selection operation.
+     * This prevents the preview from retaining the prior camera's 90/270-degree transform.
+     */
+    private fun setSelectedLensAndRefreshOrientation(lens: LensInfo?) {
+        _selectedLens.value = lens
+        if (lens == null) return
+
+        val isFrontFacing = lens.facing == CameraCharacteristics.LENS_FACING_FRONT
+        val fallbackOrientation = if (isFrontFacing) 270 else 90
+        val sensorOrientation = getSensorOrientationForLens(lens, fallbackOrientation)
+        _sensorOrientation.value = sensorOrientation
+        Log.i(
+            TAG,
+            "[PREVIEW_ORIENTATION] lens=" + lens.lensType + " camera=" + lens.cameraId +
+                " physical=" + lens.physicalCameraId + " facing=" + (if (isFrontFacing) "FRONT" else "BACK") +
+                " sensorOrientation=" + sensorOrientation
+        )
+    }
+
+
+    /**
      * Returns the ID whose StreamConfigurationMap describes the SurfaceTexture output
      * actually bound to the capture session. Physical outputs must use their physical ID;
      * logical fallback sessions must continue using the logical CameraDevice ID.
@@ -2519,7 +2540,7 @@ class Camera2Engine(private val context: Context) {
                 ?: primaryMainLens
                 ?: sortedLenses.firstOrNull()
 
-            _selectedLens.value = validSelection
+            setSelectedLensAndRefreshOrientation(validSelection)
             if (validSelection != null) {
                 inspectCapabilities(validSelection.cameraId)
                 val preserveExistingZoom = (currentSelected != null && validSelection.id == currentSelected.id && currentZoom > 0f)
@@ -2950,7 +2971,7 @@ class Camera2Engine(private val context: Context) {
     ) {
         if (configuredLens != null) {
             activeSessionLens = configuredLens
-            _selectedLens.value = configuredLens
+            setSelectedLensAndRefreshOrientation(configuredLens)
         }
         activeSwitchingTargetLens = null
         val nextLens = pendingLensWhileSwitching
@@ -3098,7 +3119,7 @@ class Camera2Engine(private val context: Context) {
                 _isUsingUltraWideSurface.value = lens.lensType == LensType.ULTRAWIDE
                 _displayedPreviewSource.value = targetSource
                 activeSessionLens = lens
-                _selectedLens.value = lens
+                setSelectedLensAndRefreshOrientation(lens)
                 Log.i(
                     TAG,
                     "[EIS_PLUS_LENS_SWITCH] Reconfiguring single physical preview stream to " +
@@ -3137,7 +3158,7 @@ class Camera2Engine(private val context: Context) {
                     _isUsingUltraWideSurface.value = useUw
                     _displayedPreviewSource.value = targetSource
                     activeSessionLens = lens
-                    _selectedLens.value = lens
+                    setSelectedLensAndRefreshOrientation(lens)
                     activeSessionPhysicalCameraId = if (useUw) lens.physicalCameraId else primaryMainLens?.physicalCameraId
                     Log.i(TAG, "[KEEP_ULTRAWIDE_READY] 0ms simultaneous logical-physical surface switch to ${lens.lensType} (recording=${_isRecordingVideo.value}, source=${_displayedPreviewSource.value})")
                     scheduleZoomPreviewUpdate(immediate = true, explicitZoom = effectiveTargetZoom)
@@ -3164,7 +3185,7 @@ class Camera2Engine(private val context: Context) {
                     _isUsingUltraWideSurface.value = useUw
                     _displayedPreviewSource.value = if (useUw) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
                     activeSessionLens = lens
-                    _selectedLens.value = lens
+                    setSelectedLensAndRefreshOrientation(lens)
                     activeSessionPhysicalCameraId = lens.physicalCameraId
                     completeLensSwitch(lens, isContinuousTransition = isContinuousTransition)
                     return
@@ -3192,7 +3213,7 @@ class Camera2Engine(private val context: Context) {
                 _isUsingUltraWideSurface.value = useUw
                 _displayedPreviewSource.value = if (useUw) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
                 activeSessionLens = lens
-                _selectedLens.value = lens
+                setSelectedLensAndRefreshOrientation(lens)
                 scheduleZoomPreviewUpdate(immediate = true, explicitZoom = effectiveTargetZoom)
                 completeLensSwitch(lens, isContinuousTransition = isContinuousTransition)
                 return
@@ -3269,7 +3290,7 @@ class Camera2Engine(private val context: Context) {
                 switchCameraDevice(targetLens, switchGen, isContinuousTransition = isContinuousTransition)
                 return
             }
-            _selectedLens.value = targetLens
+            setSelectedLensAndRefreshOrientation(targetLens)
             activeSessionLens = targetLens
             startCamera()
             return
@@ -3334,7 +3355,7 @@ class Camera2Engine(private val context: Context) {
                 _isUsingUltraWideSurface.value = useUw
                 _displayedPreviewSource.value = targetSource
                 activeSessionLens = targetLens
-                _selectedLens.value = targetLens
+                setSelectedLensAndRefreshOrientation(targetLens)
                 activeSessionPhysicalCameraId = targetLens.physicalCameraId
                 _isCameraReady.value = true
                 isUltraWideStreaming.set(true)
@@ -3381,6 +3402,19 @@ class Camera2Engine(private val context: Context) {
         switchGen: Int,
         isContinuousTransition: Boolean = false
     ) {
+        // A preview-only EIS+ relay is bound to the previous CameraDevice's YUV timestamps and
+        // EGL input. Reuse across front/back devices would keep the previous facing/orientation.
+        // Restart sequentially so createCameraCaptureSession() binds a new correctly calibrated relay.
+        if (previewVideoEisPlusRelay != null && !_isRecordingVideo.value) {
+            Log.i(
+                TAG,
+                "[PREVIEW_ORIENTATION] restarting EIS+ preview relay for targetCamera=" +
+                    targetLens.cameraId + " targetFacing=" + targetLens.facing
+            )
+            fallbackToSequentialSwitch(targetLens, switchGen, isContinuousTransition)
+            return
+        }
+
         val mgr = cameraManager ?: run {
             completeLensSwitch(targetLens, isContinuousTransition = isContinuousTransition)
             return
@@ -3412,7 +3446,7 @@ class Camera2Engine(private val context: Context) {
 
         // If no camera is currently open, simply open target camera
         if (activeCam == null) {
-            _selectedLens.value = targetLens
+            setSelectedLensAndRefreshOrientation(targetLens)
             activeSessionLens = targetLens
             startCamera()
             return
@@ -3489,7 +3523,7 @@ class Camera2Engine(private val context: Context) {
                                     _isUsingUltraWideSurface.value = useUw
                                     _displayedPreviewSource.value = if (useUw) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
                                     activeSessionLens = targetLens
-                                    _selectedLens.value = targetLens
+                                    setSelectedLensAndRefreshOrientation(targetLens)
                                     activeSessionPhysicalCameraId = targetLens.physicalCameraId
                                     _isCameraReady.value = true
 
@@ -3578,6 +3612,11 @@ class Camera2Engine(private val context: Context) {
     ) {
         synchronized(cameraLifecycleLock) {
             if (switchGen != lensSwitchGeneration.get()) return
+            // Release a relay tied to the old CameraDevice before closing its session.
+            // startCamera() will configure a fresh pipeline using the target sensor orientation.
+            if (previewVideoEisPlusRelay != null || activeVideoEisPlusPipeline != null) {
+                stopActiveVideoEisPlus(closeCameraSession = false)
+            }
             // Safely close previous session and camera without calling restartCamera()
             try { captureSession?.stopRepeating() } catch (_: Throwable) {}
             try { captureSession?.close() } catch (_: Throwable) {}
@@ -3586,7 +3625,7 @@ class Camera2Engine(private val context: Context) {
             cameraDevice = null
             activeSessionPhysicalCameraId = null
 
-            _selectedLens.value = targetLens
+            setSelectedLensAndRefreshOrientation(targetLens)
             activeSessionLens = targetLens
             val useUw = (targetLens.lensType == LensType.ULTRAWIDE)
             _isUsingUltraWideSurface.value = useUw
@@ -3951,7 +3990,7 @@ class Camera2Engine(private val context: Context) {
                     val fallbackLens = previousLens?.takeIf { it.cameraId != lens.cameraId }
                     if (fallbackLens != null && switchGen == lensSwitchGeneration.get()) {
                         Log.w(TAG, "[RECORDING_SWITCH] Recovering to previous lens ${fallbackLens.lensType} (${fallbackLens.cameraId})")
-                        _selectedLens.value = fallbackLens
+                        setSelectedLensAndRefreshOrientation(fallbackLens)
                         activeSessionLens = fallbackLens
                         try {
                             mgr.openCamera(fallbackLens.cameraId, object : CameraDevice.StateCallback() {
@@ -6901,7 +6940,7 @@ class Camera2Engine(private val context: Context) {
         } else {
             // Same logical/physical device with genuine continuous zoom support: smoothly update active lens and zoom continuously without tearing down camera session
             if (effectiveTargetLens.id == activeLens.id || cameraDevice == null || effectiveTargetLens.cameraId == cameraDevice?.id) {
-                _selectedLens.value = effectiveTargetLens
+                setSelectedLensAndRefreshOrientation(effectiveTargetLens)
                 activeSessionLens = effectiveTargetLens
             }
             if (effectiveTargetLens.facing == CameraCharacteristics.LENS_FACING_BACK) {
