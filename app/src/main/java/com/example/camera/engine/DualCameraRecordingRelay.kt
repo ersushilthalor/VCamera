@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import com.example.camera.model.LensInfo
@@ -75,7 +76,7 @@ class DualCameraRecordingRelay internal constructor(
     private val sensorOrientation: Int = 90,
     private val deviceRotation: Int = 0,
     private val isFront: Boolean = false,
-    private val previewTargetSurface: Surface? = null,
+    previewTargetSurface: Surface? = null,
     private val previewWidth: Int = 0,
     private val previewHeight: Int = 0,
     initialAdjustments: com.example.camera.model.VideoAdjustments? = null,
@@ -116,6 +117,15 @@ class DualCameraRecordingRelay internal constructor(
         val previewFrames = AtomicLong(0L)
         val skippedFrames = AtomicLong(0L)
     }
+
+    private data class CachedEisPlusPreviewFrame(
+        val frame: MgcEisYuvRenderer.Frame,
+        val presentationNs: Long,
+        val outputWidth: Int,
+        val outputHeight: Int,
+        val isFront: Boolean,
+        val sensorOrientation: Int,
+    )
 
     private data class HandoffBaseline(
         val rawOesFrames: Long,
@@ -277,6 +287,7 @@ class DualCameraRecordingRelay internal constructor(
     /** Tiny pbuffer keeps GLES resources compilable in the preview-only (no encoder) state. */
     private var eglScratchSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
     private var eglPreviewSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
+    @Volatile private var previewTargetSurface: Surface? = previewTargetSurface
     private var eglConfig: EGLConfig? = null
     private var eglSecondaryRecordSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
     private val secondaryRecordingEnabled = AtomicBoolean(false)
@@ -319,7 +330,8 @@ class DualCameraRecordingRelay internal constructor(
      * Until that session replaces the old preview session, Camera2 still owns this Surface as
      * its producer and EGL must not try to connect to the same BufferQueue.
      */
-    fun attachPreviewTargetSurface(onAttached: (Boolean) -> Unit) {
+    fun attachPreviewTargetSurface(targetSurface: Surface, onAttached: (Boolean) -> Unit) {
+        previewTargetSurface = targetSurface
         val handler = glHandler
         if (handler == null) {
             onAttached(false)
@@ -330,7 +342,7 @@ class DualCameraRecordingRelay internal constructor(
             try {
                 val display = eglDisplay
                 val config = eglConfig
-                val target = previewTargetSurface
+                val target = targetSurface
                 if (!isReleased.get() && display != null && display != EGL14.EGL_NO_DISPLAY &&
                     config != null && target != null && target.isValid
                 ) {
@@ -355,6 +367,31 @@ class DualCameraRecordingRelay internal constructor(
                     val previewCurrent = created != null && created != EGL14.EGL_NO_SURFACE &&
                         context != null && context != EGL14.EGL_NO_CONTEXT &&
                         EGL14.eglMakeCurrent(display, created, created, context)
+                    val cachedPreview = lastRenderedPreviewFrame
+                    val frozenFrameRendered = previewCurrent && cachedPreview != null &&
+                        renderEisPlusOutput(
+                            display = display,
+                            context = context,
+                            targetSurface = created,
+                            frame = cachedPreview.frame,
+                            presentationNs = cachedPreview.presentationNs,
+                            outputWidth = cachedPreview.outputWidth,
+                            outputHeight = cachedPreview.outputHeight,
+                            isFront = cachedPreview.isFront,
+                            sensorOrientation = cachedPreview.sensorOrientation,
+                        )
+                    if (frozenFrameRendered) {
+                        EisPlusDiagnosticLog.event(
+                            "HANDOFF", "PREVIEW_FROZEN_FRAME_RESTORED",
+                            "source=${activeSource} timestampNs=${cachedPreview?.frame?.timestampNs} targetChanged=true",
+                        )
+                    } else if (previewCurrent && cachedPreview != null) {
+                        EisPlusDiagnosticLog.event(
+                            "HANDOFF", "PREVIEW_FROZEN_FRAME_RESTORE_FAILED",
+                            "source=${activeSource} timestampNs=${cachedPreview.frame.timestampNs}",
+                            "WARN",
+                        )
+                    }
                     // Preview-only relays restore the pbuffer rather than relying on EGL_KHR_surfaceless_context.
                     val encoderRestored = context != null && context != EGL14.EGL_NO_CONTEXT &&
                         restoreSurface != null && restoreSurface != EGL14.EGL_NO_SURFACE &&
@@ -482,6 +519,14 @@ class DualCameraRecordingRelay internal constructor(
     @Volatile
     var isRelayReady: Boolean = false
         private set
+
+    /** True from a preview lens handoff until the first stabilized frame is presented. */
+    @Volatile
+    var isWaitingForFirstPreviewFrameAfterSwitch: Boolean = false
+        private set
+    @Volatile private var previewSwitchSource: PreviewStreamSource? = null
+    @Volatile private var previewSwitchStartedElapsedNs: Long = 0L
+    @Volatile var onFirstPreviewFrameAfterSwitch: ((Long) -> Unit)? = null
 
     private var isDelegatingToNativeGlRecorder: Boolean = false
 
@@ -664,6 +709,24 @@ class DualCameraRecordingRelay internal constructor(
         } else {
             cinemaRecorder?.setActiveStreamSource(source)
         }
+    }
+
+    /**
+     * Begin a preview-only source handoff without recreating EGL. The relay keeps its
+     * last completed preview texture and paints it into the next TextureView surface
+     * while the target lens' native MGC pipeline warms up.
+     */
+    fun beginPreviewSourceSwitch(source: PreviewStreamSource) {
+        val previousSource = activeSource
+        previewSwitchSource = source
+        previewSwitchStartedElapsedNs = SystemClock.elapsedRealtimeNanos()
+        isWaitingForFirstPreviewFrameAfterSwitch = true
+        pendingClockSyncOnSwitch = true
+        EisPlusDiagnosticLog.event(
+            "HANDOFF", "PREVIEW_LENS_SWITCH_BEGIN",
+            "from=${previousSource} to=${source} cachedFrame=${lastRenderedPreviewFrame != null}",
+        )
+        setActiveSource(source)
     }
 
     /** Attach/detach the EIS+ input for one camera without restarting encoder or GL relay. */
@@ -1570,7 +1633,35 @@ class DualCameraRecordingRelay internal constructor(
                     val previewRendered = renderEisPlusOutput(
                         display, context, previewSurface, frame, presentationNs, pw, ph
                     )
-                    if (previewRendered) sourceCounters.previewFrames.incrementAndGet()
+                    if (previewRendered) {
+                        sourceCounters.previewFrames.incrementAndGet()
+                        lastRenderedPreviewFrame = CachedEisPlusPreviewFrame(
+                            frame = frame,
+                            presentationNs = presentationNs,
+                            outputWidth = pw,
+                            outputHeight = ph,
+                            isFront = isFrontFacing,
+                            sensorOrientation = cameraSensorOrientation,
+                        )
+                        if (isWaitingForFirstPreviewFrameAfterSwitch && previewSwitchSource == source) {
+                            val elapsedMs = ((SystemClock.elapsedRealtimeNanos() - previewSwitchStartedElapsedNs)
+                                .coerceAtLeast(0L)) / 1_000_000L
+                            isWaitingForFirstPreviewFrameAfterSwitch = false
+                            previewSwitchSource = null
+                            EisPlusDiagnosticLog.event(
+                                "HANDOFF", "PREVIEW_FIRST_FRAME_RENDERED",
+                                "source=${source} msSinceSwitch=${elapsedMs} timestampNs=${frame.timestampNs} " +
+                                    "size=${frame.width}x${frame.height}",
+                            )
+                            runCatching { onFirstPreviewFrameAfterSwitch?.invoke(elapsedMs) }
+                                .onFailure { error ->
+                                    EisPlusDiagnosticLog.event(
+                                        "HANDOFF", "PREVIEW_FIRST_FRAME_CALLBACK_FAILED",
+                                        error.toString(), "WARN",
+                                    )
+                                }
+                        }
+                    }
                     if (!previewRendered && renderedOutputCount <= 3L) {
                         EisPlusDiagnosticLog.event(
                             "RELAY", "PREVIEW_RENDER_FAILED",
@@ -1588,7 +1679,9 @@ class DualCameraRecordingRelay internal constructor(
         frame: MgcEisYuvRenderer.Frame,
         presentationNs: Long,
         outputWidth: Int,
-        outputHeight: Int
+        outputHeight: Int,
+        isFront: Boolean = isFrontFacing,
+        sensorOrientation: Int = cameraSensorOrientation
     ): Boolean {
         if (targetSurface == EGL14.EGL_NO_SURFACE ||
             !EGL14.eglMakeCurrent(display, targetSurface, targetSurface, context)
@@ -1624,8 +1717,8 @@ class DualCameraRecordingRelay internal constructor(
         // convention is already normalized. Do not apply the OES SurfaceTexture
         // flip/rotation heuristic here; it adds a second flip to the MGC result.
         computeEisPlusPresentationMatrix(
-            isFront = isFrontFacing,
-            sensorOrientation = cameraSensorOrientation,
+            isFront = isFront,
+            sensorOrientation = sensorOrientation,
             deviceRotation = activeDeviceRotation,
             viewportWidth = presentationWidth,
             viewportHeight = presentationHeight,
@@ -2031,6 +2124,7 @@ class DualCameraRecordingRelay internal constructor(
                         runCatching { renderer.release() }
                     }
                     eisPlusRenderersBySource.clear()
+                    lastRenderedPreviewFrame = null
                     if (eisPlusProgramId != 0) {
                         GLES30.glDeleteProgram(eisPlusProgramId)
                         eisPlusProgramId = 0
