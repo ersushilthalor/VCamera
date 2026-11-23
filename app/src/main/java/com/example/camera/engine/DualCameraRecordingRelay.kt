@@ -44,6 +44,25 @@ import kotlin.math.min
  *   while [setActiveSource] atomically switches which Camera2 stream is written into the encoder
  *   with a strictly monotonic presentation timestamp timeline.
  */
+/**
+ * Builds a bounded, fair drain order for the independent EIS+ sensor queues.
+ * A source with a large backlog must not prevent another source from being serviced.
+ */
+internal fun buildEisPlusRoundRobinDrainPlan(
+    sources: List<PreviewStreamSource>,
+    pendingCounts: Map<PreviewStreamSource, Int>
+): List<PreviewStreamSource> {
+    val budgets = sources.associateWith { source -> (pendingCounts[source] ?: 0).coerceAtLeast(0) }
+    val maxFrames = budgets.values.maxOrNull() ?: 0
+    return buildList(maxFrames * sources.size) {
+        for (frameIndex in 0 until maxFrames) {
+            for (source in sources) {
+                if (frameIndex < (budgets[source] ?: 0)) add(source)
+            }
+        }
+    }
+}
+
 class DualCameraRecordingRelay internal constructor(
     private val encoderTargetSurface: Surface?,
     private val bufferWidth: Int,
@@ -1229,14 +1248,15 @@ class DualCameraRecordingRelay internal constructor(
         // Results arriving after this snapshot are picked up by notifyEisPlusFrameAvailable()'s
         // pending-queue recheck, so this pass remains bounded without dropping new results.
         val pipelineSnapshot = eisPlusPipelinesBySource.entries.toList()
+        val pipelineBySource = pipelineSnapshot.associate { it.key to it.value }
         val frameBudgets = pipelineSnapshot.associate { (source, pipeline) ->
             source to if (pipeline.isRunning) pipeline.pendingFrameCount else 0
         }
-        val maxFramesToDrain = frameBudgets.values.maxOrNull() ?: 0
-        for (frameIndex in 0 until maxFramesToDrain) {
-            for ((source, pipeline) in pipelineSnapshot) {
-                if (frameIndex >= (frameBudgets[source] ?: 0) || !pipeline.isRunning) continue
-                val pending = pipeline.dequeueFrame() ?: continue
+        val drainPlan = buildEisPlusRoundRobinDrainPlan(pipelineSnapshot.map { it.key }, frameBudgets)
+        for (source in drainPlan) {
+            val pipeline = pipelineBySource[source] ?: continue
+            if (!pipeline.isRunning) continue
+            val pending = pipeline.dequeueFrame() ?: continue
                 if (source != activeSource || isPaused.get() || !isStreamingActive.get()) {
                     if (source == activeSource) {
                         EisPlusDiagnosticLog.event(
