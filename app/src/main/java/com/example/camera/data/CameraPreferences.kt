@@ -264,6 +264,43 @@ class CameraPreferences(context: Context) {
         get() = prefs.getInt(KEY_ULTRA_FAST_SHUTTER_BURST_COUNT, 15).coerceIn(5, 30)
         set(value) = prefs.edit().putInt(KEY_ULTRA_FAST_SHUTTER_BURST_COUNT, value.coerceIn(5, 30)).apply()
 
+    // Oppo photo-mode controls: persisted per camera mode without affecting video settings.
+    var photoMegapixelMode: PhotoMegapixelMode
+        get() {
+            val name = prefs.getString("pref_photo_mp_mode", PhotoMegapixelMode.M12.name)
+                ?: PhotoMegapixelMode.M12.name
+            return runCatching { PhotoMegapixelMode.valueOf(name) }.getOrDefault(PhotoMegapixelMode.M12)
+        }
+        set(value) = prefs.edit().putString("pref_photo_mp_mode", value.name).apply()
+
+    var selectedPhotoFilter: PhotoFilter
+        get() {
+            val name = prefs.getString("pref_selected_photo_filter", PhotoFilter.ORIGINAL.name)
+                ?: PhotoFilter.ORIGINAL.name
+            return runCatching { PhotoFilter.valueOf(name) }.getOrDefault(PhotoFilter.ORIGINAL)
+        }
+        set(value) = prefs.edit().putString("pref_selected_photo_filter", value.name).apply()
+
+    fun setModePhotoMegapixelMode(mode: CameraMode, mpMode: PhotoMegapixelMode) {
+        photoMegapixelMode = mpMode
+        prefs.edit().putString(modeKey(mode, "photo_mp"), mpMode.name).apply()
+    }
+
+    fun getModePhotoMegapixelMode(mode: CameraMode): PhotoMegapixelMode {
+        val name = prefs.getString(modeKey(mode, "photo_mp"), null) ?: return photoMegapixelMode
+        return runCatching { PhotoMegapixelMode.valueOf(name) }.getOrDefault(photoMegapixelMode)
+    }
+
+    fun setModePhotoFilter(mode: CameraMode, filter: PhotoFilter) {
+        selectedPhotoFilter = filter
+        prefs.edit().putString(modeKey(mode, "filter"), filter.name).apply()
+    }
+
+    fun getModePhotoFilter(mode: CameraMode): PhotoFilter {
+        val name = prefs.getString(modeKey(mode, "filter"), null) ?: return selectedPhotoFilter
+        return runCatching { PhotoFilter.valueOf(name) }.getOrDefault(selectedPhotoFilter)
+    }
+
     var cameraMode: CameraMode
         get() {
             val name = prefs.getString(KEY_CAMERA_MODE, CameraMode.PHOTO.name) ?: CameraMode.PHOTO.name
@@ -1424,4 +1461,84 @@ class CameraPreferences(context: Context) {
             .putFloat(prefix + "tex_micro_contrast", va.textureMicroContrast)
         editor.apply()
     }
+
+    // --- Oppo computational photo pipeline settings ---
+    var isCustomPipelineEnabled: Boolean
+        get() = prefs.getBoolean("pref_custom_pipeline_enabled", false)
+        set(value) = prefs.edit().putBoolean("pref_custom_pipeline_enabled", value).apply()
+
+    var activePipelinePresetId: String
+        get() = prefs.getString("pref_active_pipeline_preset_id", com.example.camera.pipeline.model.PipelinePreset.HASSELBLAD.id)
+            ?: com.example.camera.pipeline.model.PipelinePreset.HASSELBLAD.id
+        set(value) = prefs.edit().putString("pref_active_pipeline_preset_id", value).apply()
+
+    private val pipelineMoshi by lazy {
+        com.squareup.moshi.Moshi.Builder()
+            .add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+            .build()
+    }
+
+    fun getActivePipelinePreset(): com.example.camera.pipeline.model.PipelinePreset {
+        val id = activePipelinePresetId
+        return getCustomPresets().firstOrNull { it.id == id }
+            ?: com.example.camera.pipeline.model.PipelinePreset.BUILT_IN_PRESETS.firstOrNull { it.id == id }
+            ?: com.example.camera.pipeline.model.PipelinePreset.HASSELBLAD
+    }
+
+    fun saveActivePipelinePreset(preset: com.example.camera.pipeline.model.PipelinePreset) {
+        activePipelinePresetId = preset.id
+        savePipelineParams(preset.id, preset.params)
+    }
+
+    fun getPipelineParams(presetId: String): com.example.camera.pipeline.model.CustomPipelineParams {
+        val json = prefs.getString("pref_pipeline_params_$presetId", null)
+        if (json != null) runCatching {
+            pipelineMoshi.adapter(com.example.camera.pipeline.model.CustomPipelineParams::class.java)
+                .fromJson(json)?.let { return it }
+        }
+        return com.example.camera.pipeline.model.PipelinePreset.BUILT_IN_PRESETS.firstOrNull { it.id == presetId }
+            ?.params ?: com.example.camera.pipeline.model.PipelinePreset.HASSELBLAD.params
+    }
+
+    fun savePipelineParams(presetId: String, params: com.example.camera.pipeline.model.CustomPipelineParams) {
+        runCatching {
+            val json = pipelineMoshi.adapter(com.example.camera.pipeline.model.CustomPipelineParams::class.java).toJson(params)
+            prefs.edit().putString("pref_pipeline_params_$presetId", json).apply()
+        }
+    }
+
+    fun getCustomPresets(): List<com.example.camera.pipeline.model.PipelinePreset> {
+        val json = prefs.getString("pref_custom_pipeline_presets_list", null) ?: return emptyList()
+        return runCatching {
+            val type = com.squareup.moshi.Types.newParameterizedType(
+                List::class.java, com.example.camera.pipeline.model.PipelinePreset::class.java
+            )
+            pipelineMoshi.adapter<List<com.example.camera.pipeline.model.PipelinePreset>>(type).fromJson(json).orEmpty()
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveCustomPreset(preset: com.example.camera.pipeline.model.PipelinePreset) {
+        val values = getCustomPresets().toMutableList()
+        val index = values.indexOfFirst { it.id == preset.id }
+        if (index >= 0) values[index] = preset else values.add(preset)
+        runCatching {
+            val type = com.squareup.moshi.Types.newParameterizedType(
+                List::class.java, com.example.camera.pipeline.model.PipelinePreset::class.java
+            )
+            val json = pipelineMoshi.adapter<List<com.example.camera.pipeline.model.PipelinePreset>>(type).toJson(values)
+            prefs.edit().putString("pref_custom_pipeline_presets_list", json).apply()
+        }
+    }
+
+    fun deleteCustomPreset(presetId: String) {
+        val values = getCustomPresets().filterNot { it.id == presetId }
+        runCatching {
+            val type = com.squareup.moshi.Types.newParameterizedType(
+                List::class.java, com.example.camera.pipeline.model.PipelinePreset::class.java
+            )
+            val json = pipelineMoshi.adapter<List<com.example.camera.pipeline.model.PipelinePreset>>(type).toJson(values)
+            prefs.edit().putString("pref_custom_pipeline_presets_list", json).apply()
+        }
+    }
+
 }
