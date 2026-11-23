@@ -341,37 +341,45 @@ class DualCameraRecordingRelay internal constructor(
             try {
                 val display = eglDisplay
                 val config = eglConfig
-                val target = targetSurface
-                if (!isReleased.get() && display != null && display != EGL14.EGL_NO_DISPLAY &&
-                    config != null && target != null && target.isValid
+                val context = eglContext
+                val existing = eglPreviewSurface
+                val existingIsValid = existing != null && existing != EGL14.EGL_NO_SURFACE
+                if (isReleased.get() || display == null || display == EGL14.EGL_NO_DISPLAY ||
+                    config == null || !targetSurface.isValid
                 ) {
-                    // Keep the previous EGL window alive until the replacement is fully
-                    // created, current, and painted with the cached frame. If attaching the
-                    // new TextureView fails, the last stable preview remains on the old target.
-                    val existing = eglPreviewSurface
+                    EisPlusDiagnosticLog.event(
+                        "HANDOFF", "PREVIEW_SURFACE_ATTACH_FAILED",
+                        "reason=invalid_relay_or_target_surface targetValid=${targetSurface.isValid}",
+                        "ERROR",
+                    )
+                } else if (previewTargetSurface === targetSurface && existingIsValid) {
+                    // Camera2 has reconfigured its YUV output, not the TextureView BufferQueue.
+                    // Reusing the same EGL window avoids disconnect/reconnect flashes.
+                    attached = true
+                    EisPlusDiagnosticLog.event(
+                        "HANDOFF", "PREVIEW_SURFACE_REUSED",
+                        "source=$activeSource surfaceUnchanged=true",
+                    )
+                } else {
+                    // Keep the previous EGL window alive until its replacement is connected
+                    // and the cached stabilized frame has been painted into the new target.
                     val created = EGL14.eglCreateWindowSurface(
                         display,
                         config,
-                        target,
+                        targetSurface,
                         intArrayOf(EGL14.EGL_NONE),
                         0,
                     )
-                    val context = eglContext
-                    val encoder = eglSurface
-                    val restoreSurface = if (encoder != null && encoder != EGL14.EGL_NO_SURFACE) {
-                        encoder
-                    } else {
-                        eglScratchSurface
-                    }
-                    val previewCurrent = created != null && created != EGL14.EGL_NO_SURFACE &&
-                        context != null && context != EGL14.EGL_NO_CONTEXT &&
-                        EGL14.eglMakeCurrent(display, created, created, context)
+                    val validContext = context?.takeIf { it != EGL14.EGL_NO_CONTEXT }
+                    val validCreated = created?.takeIf { it != EGL14.EGL_NO_SURFACE }
+                    val previewCurrent = validCreated != null && validContext != null &&
+                        EGL14.eglMakeCurrent(display, validCreated, validCreated, validContext)
                     val cachedPreview = lastRenderedPreviewFrame
                     val frozenFrameRendered = previewCurrent && cachedPreview != null &&
                         renderEisPlusOutput(
                             display = display,
-                            context = context,
-                            targetSurface = created,
+                            context = validContext!!,
+                            targetSurface = validCreated!!,
                             frame = cachedPreview.frame,
                             presentationNs = cachedPreview.presentationNs,
                             outputWidth = cachedPreview.outputWidth,
@@ -382,45 +390,51 @@ class DualCameraRecordingRelay internal constructor(
                     if (frozenFrameRendered) {
                         EisPlusDiagnosticLog.event(
                             "HANDOFF", "PREVIEW_FROZEN_FRAME_RESTORED",
-                            "source=${activeSource} timestampNs=${cachedPreview?.frame?.timestampNs} targetChanged=true",
+                            "source=$activeSource timestampNs=${cachedPreview?.frame?.timestampNs} targetChanged=true",
                         )
                     } else if (previewCurrent && cachedPreview != null) {
                         EisPlusDiagnosticLog.event(
                             "HANDOFF", "PREVIEW_FROZEN_FRAME_RESTORE_FAILED",
-                            "source=${activeSource} timestampNs=${cachedPreview.frame.timestampNs}",
+                            "source=$activeSource timestampNs=${cachedPreview.frame.timestampNs}",
                             "WARN",
                         )
                     }
-                    // Preview-only relays restore the pbuffer rather than relying on EGL_KHR_surfaceless_context.
-                    val encoderRestored = context != null && context != EGL14.EGL_NO_CONTEXT &&
-                        restoreSurface != null && restoreSurface != EGL14.EGL_NO_SURFACE &&
-                        EGL14.eglMakeCurrent(display, restoreSurface, restoreSurface, context)
-                    if (previewCurrent && encoderRestored) {
-                        eglPreviewSurface = created
+
+                    // Preview-only relays restore the pbuffer rather than requiring a
+                    // surfaceless EGL context. Encoder relays restore their encoder surface.
+                    val restoreSurface = eglSurface?.takeIf { it != EGL14.EGL_NO_SURFACE }
+                        ?: eglScratchSurface?.takeIf { it != EGL14.EGL_NO_SURFACE }
+                    val encoderRestored = validContext != null && restoreSurface != null &&
+                        EGL14.eglMakeCurrent(display, restoreSurface, restoreSurface, validContext)
+                    if (previewCurrent && encoderRestored && validCreated != null) {
+                        eglPreviewSurface = validCreated
                         previewTargetSurface = targetSurface
-                        if (existing != null && existing != EGL14.EGL_NO_SURFACE && existing != created) {
+                        if (existingIsValid && existing != validCreated) {
                             runCatching { EGL14.eglDestroySurface(display, existing) }
                         }
                         attached = true
-                        Log.i(TAG, "Attached and validated EGL preview surface after Camera2 handoff")
+                        Log.i(TAG, "Attached EGL preview surface and restored cached EIS+ frame")
                     } else {
-                        if (created != null && created != EGL14.EGL_NO_SURFACE) {
-                            runCatching { EGL14.eglDestroySurface(display, created) }
+                        if (validCreated != null) {
+                            runCatching { EGL14.eglDestroySurface(display, validCreated) }
                         }
+                        // Do not drop the previous EGL output on a failed reattach.
                         eglPreviewSurface = existing ?: EGL14.EGL_NO_SURFACE
-                        Log.w(
-                            TAG,
-                            "EGL preview attach/current failed after Camera2 handoff: " +
-                                "previewCurrent=$previewCurrent encoderRestored=$encoderRestored " +
+                        EisPlusDiagnosticLog.event(
+                            "HANDOFF", "PREVIEW_SURFACE_ATTACH_FAILED",
+                            "previewCurrent=$previewCurrent encoderRestored=$encoderRestored " +
+                                "cachedFrameAvailable=${cachedPreview != null} " +
                                 "error=0x${Integer.toHexString(EGL14.eglGetError())}",
+                            "ERROR",
                         )
                     }
-                } else {
-                    Log.w(TAG, "EGL preview attach skipped: relay/context/target is unavailable")
                 }
             } catch (t: Throwable) {
+                EisPlusDiagnosticLog.event(
+                    "HANDOFF", "PREVIEW_SURFACE_ATTACH_EXCEPTION",
+                    "${t.javaClass.simpleName}: ${t.message}", "ERROR",
+                )
                 Log.w(TAG, "EGL preview attach failed: ${t.message}", t)
-                eglPreviewSurface = EGL14.EGL_NO_SURFACE
             }
             try {
                 onAttached(attached)
