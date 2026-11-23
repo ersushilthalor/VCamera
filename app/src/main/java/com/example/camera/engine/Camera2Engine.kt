@@ -3660,7 +3660,10 @@ class Camera2Engine(private val context: Context) {
                     (!requiresMgcVideo && (recSurf == null || !recSurf.isValid))
                 ) {
                     if (requiresMgcVideo) {
-                        _videoEisPlusStatus.value = "Lens switch blocked: target sensor has no active EIS+ YUV stream"
+                        _videoEisPlusStatus.value = "Lens switch failed: target sensor has no EIS+ YUV stream; recording stopped"
+                        completeLensSwitch(targetLens)
+                        stopVideoRecording()
+                        return@synchronized
                     }
                     completeLensSwitch(targetLens)
                     return@synchronized
@@ -3735,42 +3738,49 @@ class Camera2Engine(private val context: Context) {
 
                             override fun onConfigureFailed(session: CameraCaptureSession) {
                                 if (configGen != sessionConfigGeneration.get() || cameraDevice != camera) return
-                                Log.w(TAG, "Physical recording session rejected for phys=$targetPhysicalId, falling back to logical recording session")
-                                activeSessionPhysicalCameraId = null
-                                val fallbackGen = sessionConfigGeneration.incrementAndGet()
-                                createRecordingCaptureSession(
-                                    camera = camera,
-                                    previewSurface = previewSurf,
-                                    recorderSurface = recSurf,
-                                    is10Bit = false,
-                                    physicalCameraId = null,
-                                    callback = object : CameraCaptureSession.StateCallback() {
-                                        override fun onConfigured(fallbackSession: CameraCaptureSession) {
-                                            if (fallbackGen != sessionConfigGeneration.get() || cameraDevice != camera) {
-                                                try { fallbackSession.close() } catch (ignored: Throwable) {}
-                                                return
-                                            }
-                                            captureSession = fallbackSession
-                                            _isCameraReady.value = true
-                                            try {
-                                                synchronized(previewRequestLock) {
-                                                    previewRequestBuilder?.let { builder ->
-                                                        applyCommonSettings(builder)
-                                                        fallbackSession.setRepeatingRequest(builder.build(), captureCallback, backgroundHandler)
-                                                    }
+                                if (requiresMgcVideo) {
+                                    Log.e(TAG, "EIS+ physical YUV recording session rejected; refusing logical/raw fallback")
+                                    _videoEisPlusStatus.value = "Lens switch failed: EIS+ physical session rejected"
+                                    completeLensSwitch(targetLens)
+                                    stopVideoRecording()
+                                } else {
+                                    Log.w(TAG, "Physical recording session rejected for phys=$targetPhysicalId, falling back to logical recording session")
+                                    activeSessionPhysicalCameraId = null
+                                    val fallbackGen = sessionConfigGeneration.incrementAndGet()
+                                    createRecordingCaptureSession(
+                                        camera = camera,
+                                        previewSurface = previewSurf,
+                                        recorderSurface = recSurf,
+                                        is10Bit = false,
+                                        physicalCameraId = null,
+                                        callback = object : CameraCaptureSession.StateCallback() {
+                                            override fun onConfigured(fallbackSession: CameraCaptureSession) {
+                                                if (fallbackGen != sessionConfigGeneration.get() || cameraDevice != camera) {
+                                                    try { fallbackSession.close() } catch (ignored: Throwable) {}
+                                                    return
                                                 }
-                                            } catch (e: Exception) {
-                                                Log.e(TAG, "Failed repeating request on fallback logical recording session", e)
+                                                captureSession = fallbackSession
+                                                _isCameraReady.value = true
+                                                try {
+                                                    synchronized(previewRequestLock) {
+                                                        previewRequestBuilder?.let { builder ->
+                                                            applyCommonSettings(builder)
+                                                            fallbackSession.setRepeatingRequest(builder.build(), captureCallback, backgroundHandler)
+                                                        }
+                                                    }
+                                                } catch (e: Exception) {
+                                                    Log.e(TAG, "Failed repeating request on fallback logical recording session", e)
+                                                }
+                                                completeLensSwitch(targetLens)
                                             }
-                                            completeLensSwitch(targetLens)
-                                        }
 
-                                        override fun onConfigureFailed(fallbackSession: CameraCaptureSession) {
-                                            Log.e(TAG, "Fallback logical recording session also failed")
-                                            completeLensSwitch(targetLens)
+                                            override fun onConfigureFailed(fallbackSession: CameraCaptureSession) {
+                                                Log.e(TAG, "Fallback logical recording session also failed")
+                                                completeLensSwitch(targetLens)
+                                            }
                                         }
-                                    }
-                                )
+                                    )
+                                }
                             }
                         }
                     )
@@ -4120,6 +4130,7 @@ class Camera2Engine(private val context: Context) {
                                 val isTargetFront = (lens.facing == CameraCharacteristics.LENS_FACING_FRONT)
                                 val targetSensorOrient = getSensorOrientationForLens(lens, if (isTargetFront) 270 else 90)
                                 _sensorOrientation.value = targetSensorOrient
+                                var targetVideoEisPlusBinding: VideoEisPlusBinding? = null
                                 if (relay != null) {
                                     relay.updateCameraFacing(isTargetFront, targetSensorOrient)
                                     val targetSource = if (lens.lensType == LensType.ULTRAWIDE) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
@@ -4132,16 +4143,41 @@ class Camera2Engine(private val context: Context) {
                                         width = effectiveRes.width,
                                         height = effectiveRes.height
                                     )
+                                    if (currentMode == CameraMode.VIDEO) {
+                                        val existing = synchronized(videoEisPlusBindingLock) {
+                                            videoEisPlusBindingsByCameraId[
+                                                videoEisPlusBindingKey(camera.id, targetSource)
+                                            ]?.takeIf { it.pipeline.isRunning }
+                                        }
+                                        targetVideoEisPlusBinding = existing ?: startStandbyVideoEisPlusPipeline(
+                                            camera = camera,
+                                            standbyLens = lens,
+                                            recordingSize = Size(
+                                                max(effectiveRes.width, effectiveRes.height),
+                                                min(effectiveRes.width, effectiveRes.height)
+                                            ),
+                                            physicalCameraId = targetPhysId,
+                                            relay = relay
+                                        )
+                                        if (targetVideoEisPlusBinding != null && existing == null) {
+                                            registerVideoEisPlusBinding(targetVideoEisPlusBinding!!, relay)
+                                        }
+                                        activateVideoEisPlusForSource(targetSource, camera.id)
+                                    }
                                 }
                                 if (isSoftwareCinemaRecording) {
                                     cinemaSoftwareRecorder.updateCameraFacing(isTargetFront, targetSensorOrient)
                                 }
                                 val recSurf = relay?.getRecorderSurfaceForLens(lens) ?: activeRecordingSurface
-                                if (recSurf != null && recSurf.isValid) {
+                                val requiresMgcVideo = currentMode == CameraMode.VIDEO && relay != null
+                                val eisSurface = activeVideoEisPlusSurface?.takeIf {
+                                    activeVideoEisPlusPipeline?.isRunning == true && it.isValid
+                                }
+                                if (!requiresMgcVideo && recSurf != null && recSurf.isValid) {
                                     activeRecordingSurface = recSurf
                                 }
                                 val isRecording = _isRecordingVideo.value
-                                if (isRecording && recSurf != null && recSurf.isValid) {
+                                if (isRecording && (requiresMgcVideo && eisSurface != null || !requiresMgcVideo && recSurf != null && recSurf.isValid)) {
                                     try {
                                         val configGen = sessionConfigGeneration.incrementAndGet()
                                         val recConfig = activeRecordingStreamConfig
@@ -4151,8 +4187,12 @@ class Camera2Engine(private val context: Context) {
                                         val previewSurf = lensPreviewSurface
                                         val template = CameraDevice.TEMPLATE_RECORD
                                         val recordBuilder = camera.createCaptureRequest(template).apply {
-                                            addTarget(previewSurf)
-                                            addTarget(recSurf)
+                                            if (requiresMgcVideo) {
+                                                addTarget(eisSurface!!)
+                                            } else {
+                                                addTarget(previewSurf)
+                                                addTarget(recSurf!!)
+                                            }
                                             applyCommonSettings(this)
                                             set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
                                             val targetChars = getCharacteristics(lens.cameraId)
@@ -4199,16 +4239,24 @@ class Camera2Engine(private val context: Context) {
                                                 Log.e(TAG, "Failed to configure recording session after lens switch")
                                                 activeSessionPhysicalCameraId = null
                                                 completeLensSwitch(lens)
-                                                createCameraCaptureSession()
+                                                if (requiresMgcVideo) {
+                                                    _videoEisPlusStatus.value = "Lens switch failed: EIS+ session configuration rejected"
+                                                    stopVideoRecording()
+                                                } else {
+                                                    createCameraCaptureSession()
+                                                }
                                             }
                                         }
 
                                         createRecordingCaptureSession(
                                             camera = camera,
                                             previewSurface = previewSurf,
-                                            recorderSurface = recSurf,
+                                            recorderSurface = if (requiresMgcVideo) null else recSurf,
                                             is10Bit = false,
                                             physicalCameraId = targetPhysId,
+                                            stabilizationSurface = if (requiresMgcVideo) eisSurface else null,
+                                            stabilizationPhysicalCameraId = if (requiresMgcVideo) activeVideoEisPlusPhysicalCameraId else targetPhysId,
+                                            previewViaRelay = requiresMgcVideo,
                                             callback = sessionCallback
                                         )
                                     } catch (e: Exception) {
