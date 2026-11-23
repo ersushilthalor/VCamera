@@ -1560,7 +1560,7 @@ class Camera2Engine(private val context: Context) {
                         isPreparingUltraWideStandby.set(false)
                         return
                     }
-                    if (previewEisPlusBinding != null && !retriedWithoutPreviewEisPlus)
+                    if (previewEisPlusBinding != null && !retriedWithoutPreviewEisPlus) {
                         retriedWithoutPreviewEisPlus = true
                         Log.w(TAG, "[KEEP_ULTRAWIDE_READY] Standby preview session rejected EIS+ output; retrying without EIS+")
                         previewEisPlusRelay?.let { unregisterVideoEisPlusBinding(previewEisPlusBinding, it) }
