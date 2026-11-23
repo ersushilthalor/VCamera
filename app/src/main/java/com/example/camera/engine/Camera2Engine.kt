@@ -5445,6 +5445,10 @@ class Camera2Engine(private val context: Context) {
                                     onSessionConfigurationFinished()
                                     if (configGen != sessionConfigGeneration.get() || cameraDevice != camera) {
                                         try { session.close() } catch (ignored: Throwable) {}
+                                        companionEisPlusBinding?.let { binding ->
+                                            previewRelay?.let { unregisterVideoEisPlusBinding(binding, it) }
+                                        }
+                                        standbyPreviewEisPlusConfigured = false
                                         return
                                     }
                                     captureSession = session
@@ -5514,7 +5518,15 @@ class Camera2Engine(private val context: Context) {
                                 }
                             }
                         )
-                        camera.createCaptureSession(sessionConfig)
+                        try {
+                            camera.createCaptureSession(sessionConfig)
+                        } catch (t: Throwable) {
+                            companionEisPlusBinding?.let { binding ->
+                                previewRelay?.let { unregisterVideoEisPlusBinding(binding, it) }
+                            }
+                            standbyPreviewEisPlusConfigured = false
+                            throw t
+                        }
                         return
                     }
                 }
