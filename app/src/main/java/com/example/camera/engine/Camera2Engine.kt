@@ -5712,6 +5712,17 @@ class Camera2Engine(private val context: Context) {
                 "Unavailable: preview Surface attachment failed; EIS+ relay retained"
             }
             _isGpuRelayPreviewActive.value = previousSurfaceStillVisible
+            // If the TextureView was recreated and its new EGL window cannot attach,
+            // restore the previous lens pipeline and retry the session on this target.
+            if (!previousSurfaceStillVisible &&
+                rollbackFailedPreviewEisPlusSwitch(
+                    relay,
+                    "preview target Surface reconnect failed",
+                )
+            ) {
+                createCameraCaptureSession(forceLogicalStream = false)
+                return false
+            }
             // Do not tear down the relay or switch to raw Camera2. If the previous EGL
             // surface remains valid it continues showing the cached stabilized frame.
             return previousSurfaceStillVisible
@@ -5767,7 +5778,10 @@ class Camera2Engine(private val context: Context) {
         ) {
             isConfiguringSession = false
             _isCameraReady.value = false
-            _isGpuRelayPreviewActive.value = false
+            // A failed new-sensor start may still leave the existing EGL relay drawing
+            // its cached stabilized frame. Keep that GPU surface active; never expose raw OES.
+            _isGpuRelayPreviewActive.value =
+                previewVideoEisPlusRelay?.hasPreviewSurface() == true
             if (!_videoEisPlusStatus.value.contains("unavailable", ignoreCase = true)) {
                 _videoEisPlusStatus.value = "EIS+ pipeline unavailable; direct preview fallback blocked"
             }
