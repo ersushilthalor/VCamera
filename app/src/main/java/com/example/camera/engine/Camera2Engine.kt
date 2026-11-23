@@ -3187,8 +3187,9 @@ class Camera2Engine(private val context: Context) {
                 }
                 activeLogicalMultiCamUltraWideConfigured = false
                 activeLogicalMultiCamSpecialPhotoConfigured = false
-                _isUsingUltraWideSurface.value = lens.lensType == LensType.ULTRAWIDE
-                _displayedPreviewSource.value = targetSource
+                // Keep the currently visible TextureView selected during the handoff.
+                // The relay paints its cached MGC frame into the target TextureView first;
+                // the first stabilized target frame callback below performs the UI switch.
                 activeSessionLens = lens
                 _selectedLens.value = lens
                 Log.i(
@@ -5314,6 +5315,9 @@ class Camera2Engine(private val context: Context) {
         }
 
         currentRelay?.onFirstPreviewFrameAfterSwitch = {
+            val renderedSource = currentRelay.activeSource
+            _isUsingUltraWideSurface.value = renderedSource == PreviewStreamSource.ULTRAWIDE
+            _displayedPreviewSource.value = renderedSource
             _isEisPlusPreviewWaitingForFirstFrame.value = false
             pendingEisPlusPreviewRollbackLens = null
             pendingEisPlusPreviewRollbackZoom = null
@@ -5440,6 +5444,9 @@ class Camera2Engine(private val context: Context) {
                     break
                 }
                 activeRelay.onFirstPreviewFrameAfterSwitch = {
+                    val renderedSource = activeRelay.activeSource
+                    _isUsingUltraWideSurface.value = renderedSource == PreviewStreamSource.ULTRAWIDE
+                    _displayedPreviewSource.value = renderedSource
                     _isEisPlusPreviewWaitingForFirstFrame.value = false
                     pendingEisPlusPreviewRollbackLens = null
                     pendingEisPlusPreviewRollbackZoom = null
