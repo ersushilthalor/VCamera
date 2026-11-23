@@ -1192,11 +1192,28 @@ class Camera2Engine(private val context: Context) {
                     relay = recordingRelay
                 )
                 val standbyEisPlusSurface = standbyEisPlusBinding?.pipeline?.surface?.takeIf { it.isValid }
+                val eisPlusOnlyStandbyVideo = currentMode == CameraMode.VIDEO && recordingRelay != null
+                if (eisPlusOnlyStandbyVideo && standbyEisPlusSurface == null) {
+                    standbyRecordingSessionFailed = true
+                    isPreparingUltraWideStandby.set(false)
+                    _ultraWideStreamStatus.value = BackgroundCameraStatus.OFF
+                    EisPlusDiagnosticLog.event(
+                        "CAMERA2",
+                        "STANDBY_RECORDING_EIS_PLUS_UNAVAILABLE",
+                        "camera=${camera.id} source=$standbyLens no matched YUV/MGC output; raw standby blocked",
+                        "ERROR",
+                    )
+                    return
+                }
 
                 val recordBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                    addTarget(standbyPreviewSurf)
-                    addTarget(standbyRecorderSurf)
-                    standbyEisPlusSurface?.let(::addTarget)
+                    if (eisPlusOnlyStandbyVideo) {
+                        addTarget(standbyEisPlusSurface!!)
+                    } else {
+                        addTarget(standbyPreviewSurf)
+                        addTarget(standbyRecorderSurf)
+                        standbyEisPlusSurface?.let(::addTarget)
+                    }
                     applySynchronizedStandbySettings(this, standbyLens)
                     if (standbyEisPlusBinding != null) {
                         applyHardwareEisRequest(this)
@@ -1312,6 +1329,20 @@ class Camera2Engine(private val context: Context) {
                             isPreparingUltraWideStandby.set(false)
                             return
                         }
+                        if (eisPlusOnlyStandbyVideo) {
+                            standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, recordingRelay) }
+                            standbyConfiguredForRecording = false
+                            standbyRecordingSessionFailed = true
+                            isPreparingUltraWideStandby.set(false)
+                            if (ultraWideStandbyCaptureSession == session) ultraWideStandbyCaptureSession = null
+                            EisPlusDiagnosticLog.event(
+                                "CAMERA2",
+                                "STANDBY_RECORDING_EIS_PLUS_CONFIG_FAILED",
+                                "camera=${camera.id} source=$standbyLens reason=HAL_rejected_YUV_MGC_output",
+                                "ERROR",
+                            )
+                            return
+                        }
                         if (standbyEisPlusBinding != null && !retriedWithoutEisPlus) {
                             retriedWithoutEisPlus = true
                             Log.w(TAG, "[KEEP_ULTRAWIDE_READY] Standby session rejected secondary EIS+ output; retrying without it")
@@ -1355,12 +1386,13 @@ class Camera2Engine(private val context: Context) {
                 createRecordingCaptureSession(
                     camera = camera,
                     previewSurface = standbyPreviewSurf,
-                    recorderSurface = standbyRecorderSurf,
+                    recorderSurface = if (eisPlusOnlyStandbyVideo) null else standbyRecorderSurf,
                     is10Bit = is10BitStandby,
                     physicalCameraId = targetPhysId,
                     updateActivePhysicalId = false,
                     stabilizationSurface = standbyEisPlusSurface,
                     stabilizationPhysicalCameraId = targetPhysId,
+                    previewViaRelay = eisPlusOnlyStandbyVideo,
                     callback = recordingStandbyCallback
                 )
                 return
@@ -1401,10 +1433,22 @@ class Camera2Engine(private val context: Context) {
                 )
             }
             val previewEisPlusSurface = previewEisPlusBinding?.pipeline?.surface?.takeIf { it.isValid }
+            val eisPlusOnlyStandbyPreview = currentMode == CameraMode.VIDEO && !isRecordingActive
+            if (eisPlusOnlyStandbyPreview && previewEisPlusSurface == null) {
+                isPreparingUltraWideStandby.set(false)
+                _ultraWideStreamStatus.value = BackgroundCameraStatus.OFF
+                EisPlusDiagnosticLog.event(
+                    "CAMERA2",
+                    "STANDBY_PREVIEW_EIS_PLUS_UNAVAILABLE",
+                    "camera=${camera.id} source=$standbyLens no matched YUV/MGC output; raw standby blocked",
+                    "WARN",
+                )
+                return
+            }
 
             val template = if (isVideo) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW
             val builder = camera.createCaptureRequest(template).apply {
-                addTarget(standbyPreviewSurf)
+                if (!eisPlusOnlyStandbyPreview) addTarget(standbyPreviewSurf)
                 previewEisPlusSurface?.let(::addTarget)
                 applySynchronizedStandbySettings(this, standbyLens)
                 if (previewEisPlusBinding != null) {
@@ -1429,7 +1473,8 @@ class Camera2Engine(private val context: Context) {
             }
             ultraWideStandbyRequestBuilder = builder
 
-            val sessionSurfaces = mutableListOf<Surface>(standbyPreviewSurf)
+            val sessionSurfaces = mutableListOf<Surface>()
+            if (!eisPlusOnlyStandbyPreview) sessionSurfaces.add(standbyPreviewSurf)
             previewEisPlusSurface?.takeIf { it.isValid }?.let(sessionSurfaces::add)
             if (includeJpegReader) {
                 try {
@@ -1541,6 +1586,21 @@ class Camera2Engine(private val context: Context) {
                             previewEisPlusRelay?.let { unregisterVideoEisPlusBinding(binding, it) }
                         }
                         isPreparingUltraWideStandby.set(false)
+                        return
+                    }
+                    if (eisPlusOnlyStandbyPreview) {
+                        previewEisPlusBinding?.let { binding ->
+                            previewEisPlusRelay?.let { unregisterVideoEisPlusBinding(binding, it) }
+                        }
+                        isPreparingUltraWideStandby.set(false)
+                        standbyPreviewEisPlusConfigured = false
+                        _ultraWideStreamStatus.value = BackgroundCameraStatus.OFF
+                        EisPlusDiagnosticLog.event(
+                            "CAMERA2",
+                            "STANDBY_PREVIEW_EIS_PLUS_CONFIG_FAILED",
+                            "camera=${camera.id} source=$standbyLens reason=HAL_rejected_YUV_MGC_output",
+                            "WARN",
+                        )
                         return
                     }
                     if (previewEisPlusBinding != null && !retriedWithoutPreviewEisPlus) {
