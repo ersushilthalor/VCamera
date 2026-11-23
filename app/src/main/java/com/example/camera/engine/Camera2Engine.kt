@@ -6285,9 +6285,39 @@ class Camera2Engine(private val context: Context) {
                             if (configGen != sessionConfigGeneration.get() || cameraDevice != camera) return
                             onSessionConfigurationFinished()
                             if (previewRelay != null) {
-                                previewEisPlusUnavailableForSession = true
-                                stopActiveVideoEisPlus(closeCameraSession = true)
-                                createCameraCaptureSession(forceLogicalStream = true)
+                                if (!forceLogicalStream) {
+                                    EisPlusDiagnosticLog.event(
+                                        "CAMERA2", "PREVIEW_PHYSICAL_SESSION_RETRY",
+                                        "physical session rejected for lens=${activeLens?.lensType}; " +
+                                            "retrying logical stream with the same EGL relay and retained pipelines",
+                                        "WARN",
+                                    )
+                                    createCameraCaptureSession(forceLogicalStream = true)
+                                    return
+                                }
+
+                                // Logical routing was also rejected. Restore the previous
+                                // lens pipeline/session without releasing the preview relay.
+                                val restored = rollbackFailedPreviewEisPlusSwitch(
+                                    previewRelay,
+                                    "Camera2 rejected both physical and logical preview sessions",
+                                )
+                                EisPlusDiagnosticLog.event(
+                                    "CAMERA2", "PREVIEW_SESSION_CONFIGURATION_FAILED",
+                                    "forceLogicalStream=true restoredPreviousLens=$restored " +
+                                        "relayPreviewActive=${previewRelay.hasPreviewSurface()}",
+                                    "ERROR",
+                                )
+                                if (restored) {
+                                    createCameraCaptureSession(forceLogicalStream = false)
+                                } else {
+                                    isConfiguringSession = false
+                                    _isCameraReady.value = false
+                                    _isGpuRelayPreviewActive.value = previewRelay.hasPreviewSurface()
+                                    _videoEisPlusStatus.value =
+                                        "Camera2 rejected the preview session; EIS+ relay retained"
+                                    completeLensSwitch(_selectedLens.value)
+                                }
                                 return
                             }
                             if (imageReaderYuv != null || imageReaderRaw != null) {
