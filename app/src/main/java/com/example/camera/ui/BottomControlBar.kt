@@ -342,7 +342,7 @@ fun BottomControlBar(
 
                         // Center: Customizable Shutter Button
                         val shutterSize = layoutConfig.shutterSizeDp.dp
-                        val isFastShutterActive = false
+                        val isFastShutterActive = isUltraFastShutterEnabled && cameraMode == CameraMode.PHOTO
                         val coroutineScope = rememberCoroutineScope()
 
                         Box(
