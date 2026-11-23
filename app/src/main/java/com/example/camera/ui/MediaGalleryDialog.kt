@@ -18,6 +18,7 @@ import android.util.Size
 import android.view.Surface
 import android.view.TextureView
 import android.widget.MediaController
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Animatable
@@ -42,6 +43,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.PlayArrow
@@ -70,6 +79,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -178,7 +188,8 @@ fun MediaGalleryDialog(
     hasMediaPermission: Boolean,
     onRequestMediaPermission: () -> Unit,
     onDismiss: () -> Unit,
-    onOpenSystemGallery: () -> Unit
+    onOpenSystemGallery: () -> Unit,
+    onMediaChanged: () -> Unit = {}
 ) {
     var selectedMedia by remember { mutableStateOf<MediaGalleryItem?>(null) }
 
@@ -209,7 +220,8 @@ fun MediaGalleryDialog(
                 MediaGalleryItemViewer(
                     item = currentMedia,
                     onBack = { selectedMedia = null },
-                    onClose = onDismiss
+                    onClose = onDismiss,
+                    onMediaChanged = onMediaChanged
                 )
             }
         }
@@ -489,9 +501,17 @@ private fun GalleryMediaTile(
 
 
 @Composable
-private fun MediaGalleryItemViewer(item: MediaGalleryItem, onBack: () -> Unit, onClose: () -> Unit) {
-    if (item.isVideo) MediaGalleryPlayer(video = item, onBack = onBack, onClose = onClose)
-    else MediaGalleryPhotoViewer(photo = item, onBack = onBack, onClose = onClose)
+private fun MediaGalleryItemViewer(
+    item: MediaGalleryItem,
+    onBack: () -> Unit,
+    onClose: () -> Unit,
+    onMediaChanged: () -> Unit
+) {
+    if (item.isVideo) {
+        MediaGalleryPlayer(video = item, onBack = onBack, onClose = onClose, onMediaChanged = onMediaChanged)
+    } else {
+        MediaGalleryPhotoViewer(photo = item, onBack = onBack, onClose = onClose, onMediaChanged = onMediaChanged)
+    }
 }
 
 private data class GalleryPhotoLoadState(
@@ -501,17 +521,30 @@ private data class GalleryPhotoLoadState(
 )
 
 @Composable
-private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit, onClose: () -> Unit) {
+private fun MediaGalleryPhotoViewer(
+    photo: MediaGalleryItem,
+    onBack: () -> Unit,
+    onClose: () -> Unit,
+    onMediaChanged: () -> Unit
+) {
     val context = LocalContext.current
-    var isExpanded by remember(photo.uri) { mutableStateOf(false) }
+    val actionScope = rememberCoroutineScope()
+    var isExpanded by rememberSaveable(photo.uri.toString()) { mutableStateOf(false) }
+    var isEditing by rememberSaveable(photo.uri.toString()) { mutableStateOf(false) }
+    var isFavorite by remember(photo.uri.toString()) {
+        mutableStateOf(GalleryMediaActions.isFavorite(context, photo.uri))
+    }
+    var addToExpanded by remember { mutableStateOf(false) }
+    val dateParts = remember(photo.timestamp) { formatGalleryMediaDate(photo.timestamp) }
+
     val photoLoadState by produceState(
         initialValue = GalleryPhotoLoadState(isLoading = true, bitmap = null),
         key1 = "${photo.uri}|${photo.ultraWideUri}"
     ) {
         val decoded = try {
             withContext(Dispatchers.IO) {
-                val main = decodeGalleryImage(context, photo.uri, 1800)
-                val ultraWide = photo.ultraWideUri?.let { decodeGalleryImage(context, it, 1800) }
+                val main = decodeGalleryImage(context, photo.uri, 2400)
+                val ultraWide = photo.ultraWideUri?.let { decodeGalleryImage(context, it, 2400) }
                 Pair(main, ultraWide)
             }
         } catch (e: Exception) {
@@ -534,51 +567,208 @@ private fun MediaGalleryPhotoViewer(photo: MediaGalleryItem, onBack: () -> Unit,
             expandedBitmap = expanded
         )
     }
-    val decodedPhoto = if (isExpanded) photoLoadState.expandedBitmap else photoLoadState.bitmap
-    Column(Modifier.fillMaxSize().background(Color.Black)) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.Filled.ArrowBack, contentDescription = "Back to media", tint = Color.White)
+
+    val selectedBitmap = if (isExpanded) photoLoadState.expandedBitmap else photoLoadState.bitmap
+    if (isEditing && selectedBitmap != null) {
+        GalleryPhotoEditorScreen(
+            source = selectedBitmap,
+            displayName = if (isExpanded) "${photo.displayName.substringBeforeLast('.')}_EXPANDED.jpg" else photo.displayName,
+            onBack = { isEditing = false },
+            onSaved = { savedUri ->
+                isEditing = false
+                Toast.makeText(context, "Edited copy saved", Toast.LENGTH_SHORT).show()
+                onMediaChanged()
             }
-            Column(Modifier.weight(1f)) {
-                Text("Photo", color = Color.White, style = MaterialTheme.typography.titleLarge)
-                Text(photo.displayName, color = Color.White.copy(alpha = 0.62f),
-                    style = MaterialTheme.typography.bodySmall, maxLines = 1)
-            }
-            if (photo.ultraWideUri != null && photoLoadState.expandedBitmap != null) {
-                Text(
-                    text = if (isExpanded) "Collapse" else "Expand",
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(Color.White.copy(alpha = 0.12f))
-                        .clickable { isExpanded = !isExpanded }
-                        .padding(horizontal = 14.dp, vertical = 9.dp)
-                )
-            }
-            IconButton(onClick = onClose) {
-                Icon(Icons.Filled.Close, contentDescription = "Close photo", tint = Color.White)
-            }
-        }
-        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            when {
-                photoLoadState.isLoading -> CircularProgressIndicator(color = Color.White)
-                decodedPhoto != null -> Image(
-                    bitmap = decodedPhoto.asImageBitmap(),
-                    contentDescription = if (isExpanded) "Expanded 1× photo with ultra-wide surround" else photo.displayName,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = androidx.compose.ui.layout.ContentScale.Fit
-                )
-                isExpanded && photoLoadState.bitmap != null -> {
-                    Text("Unable to merge ultra-wide photo", color = Color.White.copy(alpha = 0.75f))
+        )
+    } else {
+        Column(Modifier.fillMaxSize().background(Color.Black)) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Filled.ArrowBack, contentDescription = "Back to media", tint = Color.White)
                 }
-                else -> Text("Unable to load photo", color = Color.White.copy(alpha = 0.75f))
+                Column(
+                    Modifier.weight(1f),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(dateParts.first, color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                    if (dateParts.second.isNotBlank()) {
+                        Text(dateParts.second, color = Color.White.copy(alpha = 0.86f), style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                IconButton(onClick = {
+                    isFavorite = !isFavorite
+                    GalleryMediaActions.setFavorite(context, photo.uri, isFavorite)
+                    Toast.makeText(context, if (isFavorite) "Added to favorites" else "Removed from favorites", Toast.LENGTH_SHORT).show()
+                }) {
+                    Icon(
+                        imageVector = if (isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                        contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
+                        tint = if (isFavorite) Color(0xFFFFD166) else Color.White
+                    )
+                }
+                Box {
+                    IconButton(onClick = { addToExpanded = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "More options", tint = Color.White)
+                    }
+                    DropdownMenu(expanded = addToExpanded, onDismissRequest = { addToExpanded = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Open system gallery") },
+                            onClick = {
+                                addToExpanded = false
+                                runCatching {
+                                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                                        setDataAndType(photo.uri, "image/*")
+                                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    context.startActivity(intent)
+                                }
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Close viewer") },
+                            onClick = { addToExpanded = false; onClose() }
+                        )
+                    }
+                }
+            }
+
+            Box(
+                Modifier.weight(1f).fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                when {
+                    photoLoadState.isLoading -> CircularProgressIndicator(color = Color.White)
+                    photoLoadState.bitmap == null -> Text("Unable to load photo", color = Color.White.copy(alpha = 0.75f))
+                    else -> Crossfade(
+                        targetState = isExpanded && photoLoadState.expandedBitmap != null,
+                        animationSpec = tween(durationMillis = 480),
+                        label = "special-photo-expand-transition"
+                    ) { expanded ->
+                        val displayBitmap = if (expanded) photoLoadState.expandedBitmap else photoLoadState.bitmap
+                        if (displayBitmap != null) {
+                            Image(
+                                bitmap = displayBitmap.asImageBitmap(),
+                                contentDescription = if (expanded) "Expanded stitched photo" else photo.displayName,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                            )
+                        }
+                    }
+                    if (photo.ultraWideUri != null && photoLoadState.expandedBitmap != null) {
+                        Surface(
+                            modifier = Modifier.align(Alignment.TopEnd).padding(14.dp),
+                            color = Color(0xCC171B20),
+                            shape = RoundedCornerShape(18.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.clickable { isExpanded = !isExpanded }.padding(horizontal = 14.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Filled.ExpandMore, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                                Text(if (isExpanded) "Collapse" else "Expand", color = Color.White, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                    if (photo.ultraWideUri != null && photoLoadState.expandedBitmap == null && !photoLoadState.isLoading) {
+                        Text(
+                            "Wide-frame stitch unavailable",
+                            color = Color.White.copy(alpha = 0.72f),
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp)
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, bottom = 16.dp, top = 8.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                GalleryViewerAction(Modifier.weight(1f), Icons.Filled.Share, "Share") {
+                    actionScope.launch {
+                        val shareUri = if (isExpanded && photoLoadState.expandedBitmap != null) {
+                            withContext(Dispatchers.IO) {
+                                GalleryMediaActions.saveEditedPhoto(context, photoLoadState.expandedBitmap, "${photo.displayName.substringBeforeLast('.')}_EXPANDED.jpg")
+                            }
+                        } else photo.uri
+                        runCatching {
+                            if (shareUri != null) GalleryMediaActions.shareMedia(context, shareUri, false, photo.displayName)
+                        }.onFailure {
+                            Toast.makeText(context, "Unable to share this photo", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+                GalleryViewerAction(Modifier.weight(1f), Icons.Filled.Edit, "Edit") {
+                    if (selectedBitmap != null) isEditing = true
+                }
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    GalleryViewerAction(Modifier.fillMaxWidth(), Icons.Filled.Add, "Add to") {
+                        addToExpanded = !addToExpanded
+                    }
+                    DropdownMenu(expanded = addToExpanded, onDismissRequest = { addToExpanded = false }) {
+                        DropdownMenuItem(
+                            text = { Text(if (isFavorite) "Remove from favorites" else "Add to favorites") },
+                            onClick = {
+                                isFavorite = !isFavorite
+                                GalleryMediaActions.setFavorite(context, photo.uri, isFavorite)
+                                addToExpanded = false
+                                Toast.makeText(context, if (isFavorite) "Added to favorites" else "Removed from favorites", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                        if (photo.ultraWideUri != null && photoLoadState.expandedBitmap != null) {
+                            DropdownMenuItem(
+                                text = { Text("Save expanded panorama") },
+                                onClick = {
+                                    addToExpanded = false
+                                    actionScope.launch {
+                                        val saved = withContext(Dispatchers.IO) {
+                                            GalleryMediaActions.saveEditedPhoto(context, photoLoadState.expandedBitmap, "${photo.displayName.substringBeforeLast('.')}_EXPANDED.jpg")
+                                        }
+                                        Toast.makeText(context, if (saved != null) "Expanded photo saved" else "Could not save expanded photo", Toast.LENGTH_SHORT).show()
+                                        onMediaChanged()
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+                GalleryViewerAction(Modifier.weight(1f), Icons.Filled.Delete, "Bin") {
+                    val deleted = GalleryMediaActions.deleteMedia(context, photo.uri)
+                    if (photo.ultraWideUri != null) GalleryMediaActions.deleteMedia(context, photo.ultraWideUri)
+                    Toast.makeText(
+                        context,
+                        if (deleted) "Photo deleted" else "Could not delete photo",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    if (deleted) {
+                        onMediaChanged()
+                        onBack()
+                    }
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun GalleryViewerAction(
+    modifier: Modifier = Modifier,
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = modifier
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(28.dp))
+        Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -959,7 +1149,8 @@ private fun decodeGalleryImageWithBitmapFactory(
 private fun MediaGalleryPlayer(
     video: MediaGalleryItem,
     onBack: () -> Unit,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    onMediaChanged: () -> Unit
 ) {
     var isUltraWide by rememberSaveable(video.id) { mutableStateOf(false) }
     var playbackPosition by rememberSaveable(video.id) { mutableStateOf(0) }
