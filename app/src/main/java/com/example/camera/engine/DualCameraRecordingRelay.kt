@@ -1510,7 +1510,6 @@ class DualCameraRecordingRelay internal constructor(
                 }
             }
         }
-    }
 
     private fun renderEisPlusOutput(
         display: EGLDisplay,
