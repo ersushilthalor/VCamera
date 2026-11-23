@@ -195,7 +195,8 @@ fun Viewfinder(
             viewHeight = viewH,
             opticalScale = calib.scaleCorrection,
             opticalOffsetX = calib.offsetXNorm,
-            opticalOffsetY = calib.offsetYNorm
+            opticalOffsetY = calib.offsetYNorm,
+            isFrontCamera = isFrontCamera
         )
     }
     LaunchedEffect(
@@ -208,6 +209,7 @@ fun Viewfinder(
         targetRatioCalc,
         cameraMode,
         sensorOrientation,
+        isFrontCamera,
         isUsingUltraWideSurface
     ) {
         mainTransformPendingFirstFrame = true
@@ -900,6 +902,7 @@ fun configureTransform(
     targetRatio: Float,
     displayRotation: Int = Surface.ROTATION_0,
     sensorOrientation: Int = 90,
+    isFrontCamera: Boolean = false,
     isHorizonLockEnabled: Boolean = false,
     horizonRollDegrees: Float = 0f,
     horizonNormX: Float = 0f,
@@ -922,66 +925,40 @@ fun configureTransform(
     val centerX = viewW / 2f
     val centerY = viewH / 2f
 
-    // Native Camera2 API Viewfinder Matrix Transformation
-    // Preview buffer dimensions and orientation are mapped to the TextureView
-    // ensuring zero distortion, zero stretching, zero unwanted crop, and proper framing.
     if (previewBufferSize != null) {
-        val bufW = previewBufferSize.width.toFloat()
-        val bufH = previewBufferSize.height.toFloat()
-        val isLandscapeDisplay = (displayRotation == Surface.ROTATION_90 || displayRotation == Surface.ROTATION_270)
-
-        // Upright camera buffer dimensions corresponding to view orientation:
-        // In portrait (ROTATION_0, ROTATION_180), Camera2 sensor buffer is landscape (e.g. 3264x2448),
-        // so upright width is the short dimension (2448) and upright height is the long dimension (3264).
-        val camW = if (isLandscapeDisplay) maxOf(bufW, bufH) else minOf(bufW, bufH)
-        val camH = if (isLandscapeDisplay) minOf(bufW, bufH) else maxOf(bufW, bufH)
-
-        // Compare the oriented camera buffer against the *measured TextureView* bounds.
-        // targetRatio is only the nominal mode ratio; the parent can constrain the actual
-        // TextureView to a different height (custom templates, system insets, PiP layouts, etc.).
-        // Using targetRatio here can incorrectly select an identity matrix and let TextureView
-        // stretch the camera frame to its measured bounds.
-        val effectiveViewRatio = if (isLandscapeDisplay) {
-            viewW / viewH
-        } else {
-            viewH / viewW
-        }
-        val camRatio = if (isLandscapeDisplay) (camW / camH) else (camH / camW)
-
-        // Skip crop only when the actual displayed buffer geometry matches the actual view.
-        val isMatchingTargetAspect = kotlin.math.abs(camRatio - effectiveViewRatio) < 0.005f
-
-        val (cropScaleX, cropScaleY) = if (isMatchingTargetAspect) {
-            Pair(1.0f, 1.0f)
-        } else {
-            val defaultScaleX = viewW / camW
-            val defaultScaleY = viewH / camH
-            val fillScale = maxOf(defaultScaleX, defaultScaleY)
-            Pair(fillScale / defaultScaleX, fillScale / defaultScaleY)
-        }
-
-        if (isLandscapeDisplay) {
-            val bufferRect = RectF(0f, 0f, bufH, bufW)
-            val viewRect = RectF(0f, 0f, viewW, viewH)
-            bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
-            matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
-            if (cropScaleX != 1.0f || cropScaleY != 1.0f) {
-                matrix.postScale(cropScaleX, cropScaleY, centerX, centerY)
+        val bufferW = previewBufferSize.width.toFloat()
+        val bufferH = previewBufferSize.height.toFloat()
+        if (bufferW > 0f && bufferH > 0f) {
+            // Camera2 stream sizes describe the unrotated sensor buffer. TextureView otherwise
+            // stretches that landscape buffer into its portrait bounds on common 90/270-degree
+            // sensors. Calculate the sensor-to-display rotation for the active lens instead of
+            // assuming that display rotation alone describes the required transform.
+            val deviceRotationDegrees = ((displayRotation % 4) + 4) % 4 * 90
+            val normalizedSensorOrientation = ((sensorOrientation % 360) + 360) % 360
+            val relativeRotation = if (isFrontCamera) {
+                (normalizedSensorOrientation + deviceRotationDegrees) % 360
+            } else {
+                (normalizedSensorOrientation - deviceRotationDegrees + 360) % 360
             }
-            matrix.postRotate((90 * (displayRotation - 2)).toFloat(), centerX, centerY)
-        } else if (displayRotation == Surface.ROTATION_180) {
-            matrix.postRotate(180f, centerX, centerY)
-            if (cropScaleX != 1.0f || cropScaleY != 1.0f) {
-                matrix.postScale(cropScaleX, cropScaleY, centerX, centerY)
-            }
-        } else {
-            // ROTATION_0 (standard portrait):
-            // Center-crop without distortion or stretching (1:1 pixel aspect ratio).
-            // When a 4:3 stream is displayed in a 9:16 frame, cropScaleX cleanly crops the sides
-            // to produce an undistorted 9:16 center crop, matching the recorded video output.
-            if (cropScaleX != 1.0f || cropScaleY != 1.0f) {
-                matrix.postScale(cropScaleX, cropScaleY, centerX, centerY)
-            }
+            val swapsAxes = relativeRotation == 90 || relativeRotation == 270
+            val orientedBufferW = if (swapsAxes) bufferH else bufferW
+            val orientedBufferH = if (swapsAxes) bufferW else bufferH
+
+            // TextureView's untransformed content already fills its measured bounds (non-uniformly
+            // when the buffer and view aspect ratios differ). Undo that default scale, then apply
+            // one uniform center-fill scale after rotation. This avoids both stretching and the
+            // extra crop that resulted from comparing dimensions in mixed orientations.
+            val uniformFillScale = maxOf(
+                viewW / orientedBufferW,
+                viewH / orientedBufferH
+            )
+            val defaultScaleX = if (swapsAxes) viewH / bufferH else viewW / bufferW
+            val defaultScaleY = if (swapsAxes) viewW / bufferW else viewH / bufferH
+            val correctionScaleX = uniformFillScale / defaultScaleX
+            val correctionScaleY = uniformFillScale / defaultScaleY
+
+            matrix.setRotate(relativeRotation.toFloat(), centerX, centerY)
+            matrix.postScale(correctionScaleX, correctionScaleY, centerX, centerY)
         }
     }
 
@@ -1013,6 +990,7 @@ internal fun updateTextureViewTransform(
     previewBufferSize: CameraSize?,
     targetRatio: Float,
     sensorOrientation: Int = 90,
+    isFrontCamera: Boolean = false,
     isHorizonLockEnabled: Boolean = false,
     horizonRollDegrees: Float = 0f,
     horizonNormX: Float = 0f,
@@ -1044,6 +1022,7 @@ internal fun updateTextureViewTransform(
         targetRatio = targetRatio,
         displayRotation = displayRotation,
         sensorOrientation = sensorOrientation,
+        isFrontCamera = isFrontCamera,
         isHorizonLockEnabled = isHorizonLockEnabled,
         horizonRollDegrees = horizonRollDegrees,
         horizonNormX = horizonNormX,

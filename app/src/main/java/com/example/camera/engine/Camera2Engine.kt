@@ -2760,9 +2760,6 @@ class Camera2Engine(private val context: Context) {
             it.cameraId == id && (lensTypeHint == null || it.lensType == lensTypeHint)
         }
         val isUltraWideLens = lensTypeHint == LensType.ULTRAWIDE || lens?.lensType == LensType.ULTRAWIDE
-        val is4KVideo = (currentMode == CameraMode.VIDEO || currentMode == CameraMode.CINEMA) &&
-            ((userSelectedVideoResolution?.let { maxOf(it.width, it.height) >= 3840 } == true) ||
-             (_selectedVideoResolution.value?.let { maxOf(it.width, it.height) >= 3840 } == true))
 
         val chars = getCharacteristics(id) ?: return fallbackDefault
         val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return fallbackDefault
@@ -2788,18 +2785,41 @@ class Camera2Engine(private val context: Context) {
             val targetMax = maxOf(targetRecRes.width, targetRecRes.height)
             val targetMin = minOf(targetRecRes.width, targetRecRes.height)
 
-            val isRecordingActive = (_isRecordingVideo.value || isStartingRecording.get())
-            if (targetMax >= 3840 && isRecordingActive) {
-                // When 4K recording is active, output preview at 1080p matching the recording aspect ratio.
-                // This eliminates camera ISP bandwidth bottlenecks from dual concurrent 4K pipelines,
-                // while the recorder surface receives the full native 4K stream with zero frame drops.
-                val hd16to9 = previewSizes.filter {
-                    val r = maxOf(it.width, it.height).toFloat() / minOf(it.width, it.height).toFloat()
-                    kotlin.math.abs(r - streamRatio) < 0.08f && maxOf(it.width, it.height) <= 1920
-                }.maxByOrNull { it.width.toLong() * it.height.toLong() }
-                if (hd16to9 != null) {
-                    return hd16to9
+            if (targetMax >= 3840) {
+                // Keep the live viewfinder at HD preview bandwidth even when 4K is selected.
+                // The dedicated recording/relay input is configured independently at native 4K
+                // when recording starts; the idle preview does not need an 8.3MP stream.
+                val hdPreviewSizes = previewSizes.filter {
+                    maxOf(it.width, it.height) <= 1920
                 }
+                val matchingAspectHd = hdPreviewSizes.filter {
+                    val ratio = maxOf(it.width, it.height).toFloat() / minOf(it.width, it.height).toFloat()
+                    kotlin.math.abs(ratio - streamRatio) < 0.08f
+                }
+                val previewSize = matchingAspectHd.maxByOrNull {
+                    it.width.toLong() * it.height.toLong()
+                } ?: hdPreviewSizes.minWithOrNull(
+                    compareBy<Size>(
+                        {
+                            kotlin.math.abs(
+                                maxOf(it.width, it.height).toFloat() /
+                                    minOf(it.width, it.height).toFloat() - streamRatio
+                            )
+                        },
+                        { kotlin.math.abs(maxOf(it.width, it.height) - 1920) }
+                    )
+                ) ?: previewSizes.minByOrNull { it.width.toLong() * it.height.toLong() }
+
+                if (previewSize != null) {
+                    Log.i(
+                        TAG,
+                        "[PREVIEW_PERFORMANCE] recordSelection=${targetMax}x${targetMin} " +
+                            "preview=${maxOf(previewSize.width, previewSize.height)}x${minOf(previewSize.width, previewSize.height)} " +
+                            "reason=4K_PREVIEW_CAPPED"
+                    )
+                    return previewSize
+                }
+                Log.w(TAG, "[PREVIEW_PERFORMANCE] No lower-resolution SurfaceTexture stream advertised for 4K")
             }
 
             // 1. Direct exact match in SurfaceTexture preview sizes
@@ -5050,16 +5070,20 @@ class Camera2Engine(private val context: Context) {
 
         val cameraChars = getCharacteristics(streamCameraId)
         val timingChars = getCharacteristics(camera.id) ?: cameraChars
-        val requestedVideo = _selectedVideoResolution.value ?: CameraResolution(1920, 1080)
+        // This is the idle viewfinder EIS+ pipeline, not the recording pipeline.
+        // Match its YUV input to the actual (performance-capped) preview stream. Recording EIS+
+        // still configures its own YUV input from the selected native recording resolution.
+        val previewBuffer = _previewBufferSize.value ?: Size(1920, 1080)
+        val requestedPreview = CameraResolution(previewBuffer.width, previewBuffer.height)
         val yuvSize = resolveVideoEisPlusYuvSize(
             streamCameraId,
-            max(requestedVideo.width, requestedVideo.height),
-            min(requestedVideo.width, requestedVideo.height)
+            max(requestedPreview.width, requestedPreview.height),
+            min(requestedPreview.width, requestedPreview.height)
         )
         val failure = when {
             cameraChars == null -> "camera characteristics unavailable"
             timingChars == null -> "sensor timestamp characteristics unavailable"
-            yuvSize == null -> "no matching YUV stream for ${requestedVideo.width}x${requestedVideo.height}"
+            yuvSize == null -> "no matching preview YUV stream for ${requestedPreview.width}x${requestedPreview.height}"
             else -> null
         }
         if (failure != null) {
@@ -5072,7 +5096,6 @@ class Camera2Engine(private val context: Context) {
         val resolvedYuvSize = yuvSize ?: return null
 
         val pipeline = VideoEisPlusPipeline(context)
-        val previewBuffer = _previewBufferSize.value ?: Size(requestedVideo.width, requestedVideo.height)
         val isFront = lens?.facing == CameraCharacteristics.LENS_FACING_FRONT
         val sensorOrientation = lens?.let {
             getSensorOrientationForLens(it, if (isFront) 270 else 90)
