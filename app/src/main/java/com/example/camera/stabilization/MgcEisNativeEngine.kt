@@ -43,6 +43,7 @@ internal class MgcEisNativeEngine(cacheDirectory: File) {
             val rowHomographies: FloatArray,
             val appliedStrength: Float,
             val tripodMode: Boolean,
+            val usedRealtimeGyroFallback: Boolean,
         ) : FrameResult
 
         data class Dropped(val sensorTimestampNs: Long) : FrameResult
@@ -248,7 +249,7 @@ internal class MgcEisNativeEngine(cacheDirectory: File) {
             )
         }
         val matrices = FloatArray(STRIP_COUNT * 9)
-        val state = FloatArray(2)
+        val state = FloatArray(3)
         val resultTimestampNs = MgcEisNativeBridge.processFrame(
             current,
             input.sensorTimestampNs,
@@ -291,6 +292,7 @@ internal class MgcEisNativeEngine(cacheDirectory: File) {
                     rowHomographies = matrices,
                     appliedStrength = state[0],
                     tripodMode = state[1] != 0f,
+                    usedRealtimeGyroFallback = state[2] != 0f,
                 )
         }
     }
