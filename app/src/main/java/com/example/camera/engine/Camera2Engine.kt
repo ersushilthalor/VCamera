@@ -5550,7 +5550,7 @@ class Camera2Engine(private val context: Context) {
                         addTarget(recordingEisPlusSurface!!)
                     } else {
                         addTarget(previewSurf)
-                        addTarget(recSurface)
+                        addTarget(recSurface!!)
                     }
                     applyCommonSettings(this)
                     set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
