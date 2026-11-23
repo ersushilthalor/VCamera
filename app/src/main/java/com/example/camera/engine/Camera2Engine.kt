@@ -5300,64 +5300,66 @@ class Camera2Engine(private val context: Context) {
             getSensorOrientationForLens(it, if (isFront) 270 else 90)
         } ?: (resolvedCameraChars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90)
 
-        var relay = previewVideoEisPlusRelay
-        if (relay != null && !relay.isRelayReady) {
-            EisPlusDiagnosticLog.event(
-                "CAMERA2", "PREVIEW_RELAY_NOT_READY",
-                "existing relay was not ready; releasing failed instance and rebuilding", "ERROR",
-            )
-            runCatching { relay.release() }
-            previewVideoEisPlusRelay = null
-            relay = null
+        val existingRelay = previewVideoEisPlusRelay
+        val currentRelay = existingRelay?.takeIf { it.isRelayReady } ?: run {
+            if (existingRelay != null) {
+                EisPlusDiagnosticLog.event(
+                    "CAMERA2", "PREVIEW_RELAY_NOT_READY",
+                    "existing relay was not ready; releasing failed instance and rebuilding", "ERROR",
+                )
+                runCatching { existingRelay.release() }
+                previewVideoEisPlusRelay = null
+            }
+            null
         }
 
-        val relayWasReused = relay != null
-        val previousSource = relay?.activeSource
+        val relayWasReused = currentRelay != null
+        val previousSource = currentRelay?.activeSource
         val activeBinding = previousSource?.let { sourceKey ->
             synchronized(videoEisPlusBindingLock) {
                 videoEisPlusBindingsBySource[sourceKey]
-                    ?.takeIf { it.relay === relay && it.pipeline === activeVideoEisPlusPipeline }
+                    ?.takeIf { it.relay === currentRelay && it.pipeline === activeVideoEisPlusPipeline }
             }
         }
-        val isSensorSwitch = relay != null && (
-            relay.activeSource != source ||
+        val isSensorSwitch = currentRelay != null && (
+            currentRelay.activeSource != source ||
                 activeVideoEisPlusPhysicalCameraId != physicalId ||
                 activeVideoEisPlusSessionCameraId != camera.id
             )
 
-        if (relay != null && isSensorSwitch) {
+        if (currentRelay != null && isSensorSwitch) {
             activeBinding?.let { old ->
-                relay.detachEisPlusPipelineForSource(old.source, old.pipeline)
+                currentRelay.detachEisPlusPipelineForSource(old.source, old.pipeline)
                 EisPlusDiagnosticLog.event(
                     "CAMERA2", "PREVIEW_OLD_PIPELINE_DETACHED",
                     "source=${old.source} physical=${old.physicalCameraId} targetSource=$source " +
                         "targetPhysical=${physicalId ?: "logical"}; pipeline retained for rollback",
                 )
             }
-            relay.beginPreviewSourceSwitch(source)
-            relay.updateCameraFacing(isFront, sensorOrientation)
+            currentRelay.beginPreviewSourceSwitch(source)
+            currentRelay.updateCameraFacing(isFront, sensorOrientation)
             _isEisPlusPreviewWaitingForFirstFrame.value = true
             EisPlusDiagnosticLog.event(
                 "CAMERA2", "PREVIEW_LENS_SWITCH_BEGIN",
                 "from=${previousSource ?: source} to=$source oldPhysical=${activeVideoEisPlusPhysicalCameraId ?: "none"} " +
                     "newPhysical=${physicalId ?: "logical"} relayReused=true",
             )
-        } else if (relay != null) {
-            relay.updateVideoAdjustments(currentVideoAdjustments)
+        } else if (currentRelay != null) {
+            currentRelay.updateVideoAdjustments(currentVideoAdjustments)
         }
 
-        if (relay != null) {
+        if (currentRelay != null) {
             EisPlusDiagnosticLog.event(
                 "CAMERA2", "PREVIEW_RELAY_REUSED",
-                "source=$source activeSource=${relay.activeSource} physical=${physicalId ?: "logical"} " +
-                    "eglPreviewActive=${relay.isRelayPreviewActive} waitingForFirstFrame=${relay.isWaitingForFirstPreviewFrameAfterSwitch}",
+                "source=$source activeSource=${currentRelay.activeSource} physical=${physicalId ?: "logical"} " +
+                    "eglPreviewActive=${currentRelay.isRelayPreviewActive} waitingForFirstFrame=${currentRelay.isWaitingForFirstPreviewFrameAfterSwitch}",
             )
         }
 
         // Reattach an already-started sensor-specific pipeline when returning to a lens.
         val reusableBinding = synchronized(videoEisPlusBindingLock) {
             videoEisPlusBindingsBySource[source]?.takeIf {
-                it.relay === relay &&
+                it.relay === currentRelay &&
                     it.sessionCameraId == camera.id &&
                     it.pipelineCameraId == streamCameraId &&
                     it.physicalCameraId == physicalId &&
@@ -5365,15 +5367,15 @@ class Camera2Engine(private val context: Context) {
                     it.pipeline.surface?.isValid == true
             }
         }
-        if (relay != null && reusableBinding != null) {
-            relay.attachEisPlusPipelineForSource(source, reusableBinding.pipeline)
-            relay.setActiveSource(source)
+        if (currentRelay != null && reusableBinding != null) {
+            currentRelay.attachEisPlusPipelineForSource(source, reusableBinding.pipeline)
+            currentRelay.setActiveSource(source)
             activateVideoEisPlusForSource(source, camera.id)
-            relay.updateVideoAdjustments(currentVideoAdjustments)
-            previewVideoEisPlusRelay = relay
+            currentRelay.updateVideoAdjustments(currentVideoAdjustments)
+            previewVideoEisPlusRelay = currentRelay
             _isGpuRelayPreviewActive.value = true
             _isEisPlusPreviewWaitingForFirstFrame.value =
-                relay.isWaitingForFirstPreviewFrameAfterSwitch
+                currentRelay.isWaitingForFirstPreviewFrameAfterSwitch
             val label = if (preferences.videoEisPlusEnabled) "Stabilization ON" else "Stabilization OFF"
             _videoEisPlusStatus.value = "$label · MGC live preview · $source"
             pendingEisPlusPreviewRollbackLens = null
@@ -5383,10 +5385,10 @@ class Camera2Engine(private val context: Context) {
                 "source=$source pipelineReused=true physical=${physicalId ?: "logical"} " +
                     "pipeline=${reusableBinding.pipeline.diagnosticSummary()}",
             )
-            return relay
+            return currentRelay
         }
 
-        var activeRelay = relay
+        var activeRelay = currentRelay
         var successfulPipeline: VideoEisPlusPipeline? = null
         var successfulGeneration = videoEisPlusCaptureGeneration + 1L
         var lastFailureReason = "preview pipeline failed to start"
