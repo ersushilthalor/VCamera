@@ -5512,10 +5512,10 @@ class Camera2Engine(private val context: Context) {
         }
 
         val readyPipeline = successfulPipeline
-        val failedRelay = activeRelay
-        if (readyPipeline == null || failedRelay == null) {
+        val readyRelay = activeRelay
+        if (readyPipeline == null || readyRelay == null) {
             if (!relayWasReused) {
-                failedRelay?.let { relayToRelease ->
+                readyRelay?.let { relayToRelease ->
                     if (previewVideoEisPlusRelay === relayToRelease) previewVideoEisPlusRelay = null
                     runCatching { relayToRelease.release() }
                 }
@@ -5526,24 +5526,24 @@ class Camera2Engine(private val context: Context) {
                     "retryCount=2 relayRetained=$relayWasReused", "ERROR",
             )
             _videoEisPlusStatus.value = "Lens switch failed: $lastFailureReason"
-            if (relayWasReused && failedRelay != null &&
-                rollbackFailedPreviewEisPlusSwitch(failedRelay, lastFailureReason)
+            if (relayWasReused && readyRelay != null &&
+                rollbackFailedPreviewEisPlusSwitch(readyRelay, lastFailureReason)
             ) {
                 return null
             }
-            _isGpuRelayPreviewActive.value = relayWasReused && failedRelay?.isRelayPreviewActive == true
+            _isGpuRelayPreviewActive.value = relayWasReused && readyRelay?.isRelayPreviewActive == true
             _isEisPlusPreviewWaitingForFirstFrame.value =
-                failedRelay?.isWaitingForFirstPreviewFrameAfterSwitch == true
+                readyRelay?.isWaitingForFirstPreviewFrameAfterSwitch == true
             return null
         }
 
-        previewVideoEisPlusRelay = activeRelay
+        previewVideoEisPlusRelay = readyRelay
         activeVideoEisPlusPipeline = readyPipeline
         activeVideoEisPlusSurface = readyPipeline.surface
         activeVideoEisPlusPhysicalCameraId = physicalId
         activeVideoEisPlusSessionCameraId = camera.id
         videoEisPlusCaptureGeneration = successfulGeneration
-        activeRelay.updateVideoAdjustments(currentVideoAdjustments)
+        readyRelay.updateVideoAdjustments(currentVideoAdjustments)
         registerVideoEisPlusBinding(
             VideoEisPlusBinding(
                 sessionCameraId = camera.id,
@@ -5551,26 +5551,26 @@ class Camera2Engine(private val context: Context) {
                 physicalCameraId = physicalId,
                 source = source,
                 pipeline = readyPipeline,
-                relay = activeRelay,
+                relay = readyRelay,
                 generation = successfulGeneration,
             ),
-            activeRelay,
+            readyRelay,
         )
         activateVideoEisPlusForSource(source, camera.id)
         videoEisPlusOisDisabledForSession = false
         _isEisPlusPreviewWaitingForFirstFrame.value =
-            activeRelay.isWaitingForFirstPreviewFrameAfterSwitch
+            readyRelay.isWaitingForFirstPreviewFrameAfterSwitch
         val stabilizationLabel = if (preferences.videoEisPlusEnabled) "Stabilization ON" else "Stabilization OFF"
         _videoEisPlusStatus.value = "$stabilizationLabel · MGC live preview · $source"
         _isGpuRelayPreviewActive.value = true
-        schedulePreviewEisPlusFirstFrameWatchdog(activeRelay, source, lens)
+        schedulePreviewEisPlusFirstFrameWatchdog(readyRelay, source, lens)
         EisPlusDiagnosticLog.event(
             "CAMERA2", "PREVIEW_PIPELINE_ATTACHED",
             "source=$source pipelineReused=false camera=$streamCameraId physical=${physicalId ?: "logical"} " +
                 "yuv=${resolvedYuvSize.width}x${resolvedYuvSize.height} " +
                 "preview=${previewBuffer.width}x${previewBuffer.height} generation=$successfulGeneration",
         )
-        return activeRelay
+        return readyRelay
     }
 
     /**
