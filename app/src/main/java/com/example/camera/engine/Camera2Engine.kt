@@ -1316,6 +1316,7 @@ class Camera2Engine(private val context: Context) {
                     override fun onConfigureFailed(session: CameraCaptureSession) {
                         try { session.close() } catch (_: Throwable) {}
                         if (configToken != standbySessionGeneration.get()) {
+                            standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, recordingRelay) }
                             isPreparingUltraWideStandby.set(false)
                             return
                         }
@@ -1542,6 +1543,9 @@ class Camera2Engine(private val context: Context) {
                 override fun onConfigureFailed(session: CameraCaptureSession) {
                     try { session.close() } catch (_: Throwable) {}
                     if (configToken != standbySessionGeneration.get()) {
+                        previewEisPlusBinding?.let { binding ->
+                            previewEisPlusRelay?.let { unregisterVideoEisPlusBinding(binding, it) }
+                        }
                         isPreparingUltraWideStandby.set(false)
                         return
                     }
