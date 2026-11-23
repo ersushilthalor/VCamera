@@ -67,7 +67,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -569,15 +568,9 @@ private fun MediaGalleryPhotoViewer(
             expandedBitmap = expanded
         )
     }
-    DisposableEffect(photoLoadState) {
-        val ownedMain = photoLoadState.bitmap
-        val ownedExpanded = photoLoadState.expandedBitmap
-        onDispose {
-            runCatching { ownedMain?.takeIf { !it.isRecycled }?.recycle() }
-            runCatching { ownedExpanded?.takeIf { !it.isRecycled }?.recycle() }
-        }
-    }
-
+    // Do not recycle these bitmaps from composition disposal. Compose's BitmapPainter and
+    // recorded hardware display lists can retain the native Bitmap beyond the composable's
+    // onDispose callback (including one or more queued frames). Let normal GC reclaim them.
     val mainPhotoBitmap = photoLoadState.bitmap
     val expandedPhotoBitmap = photoLoadState.expandedBitmap
     val selectedBitmap = if (isExpanded) expandedPhotoBitmap else mainPhotoBitmap
