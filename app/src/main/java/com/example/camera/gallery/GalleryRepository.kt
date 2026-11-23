@@ -150,7 +150,7 @@ class GalleryRepository(context: Context) {
                     val dateAdded = if (addedCol >= 0) cursor.getLong(addedCol) else 0L
                     rows += PhotoRow(
                         id = mediaId.toString(),
-                        name = name.ifBlank { "VCamera photo" },
+                        name = name.ifBlank { "Photo" },
                         uri = uri,
                         timestamp = if (dateTaken > 0L) dateTaken else dateAdded * 1000L,
                         isVCamera = isVCamera
