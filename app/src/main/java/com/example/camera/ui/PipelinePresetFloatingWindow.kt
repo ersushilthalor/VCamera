@@ -195,6 +195,10 @@ fun PipelinePresetFloatingWindow(
                     fontWeight = FontWeight.Black,
                     letterSpacing = 1.0.sp
                 )
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(onClick = onDismiss) {
+                    Text("CLOSE", color = Color.White.copy(alpha = 0.75f), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
             }
 
             Spacer(modifier = Modifier.height(12.dp))

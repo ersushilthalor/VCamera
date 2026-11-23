@@ -391,8 +391,8 @@ fun CameraScreen(
             isManualProOpen ||
             isVideoSettingsPanelOpen ||
             isVideoAdjustmentsOpen || isSettingsOpen || isGallerySelectionDialogOpen || isSpecialVideoGalleryOpen ||
-            isCustomUiStudioOpen ||
-            isQuickOptionsOpen
+            isCustomUiStudioOpen || isQuickOptionsOpen || isPhotoFilterBarOpen ||
+            isPipelinePresetFloatingWindowOpen || isPipelineSheetOpen || isBeforeAfterOpen || isRefocusGalleryOpen
 
     LaunchedEffect(isAnyWindowOpen) {
         com.example.camera.ui.components.BackdropBlurManager.isWindowActive = isAnyWindowOpen
@@ -656,7 +656,8 @@ fun CameraScreen(
         )
 
         // Dismiss barrier behind floating windows to close them when tapping on the camera preview
-        val isAnyFloatingOverlayOpen = isQuickOptionsOpen ||
+        val isAnyFloatingOverlayOpen = isQuickOptionsOpen || isPhotoFilterBarOpen ||
+                isPipelinePresetFloatingWindowOpen ||
                 (isVideoSettingsPanelOpen && (cameraMode == CameraMode.VIDEO || cameraMode == CameraMode.CINEMA)) ||
                 (isLogProfileWindowOpen && cameraMode == CameraMode.CINEMA) ||
                 (isLutWindowOpen && cameraMode == CameraMode.CINEMA)
@@ -669,6 +670,8 @@ fun CameraScreen(
                         indication = null
                     ) {
                         isQuickOptionsOpen = false
+                        viewModel.setPhotoFilterBarOpen(false)
+                        viewModel.setPipelinePresetFloatingWindowOpen(false)
                         viewModel.setVideoSettingsPanelOpen(false)
                         viewModel.setLogProfileWindowOpen(false)
                         viewModel.setLutWindowOpen(false)
