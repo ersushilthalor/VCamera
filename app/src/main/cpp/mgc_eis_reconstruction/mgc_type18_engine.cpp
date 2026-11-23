@@ -1088,10 +1088,33 @@ private:
 
   StabilizedFrame stabilizeFront() {
     const FrameMetadata &frame = pending_frames_.front();
-    const type18::GyroPoseQueue &queue =
-        frame.half_resolution_sensor_mode ? realtime_gyro_ : delayed_gyro_;
+    const std::int64_t first_row_timestamp = frame.frame_timestamp_ns;
+    const std::int64_t last_row_timestamp =
+        first_row_timestamp + frame.rolling_shutter_skew_ns;
     const std::int64_t center_timestamp =
-        frame.frame_timestamp_ns + frame.rolling_shutter_skew_ns / 2;
+        first_row_timestamp + frame.rolling_shutter_skew_ns / 2;
+
+    // Prefer MGC's delayed pose stream for normal full-resolution frames, but
+    // its decomposed stream intentionally trails the primary gyro stream by
+    // the look-ahead window. Camera2 ImageReader latency is variable, so that
+    // delay does not always line up with the exact frame currently leaving the
+    // seven-frame buffer. Before dropping a frame for missing current-row
+    // coverage, use the already-maintained zero-delay pose stream when it
+    // covers the complete rolling-shutter interval. One queue is selected for
+    // the whole frame so center, row and future-pose queries never mix streams.
+    const type18::GyroPoseQueue *selected_queue =
+        frame.half_resolution_sensor_mode ? &realtime_gyro_ : &delayed_gyro_;
+    const auto covers_current_frame = [&](const type18::GyroPoseQueue &candidate) {
+      return candidate.isTimestampCovered(center_timestamp, true) &&
+             candidate.isTimestampCovered(first_row_timestamp, false) &&
+             candidate.isTimestampCovered(last_row_timestamp, false);
+    };
+    if (!covers_current_frame(*selected_queue) &&
+        selected_queue != &realtime_gyro_ &&
+        covers_current_frame(realtime_gyro_)) {
+      selected_queue = &realtime_gyro_;
+    }
+    const type18::GyroPoseQueue &queue = *selected_queue;
     // 0x22D660C..0x22D666C uses the current output frame minus the previous
     // output frame. It never uses the next buffered frame's period.
     const std::int64_t measured_period =
