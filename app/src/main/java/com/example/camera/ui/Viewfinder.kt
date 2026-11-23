@@ -936,18 +936,20 @@ fun configureTransform(
         val camW = if (isLandscapeDisplay) maxOf(bufW, bufH) else minOf(bufW, bufH)
         val camH = if (isLandscapeDisplay) minOf(bufW, bufH) else maxOf(bufW, bufH)
 
-        // Determine the target aspect ratio for framing. If targetRatio > 0, use it to ensure
-        // layout transitions do not apply false scaling on stale layout dimensions.
-        val effectiveTargetRatio = if (targetRatio > 0f) {
-            targetRatio
+        // Compare the oriented camera buffer against the *measured TextureView* bounds.
+        // targetRatio is only the nominal mode ratio; the parent can constrain the actual
+        // TextureView to a different height (custom templates, system insets, PiP layouts, etc.).
+        // Using targetRatio here can incorrectly select an identity matrix and let TextureView
+        // stretch the camera frame to its measured bounds.
+        val effectiveViewRatio = if (isLandscapeDisplay) {
+            viewW / viewH
         } else {
-            if (isLandscapeDisplay) (viewW / viewH) else (viewH / viewW)
+            viewH / viewW
         }
         val camRatio = if (isLandscapeDisplay) (camW / camH) else (camH / camW)
 
-        // When the camera buffer matches the target aspect ratio within tolerance,
-        // no aspect-ratio distortion/crop is required (Identity transform in steady-state portrait).
-        val isMatchingTargetAspect = kotlin.math.abs(camRatio - effectiveTargetRatio) < 0.05f
+        // Skip crop only when the actual displayed buffer geometry matches the actual view.
+        val isMatchingTargetAspect = kotlin.math.abs(camRatio - effectiveViewRatio) < 0.005f
 
         val (cropScaleX, cropScaleY) = if (isMatchingTargetAspect) {
             Pair(1.0f, 1.0f)
