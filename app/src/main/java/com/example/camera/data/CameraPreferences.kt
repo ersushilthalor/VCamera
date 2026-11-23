@@ -297,11 +297,11 @@ class CameraPreferences(context: Context) {
         set(value) = prefs.edit().putBoolean(KEY_RAW_ENABLED, value).apply()
 
     var videoWidth: Int
-        get() = prefs.getInt(KEY_VIDEO_WIDTH, 3840) // Default 4K if supported, will gracefully adapt
+        get() = prefs.getInt(KEY_VIDEO_WIDTH, 2560) // Default 2K/QHD; preserve explicit user selections
         set(value) = prefs.edit().putInt(KEY_VIDEO_WIDTH, value).apply()
 
     var videoHeight: Int
-        get() = prefs.getInt(KEY_VIDEO_HEIGHT, 2160)
+        get() = prefs.getInt(KEY_VIDEO_HEIGHT, 1440)
         set(value) = prefs.edit().putInt(KEY_VIDEO_HEIGHT, value).apply()
 
     /** True only after the user or app explicitly saved a video resolution. */
