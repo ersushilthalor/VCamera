@@ -321,7 +321,8 @@ class DualCameraRecordingRelay internal constructor(
     private var vboTexCoordBufferId: Int = 0
 
     val isRelayPreviewActive: Boolean
-        get() = (eglPreviewSurface != null && eglPreviewSurface != EGL14.EGL_NO_SURFACE)
+        get() = (eglPreviewSurface != null && eglPreviewSurface != EGL14.EGL_NO_SURFACE) &&
+            (previewTargetSurface?.isValid == true)
 
     fun hasPreviewSurface(): Boolean = isRelayPreviewActive
 
