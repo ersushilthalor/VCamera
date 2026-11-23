@@ -158,7 +158,10 @@ class DualCameraRecordingRelay internal constructor(
     val ultraWideRecordedFrameCount = AtomicLong(0L)
     private var programId: Int = 0
     private var passthroughProgramId: Int = 0
-    private var eisPlusRenderer: MgcEisYuvRenderer? = null
+    // Each sensor keeps its own YUV upload textures/FBO so switching between different
+    // sensor resolutions never reallocates the active renderer on the recording GL thread.
+    // Access is confined to the relay GL thread (render + GL cleanup).
+    private val eisPlusRenderersBySource = ConcurrentHashMap<PreviewStreamSource, MgcEisYuvRenderer>()
     private var eisPlusRenderFailureCount = 0L
     // Coalesce camera-thread notifications so a slow GL thread receives one drain task,
     // rather than an unbounded runnable per stabilized frame.
@@ -763,7 +766,6 @@ class DualCameraRecordingRelay internal constructor(
             eisPlusAPositionHandle = GLES30.glGetAttribLocation(eisPlusProgramId, "aPosition")
             eisPlusATexCoordHandle = GLES30.glGetAttribLocation(eisPlusProgramId, "aTextureCoord")
             eisPlusSamplerHandle = GLES30.glGetUniformLocation(eisPlusProgramId, "sTexture")
-            eisPlusRenderer = MgcEisYuvRenderer(TAG)
             if (eisPlusProgramId == 0 || eisPlusPassthroughProgramId == 0) {
                 throw IllegalStateException("Could not create GLES 3 MGC EIS+ shaders")
             }
@@ -1240,12 +1242,11 @@ class DualCameraRecordingRelay internal constructor(
                     pending.image.close()
                     continue
                 }
-                val renderer = eisPlusRenderer
-                if (renderer == null) {
-                    EisPlusDiagnosticLog.event("RELAY", "RENDERER_MISSING", "matched timestampNs=${pending.timestampNs}", "ERROR")
-                    pending.image.close()
-                    Log.e(TAG, "MGC EIS+ renderer is unavailable; dropping matched frame")
-                    continue
+                // Main and ultra-wide sensors commonly expose different YUV dimensions.
+                // Reusing one renderer would call ensure() on every lens handoff, deleting and
+                // rebuilding its GL program, textures, mesh and framebuffer during recording.
+                val renderer = eisPlusRenderersBySource.getOrPut(source) {
+                    MgcEisYuvRenderer("$TAG-$source")
                 }
                 val frame = renderer.render(pending)
                 if (frame == null) {
@@ -1774,8 +1775,10 @@ class DualCameraRecordingRelay internal constructor(
                         GLES20.glDeleteProgram(passthroughProgramId)
                         passthroughProgramId = 0
                     }
-                    eisPlusRenderer?.release()
-                    eisPlusRenderer = null
+                    eisPlusRenderersBySource.values.forEach { renderer ->
+                        runCatching { renderer.release() }
+                    }
+                    eisPlusRenderersBySource.clear()
                     if (eisPlusProgramId != 0) {
                         GLES30.glDeleteProgram(eisPlusProgramId)
                         eisPlusProgramId = 0
