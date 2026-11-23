@@ -77,6 +77,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     val isSavingVideo: StateFlow<Boolean> = engine.isSavingVideo
     val videoDurationSeconds: StateFlow<Int> = engine.videoDurationSeconds
 
+    private val _selectedPhotoFilter = MutableStateFlow(preferences.getModePhotoFilter(preferences.cameraMode))
+    val selectedPhotoFilter: StateFlow<PhotoFilter> = _selectedPhotoFilter.asStateFlow()
+    private val _isPhotoFilterBarOpen = MutableStateFlow(false)
+    val isPhotoFilterBarOpen: StateFlow<Boolean> = _isPhotoFilterBarOpen.asStateFlow()
+
     
     // UI Customization State
     private val _uiCustomizationState = MutableStateFlow(preferences.uiCustomizationState)
@@ -294,6 +299,99 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     
+    // Oppo Photo Mode: megapixel, refocus and continuous high-speed shutter controls.
+    private val _photoMegapixelMode = MutableStateFlow(preferences.getModePhotoMegapixelMode(preferences.cameraMode))
+    val photoMegapixelMode: StateFlow<PhotoMegapixelMode> = _photoMegapixelMode.asStateFlow()
+
+    private val _isRefocusPhotoEnabled = MutableStateFlow(preferences.getModeRefocusEnabled(preferences.cameraMode))
+    val isRefocusPhotoEnabled: StateFlow<Boolean> = _isRefocusPhotoEnabled.asStateFlow()
+    private val _refocusFrameCount = MutableStateFlow(3)
+    val refocusFrameCount: StateFlow<Int> = _refocusFrameCount.asStateFlow()
+
+    private val _isUltraFastShutterEnabled = MutableStateFlow(preferences.getModeUltraFastShutterEnabled(preferences.cameraMode))
+    val isUltraFastShutterEnabled: StateFlow<Boolean> = _isUltraFastShutterEnabled.asStateFlow()
+    private val _ultraFastShutterFps = MutableStateFlow(preferences.getModeUltraFastShutterFps(preferences.cameraMode))
+    val ultraFastShutterFps: StateFlow<Int> = _ultraFastShutterFps.asStateFlow()
+    val fastShutterFrameCount: StateFlow<Int> = engine.fastShutterFrameCount
+    val isFastShutterHolding: StateFlow<Boolean> = engine.isFastShutterHolding
+
+    fun setRefocusPhotoEnabled(enabled: Boolean) {
+        _isRefocusPhotoEnabled.value = enabled
+        preferences.isRefocusPhotoEnabled = enabled
+        preferences.setModeRefocusEnabled(_cameraMode.value, enabled)
+        engine.isRefocusPhotoEnabled = enabled
+    }
+
+    fun setRefocusFrameCount(@Suppress("UNUSED_PARAMETER") count: Int) {
+        _refocusFrameCount.value = 3
+        preferences.refocusFrameCount = 3
+        preferences.setModeRefocusFrameCount(_cameraMode.value, 3)
+    }
+
+    fun setPhotoMegapixelMode(mode: PhotoMegapixelMode) {
+        _photoMegapixelMode.value = mode
+        preferences.photoMegapixelMode = mode
+        preferences.setModePhotoMegapixelMode(_cameraMode.value, mode)
+        engine.photoMegapixelMode = mode
+        showToast(if (mode == PhotoMegapixelMode.M50) "50 MP native sensor mode" else "12 MP standard mode")
+    }
+
+    fun togglePhotoMegapixelMode() {
+        setPhotoMegapixelMode(
+            if (_photoMegapixelMode.value == PhotoMegapixelMode.M12) PhotoMegapixelMode.M50
+            else PhotoMegapixelMode.M12
+        )
+    }
+
+    fun setUltraFastShutterEnabled(enabled: Boolean) {
+        _isUltraFastShutterEnabled.value = enabled
+        preferences.isUltraFastShutterEnabled = enabled
+        preferences.setModeUltraFastShutterEnabled(_cameraMode.value, enabled)
+        engine.updateFastShutterState(enabled, _ultraFastShutterFps.value)
+    }
+
+    fun setUltraFastShutterFps(fps: Int) {
+        val safeFps = fps.coerceIn(5, 20)
+        _ultraFastShutterFps.value = safeFps
+        preferences.ultraFastShutterFps = safeFps
+        preferences.setModeUltraFastShutterFps(_cameraMode.value, safeFps)
+        engine.updateFastShutterState(_isUltraFastShutterEnabled.value, safeFps)
+    }
+
+    fun onFastShutterSingleTap() = onMainActionButtonClick()
+
+    fun onFastShutterHoldStart() {
+        if (_cameraMode.value != CameraMode.PHOTO || !_isUltraFastShutterEnabled.value) return
+        com.example.camera.sound.CameraSoundManager.performShutterFeedback(
+            getApplication<Application>().applicationContext,
+            _shutterFeedback.value
+        )
+        engine.startUltraFastContinuousCapture(_ultraFastShutterFps.value) { uri ->
+            if (uri != null) showToast("Burst saved to gallery")
+        }
+    }
+
+    fun onFastShutterHoldEnd() {
+        engine.stopUltraFastContinuousCapture()
+    }
+
+    fun setPhotoFilter(filter: PhotoFilter) {
+        _selectedPhotoFilter.value = filter
+        preferences.selectedPhotoFilter = filter
+        preferences.setModePhotoFilter(_cameraMode.value, filter)
+        engine.selectedPhotoFilter = filter
+    }
+
+    fun setSelectedPhotoFilter(filter: PhotoFilter) = setPhotoFilter(filter)
+
+    fun togglePhotoFilterBar() {
+        _isPhotoFilterBarOpen.value = !_isPhotoFilterBarOpen.value
+    }
+
+    fun setPhotoFilterBarOpen(open: Boolean) {
+        _isPhotoFilterBarOpen.value = open
+    }
+
     private val _zoomPresetsMode = MutableStateFlow(preferences.zoomPresetsMode)
     val zoomPresetsMode: StateFlow<String> = _zoomPresetsMode.asStateFlow()
 
@@ -464,8 +562,96 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         showToast("Pro Video Resolution: $label")
     }
 
-    fun toggleCustomPipelineEnabled(enabled: Boolean) {
+    // Oppo Custom Image Processing Pipeline state.
+    private val _isCustomPipelineEnabled = MutableStateFlow(preferences.isCustomPipelineEnabled)
+    val isCustomPipelineEnabled: StateFlow<Boolean> = _isCustomPipelineEnabled.asStateFlow()
+    private val _activePipelinePreset = MutableStateFlow(preferences.getActivePipelinePreset())
+    val activePipelinePreset: StateFlow<com.example.camera.pipeline.model.PipelinePreset> = _activePipelinePreset.asStateFlow()
+    private val _activePipelineParams = MutableStateFlow(
+        preferences.getPipelineParams(preferences.activePipelinePresetId)
+    )
+    val activePipelineParams: StateFlow<com.example.camera.pipeline.model.CustomPipelineParams> = _activePipelineParams.asStateFlow()
+    private val _customPresets = MutableStateFlow(preferences.getCustomPresets())
+    val customPresets: StateFlow<List<com.example.camera.pipeline.model.PipelinePreset>> = _customPresets.asStateFlow()
+    private val _isPipelineSheetOpen = MutableStateFlow(false)
+    val isPipelineSheetOpen: StateFlow<Boolean> = _isPipelineSheetOpen.asStateFlow()
+    private val _isPipelinePresetFloatingWindowOpen = MutableStateFlow(false)
+    val isPipelinePresetFloatingWindowOpen: StateFlow<Boolean> = _isPipelinePresetFloatingWindowOpen.asStateFlow()
+    private val _isBeforeAfterOpen = MutableStateFlow(false)
+    val isBeforeAfterOpen: StateFlow<Boolean> = _isBeforeAfterOpen.asStateFlow()
+    val latestPipelineCapture = com.example.camera.pipeline.engine.PipelineCaptureCache.latestCapture
+    private val _isReprocessing = MutableStateFlow(false)
+    val isReprocessing: StateFlow<Boolean> = _isReprocessing.asStateFlow()
+
+    fun setPipelineSheetOpen(open: Boolean) { _isPipelineSheetOpen.value = open }
+    fun togglePipelinePresetFloatingWindow() {
+        _isPipelinePresetFloatingWindowOpen.value = !_isPipelinePresetFloatingWindowOpen.value
     }
+    fun setPipelinePresetFloatingWindowOpen(open: Boolean) { _isPipelinePresetFloatingWindowOpen.value = open }
+    fun setBeforeAfterOpen(open: Boolean) { _isBeforeAfterOpen.value = open }
+
+    fun toggleCustomPipelineEnabled(enabled: Boolean) {
+        _isCustomPipelineEnabled.value = enabled
+        preferences.isCustomPipelineEnabled = enabled
+        showToast(if (enabled) "Custom photo pipeline enabled" else "Custom photo pipeline disabled")
+    }
+
+    fun selectPipelinePreset(preset: com.example.camera.pipeline.model.PipelinePreset) {
+        _activePipelinePreset.value = preset
+        preferences.saveActivePipelinePreset(preset)
+        val params = preferences.getPipelineParams(preset.id)
+        _activePipelineParams.value = params
+    }
+
+    fun updatePipelineParams(params: com.example.camera.pipeline.model.CustomPipelineParams) {
+        _activePipelineParams.value = params
+        preferences.savePipelineParams(_activePipelinePreset.value.id, params)
+    }
+
+    fun savePipelineCustomPreset(name: String, description: String) {
+        val preset = com.example.camera.pipeline.model.PipelinePreset(
+            id = "custom_" + System.currentTimeMillis(),
+            name = name,
+            subtitle = "Custom Tuning",
+            description = description,
+            isBuiltIn = false,
+            params = _activePipelineParams.value
+        )
+        preferences.saveCustomPreset(preset)
+        _customPresets.value = preferences.getCustomPresets()
+        selectPipelinePreset(preset)
+    }
+
+    fun deletePipelineCustomPreset(presetId: String) {
+        preferences.deleteCustomPreset(presetId)
+        _customPresets.value = preferences.getCustomPresets()
+        if (_activePipelinePreset.value.id == presetId) {
+            selectPipelinePreset(com.example.camera.pipeline.model.PipelinePreset.HASSELBLAD)
+        }
+    }
+
+    fun resetActivePresetParams() {
+        val preset = _activePipelinePreset.value
+        val defaults = com.example.camera.pipeline.model.PipelinePreset.BUILT_IN_PRESETS
+            .firstOrNull { it.id == preset.id }?.params ?: preset.params
+        _activePipelineParams.value = defaults
+        preferences.savePipelineParams(preset.id, defaults)
+    }
+
+    fun reprocessLatestCaptureWithCurrentParams(onComplete: (Uri?) -> Unit = {}) {
+        viewModelScope.launch {
+            _isReprocessing.value = true
+            val uri = runCatching {
+                engine.reprocessLatestPipelineCapture(
+                    params = _activePipelineParams.value,
+                    preset = _activePipelinePreset.value
+                )
+            }.onFailure { Log.e("CameraViewModel", "Photo reprocessing failed", it) }.getOrNull()
+            _isReprocessing.value = false
+            onComplete(uri)
+        }
+    }
+
 
     // --- Camera Switching State ---
     private val _instantSwitchState = MutableStateFlow(
@@ -770,6 +956,18 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         engine.manualFocusDistance = preferences.getModeFocusDistance(initialMode)
         engine.saveSelfieAsPreviewed = preferences.saveSelfieAsPreviewed
         engine.viewfinderResolution = preferences.viewfinderResolution
+        engine.photoMegapixelMode = preferences.getModePhotoMegapixelMode(initialMode)
+        engine.selectedPhotoFilter = preferences.getModePhotoFilter(initialMode)
+        engine.isRefocusPhotoEnabled = preferences.getModeRefocusEnabled(initialMode)
+        engine.updateFastShutterState(
+            preferences.getModeUltraFastShutterEnabled(initialMode),
+            preferences.getModeUltraFastShutterFps(initialMode)
+        )
+        _photoMegapixelMode.value = preferences.getModePhotoMegapixelMode(initialMode)
+        _selectedPhotoFilter.value = preferences.getModePhotoFilter(initialMode)
+        _isRefocusPhotoEnabled.value = preferences.getModeRefocusEnabled(initialMode)
+        _isUltraFastShutterEnabled.value = preferences.getModeUltraFastShutterEnabled(initialMode)
+        _ultraFastShutterFps.value = preferences.getModeUltraFastShutterFps(initialMode)
         engine.setMode(initialMode)
         if (preferences.isShowUltraWidePreview && !preferences.hasExplicitVideoResolution()) {
             preferences.videoWidth = 1920
@@ -958,6 +1156,25 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val mRaw = preferences.getModeRaw(mode)
         _isRawCaptureEnabled.value = mRaw
         engine.isRawCaptureEnabled = mRaw
+
+        val mMp = preferences.getModePhotoMegapixelMode(mode)
+        _photoMegapixelMode.value = mMp
+        engine.photoMegapixelMode = mMp
+
+        val mRefocus = preferences.getModeRefocusEnabled(mode)
+        _isRefocusPhotoEnabled.value = mRefocus
+        engine.isRefocusPhotoEnabled = mRefocus
+        _refocusFrameCount.value = 3
+
+        val mFastShutter = preferences.getModeUltraFastShutterEnabled(mode)
+        val mFastFps = preferences.getModeUltraFastShutterFps(mode)
+        _isUltraFastShutterEnabled.value = mFastShutter
+        _ultraFastShutterFps.value = mFastFps
+        engine.updateFastShutterState(mFastShutter, mFastFps)
+
+        val mFilter = preferences.getModePhotoFilter(mode)
+        _selectedPhotoFilter.value = mFilter
+        engine.selectedPhotoFilter = mFilter
 
         
         // Never restore EIS state from legacy per-mode preferences.

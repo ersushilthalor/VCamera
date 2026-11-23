@@ -11304,6 +11304,35 @@ class Camera2Engine(private val context: Context) {
         }
     }
 
+    suspend fun reprocessLatestPipelineCapture(
+        params: com.example.camera.pipeline.model.CustomPipelineParams,
+        preset: com.example.camera.pipeline.model.PipelinePreset
+    ): Uri? = withContext(Dispatchers.IO) {
+        val capture = com.example.camera.pipeline.engine.PipelineCaptureCache.getCapture() ?: return@withContext null
+        if (capture.fullResBitmap.isRecycled) return@withContext null
+        try {
+            val bytes = customImagePipelineEngine.processAndEncodeToJpegBytes(
+                source = capture.fullResBitmap,
+                params = params,
+                jpegQuality = preferences.jpegQuality
+            )
+            val finalBytes = copyExifFromOriginal(
+                srcBytes = ByteArray(0),
+                dstBytes = bytes,
+                forceOrientationNormal = true
+            )
+            val uri = saveJpegBytesToMediaStore(finalBytes, skipPipeline = true, filePrefix = "VCAM_REPROCESS")
+            if (uri != null) {
+                capture.savedUri = uri
+                com.example.camera.pipeline.engine.PipelineCaptureCache.updateSavedUri(uri)
+            }
+            uri
+        } catch (t: Throwable) {
+            Log.e(TAG, "Unable to reprocess cached photo", t)
+            null
+        }
+    }
+
     private fun processPhotoWithCustomPipeline(jpegBytes: ByteArray): Pair<ByteArray, Boolean> {
         try {
             val preset = preferences.getActivePipelinePreset()
