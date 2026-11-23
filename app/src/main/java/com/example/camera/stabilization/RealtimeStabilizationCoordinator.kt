@@ -309,13 +309,10 @@ class RealtimeStabilizationCoordinator(context: Context) {
 
     val isCurrentCameraSupported: Boolean
         get() {
-            val current = calibration
-            return !halStabilizationConflictDetected &&
-                isGyroscopeAvailable && current != null &&
-                (current.lensFacing == CameraCharacteristics.LENS_FACING_BACK ||
-                    current.lensFacing == CameraCharacteristics.LENS_FACING_FRONT) &&
-                current.timestampSource ==
-                CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+            // REALTIME timestamp and facing metadata are advisory for this pipeline. Some
+            // physical ultra-wide streams inherit or under-report the logical camera metadata.
+            // Keep only the actual runtime prerequisites: calibrated input and a gyro source.
+            return !halStabilizationConflictDetected && isGyroscopeAvailable && calibration != null
         }
 
     fun isCameraSupported(
@@ -323,29 +320,14 @@ class RealtimeStabilizationCoordinator(context: Context) {
         timingCharacteristics: CameraCharacteristics = characteristics,
     ): Boolean = cameraSupportFailureReason(characteristics, timingCharacteristics) == null
 
-    /** Returns the first concrete Camera2/gyro eligibility failure for settings and logcat. */
+    /** Reports only hard runtime prerequisites; per-lens metadata is resolved with fallbacks. */
     fun cameraSupportFailureReason(
         characteristics: CameraCharacteristics,
         timingCharacteristics: CameraCharacteristics = characteristics,
     ): String? {
         if (!isGyroscopeAvailable) return "gyroscope sensor unavailable"
-        val lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING)
-            ?: timingCharacteristics.get(CameraCharacteristics.LENS_FACING)
-        if (lensFacing != CameraCharacteristics.LENS_FACING_BACK &&
-            lensFacing != CameraCharacteristics.LENS_FACING_FRONT
-        ) return "unsupported or missing lens-facing metadata"
-        if (characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) == null) {
-            return "active sensor array metadata unavailable"
-        }
-        if (characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) == null) {
-            return "physical sensor size metadata unavailable"
-        }
-        val timestampSource = timingCharacteristics.get(
-            CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE,
-        ) ?: CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN
-        if (timestampSource != CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME) {
-            return "sensor timestamp source is not REALTIME (value=$timestampSource)"
-        }
+        // Missing facing, active-array, physical-size or timestamp declarations must not
+        // disable EIS+ for one physical lens. configureCamera() falls back to its parent sensor.
         return null
     }
 
@@ -406,11 +388,11 @@ class RealtimeStabilizationCoordinator(context: Context) {
             consecutiveHalStabilizationConflictCount = 0
         }
         val activeArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            ?: timingCharacteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            ?: Rect(0, 0, 4000, 3000)
         val physicalSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
-        if (activeArray == null || physicalSize == null) {
-            calibration = null
-            return
-        }
+            ?: timingCharacteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+            ?: SizeF(4f, 3f)
         val nominalLensIntrinsics = characteristics.get(
             CameraCharacteristics.LENS_INTRINSIC_CALIBRATION,
         )?.takeIf { values ->
@@ -451,7 +433,9 @@ class RealtimeStabilizationCoordinator(context: Context) {
             sensorOrientationDegrees = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION)
                 ?: timingCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION)
                 ?: 0,
-            timestampSource = timingCharacteristics.get(
+            timestampSource = characteristics.get(
+                CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE,
+            ) ?: timingCharacteristics.get(
                 CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE,
             ) ?: CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN,
             supportsOisSamples = supportsOisSamples,
@@ -484,8 +468,20 @@ class RealtimeStabilizationCoordinator(context: Context) {
         val totalResult = result as? TotalCaptureResult
         val resultPhysicalCameraId = outputPhysicalCameraId
             ?: totalResult?.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID)
-        val physicalResult = resultPhysicalCameraId?.let {
-            totalResult?.physicalCameraResults?.get(it)
+        val physicalResults = totalResult?.physicalCameraResults
+        val physicalResult = resultPhysicalCameraId?.let { physicalResults?.get(it) }
+        if (outputPhysicalCameraId != null &&
+            !physicalResults.isNullOrEmpty() &&
+            physicalResult == null
+        ) {
+            // A logical result for the other active lens is not a substitute for this sensor's
+            // timestamp/metadata. Wait for the matching physical result instead.
+            EisPlusDiagnosticLog.event(
+                "CAPTURE", "PHYSICAL_RESULT_MISSING",
+                "requestedPhysical=$outputPhysicalCameraId available=${physicalResults.keys}",
+                "WARN",
+            )
+            return
         }
         fun <T> value(key: CaptureResult.Key<T>): T? =
             physicalResult?.get(key) ?: result.get(key)
