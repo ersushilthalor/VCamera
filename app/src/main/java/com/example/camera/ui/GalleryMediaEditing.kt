@@ -32,6 +32,8 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material3.Button
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -475,4 +477,118 @@ internal fun formatGalleryMediaDate(timestamp: Long): Pair<String, String> {
     val date = Date(timestamp)
     return SimpleDateFormat("dd MMM", Locale.getDefault()).format(date) to
         SimpleDateFormat("h:mm a", Locale.getDefault()).format(date)
+}
+
+
+@Composable
+internal fun GalleryVideoExportDialog(
+    displayName: String,
+    mainUri: Uri,
+    ultraWideUri: Uri?,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var exporting by remember { mutableStateOf(false) }
+    var resultMessage by remember { mutableStateOf<String?>(null) }
+    var exportError by remember { mutableStateOf<String?>(null) }
+
+    fun export(selection: String) {
+        if (exporting) return
+        exporting = true
+        resultMessage = null
+        exportError = null
+        scope.launch {
+            val exported = withContext(Dispatchers.IO) {
+                runCatching {
+                    when (selection) {
+                        "main" -> listOfNotNull(
+                            GalleryMediaActions.exportVideoCopy(context, mainUri, displayName, "MAIN")
+                        )
+                        "ultra" -> ultraWideUri?.let {
+                            listOfNotNull(GalleryMediaActions.exportVideoCopy(context, it, displayName, "ULTRAWIDE"))
+                        }.orEmpty()
+                        else -> {
+                            val main = GalleryMediaActions.exportVideoCopy(context, mainUri, displayName, "MAIN")
+                            val ultra = ultraWideUri?.let {
+                                GalleryMediaActions.exportVideoCopy(context, it, displayName, "ULTRAWIDE")
+                            }
+                            listOfNotNull(main, ultra)
+                        }
+                    }
+                }
+            }
+            exporting = false
+            exported.onSuccess { uris ->
+                resultMessage = when (uris.size) {
+                    2 -> "Both camera files exported separately to Movies/VCamera/Exports."
+                    1 -> "Video exported to Movies/VCamera/Exports."
+                    else -> null
+                }
+                if (uris.isEmpty()) exportError = "No video was exported."
+            }.onFailure {
+                exportError = it.message?.takeIf(String::isNotBlank) ?: "Video export failed."
+            }
+        }
+    }
+
+    Dialog(
+        onDismissRequest = { if (!exporting) onDismiss() },
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+            color = Color(0xFF171B20),
+            shape = RoundedCornerShape(24.dp)
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Special Video Editor", color = Color.White, style = MaterialTheme.typography.titleLarge)
+                Text(
+                    "The recording contains two synchronized camera files. Export either view or save both as separate videos without re-encoding.",
+                    color = Color.White.copy(alpha = 0.72f),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Button(
+                    onClick = { export("main") },
+                    enabled = !exporting,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Export Main video")
+                }
+                if (ultraWideUri != null) {
+                    Button(
+                        onClick = { export("ultra") },
+                        enabled = !exporting,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Export Ultra-wide video")
+                    }
+                    Button(
+                        onClick = { export("both") },
+                        enabled = !exporting,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Export both separately")
+                    }
+                }
+                if (exporting) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.size(8.dp))
+                        Text("Exporting original-quality files…", color = Color.White.copy(alpha = 0.82f))
+                    }
+                }
+                resultMessage?.let { Text(it, color = Color(0xFF8CE4C0)) }
+                exportError?.let { Text(it, color = Color(0xFFFF8A80)) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss, enabled = !exporting) {
+                        Text("Done", color = Color.White)
+                    }
+                }
+            }
+        }
+    }
 }
