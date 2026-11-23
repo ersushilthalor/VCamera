@@ -535,6 +535,7 @@ private fun MediaGalleryPhotoViewer(
         mutableStateOf(GalleryMediaActions.isFavorite(context, photo.uri))
     }
     var addToExpanded by remember { mutableStateOf(false) }
+    var moreMenuExpanded by remember { mutableStateOf(false) }
     val dateParts = remember(photo.timestamp) { formatGalleryMediaDate(photo.timestamp) }
 
     val photoLoadState by produceState(
@@ -610,14 +611,14 @@ private fun MediaGalleryPhotoViewer(
                     )
                 }
                 Box {
-                    IconButton(onClick = { addToExpanded = true }) {
+                    IconButton(onClick = { moreMenuExpanded = true }) {
                         Icon(Icons.Filled.MoreVert, contentDescription = "More options", tint = Color.White)
                     }
-                    DropdownMenu(expanded = addToExpanded, onDismissRequest = { addToExpanded = false }) {
+                    DropdownMenu(expanded = moreMenuExpanded, onDismissRequest = { moreMenuExpanded = false }) {
                         DropdownMenuItem(
                             text = { Text("Open system gallery") },
                             onClick = {
-                                addToExpanded = false
+                                moreMenuExpanded = false
                                 runCatching {
                                     val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
                                         setDataAndType(photo.uri, "image/*")
@@ -629,7 +630,7 @@ private fun MediaGalleryPhotoViewer(
                         )
                         DropdownMenuItem(
                             text = { Text("Close viewer") },
-                            onClick = { addToExpanded = false; onClose() }
+                            onClick = { moreMenuExpanded = false; onClose() }
                         )
                     }
                 }
@@ -1157,7 +1158,15 @@ private fun MediaGalleryPlayer(
     var shouldResumePlayback by rememberSaveable(video.id) { mutableStateOf(true) }
     val activeTextureView = remember(video.id) { mutableStateOf<TextureView?>(null) }
     val hasLensPair = video.ultraWideUri != null
+    val context = LocalContext.current
     val switchScope = rememberCoroutineScope()
+    var isFavorite by remember(video.uri.toString()) {
+        mutableStateOf(GalleryMediaActions.isFavorite(context, video.uri))
+    }
+    var addToExpanded by remember { mutableStateOf(false) }
+    var moreMenuExpanded by remember { mutableStateOf(false) }
+    var showVideoExportDialog by rememberSaveable(video.id) { mutableStateOf(false) }
+    val dateParts = remember(video.timestamp) { formatGalleryMediaDate(video.timestamp) }
     val zoomProgress = remember(video.id) { Animatable(1f) }
     val currentZoomProgress = zoomProgress.value
     var transitionFromUltraWide by rememberSaveable(video.id) { mutableStateOf(false) }
@@ -1212,22 +1221,40 @@ private fun MediaGalleryPlayer(
             IconButton(onClick = onBack) {
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Back to media", tint = Color.White)
             }
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Video", color = Color.White, style = MaterialTheme.typography.titleLarge)
-                val subtitle = when {
-                    hasLensPair && isUltraWide -> "Ultra-wide camera"
-                    hasLensPair -> "Main camera"
-                    !video.isVideo -> "VCamera photo"
-                    else -> "VCamera recording"
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(dateParts.first, color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                if (dateParts.second.isNotBlank()) {
+                    Text(dateParts.second, color = Color.White.copy(alpha = 0.86f), style = MaterialTheme.typography.bodyMedium)
                 }
-                Text(
-                    subtitle,
-                    color = Color.White.copy(alpha = 0.62f),
-                    style = MaterialTheme.typography.bodyMedium
+            }
+            IconButton(onClick = {
+                isFavorite = !isFavorite
+                GalleryMediaActions.setFavorite(context, video.uri, isFavorite)
+                Toast.makeText(context, if (isFavorite) "Added to favorites" else "Removed from favorites", Toast.LENGTH_SHORT).show()
+            }) {
+                Icon(
+                    imageVector = if (isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                    contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
+                    tint = if (isFavorite) Color(0xFFFFD166) else Color.White
                 )
             }
-            IconButton(onClick = onClose) {
-                Icon(Icons.Filled.Close, contentDescription = "Close player", tint = Color.White)
+            Box {
+                IconButton(onClick = { moreMenuExpanded = true }) {
+                    Icon(Icons.Filled.MoreVert, contentDescription = "More options", tint = Color.White)
+                }
+                DropdownMenu(expanded = moreMenuExpanded, onDismissRequest = { moreMenuExpanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Export video copies") },
+                        onClick = { moreMenuExpanded = false; showVideoExportDialog = true }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Close viewer") },
+                        onClick = { moreMenuExpanded = false; onClose() }
+                    )
+                }
             }
         }
 
@@ -1429,6 +1456,69 @@ private fun MediaGalleryPlayer(
                 }
             }
         }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, bottom = 16.dp, top = 8.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            GalleryViewerAction(Modifier.weight(1f), Icons.Filled.Share, "Share") {
+                switchScope.launch {
+                    val sourceUri = if (isUltraWide) video.ultraWideUri ?: video.uri else video.uri
+                    val shareUri = withContext(Dispatchers.IO) {
+                        if (sourceUri.scheme == "file") {
+                            GalleryMediaActions.exportVideoCopy(context, sourceUri, video.displayName, "SHARE")
+                        } else sourceUri
+                    }
+                    runCatching {
+                        if (shareUri != null) GalleryMediaActions.shareMedia(context, shareUri, true, video.displayName)
+                    }.onFailure {
+                        Toast.makeText(context, "Unable to share video", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            GalleryViewerAction(Modifier.weight(1f), Icons.Filled.Edit, "Edit") {
+                showVideoExportDialog = true
+            }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                GalleryViewerAction(Modifier.fillMaxWidth(), Icons.Filled.Add, "Add to") {
+                    addToExpanded = !addToExpanded
+                }
+                DropdownMenu(expanded = addToExpanded, onDismissRequest = { addToExpanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text(if (isFavorite) "Remove from favorites" else "Add to favorites") },
+                        onClick = {
+                            isFavorite = !isFavorite
+                            GalleryMediaActions.setFavorite(context, video.uri, isFavorite)
+                            addToExpanded = false
+                            Toast.makeText(context, if (isFavorite) "Added to favorites" else "Removed from favorites", Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Export both camera files") },
+                        onClick = { addToExpanded = false; showVideoExportDialog = true }
+                    )
+                }
+            }
+            GalleryViewerAction(Modifier.weight(1f), Icons.Filled.Delete, "Bin") {
+                val deleted = GalleryMediaActions.deleteMedia(context, video.uri)
+                if (video.ultraWideUri != null) GalleryMediaActions.deleteMedia(context, video.ultraWideUri)
+                Toast.makeText(context, if (deleted) "Video deleted" else "Could not delete video", Toast.LENGTH_SHORT).show()
+                if (deleted) {
+                    onMediaChanged()
+                    onBack()
+                }
+            }
+        }
+    }
+
+    if (showVideoExportDialog) {
+        GalleryVideoExportDialog(
+            displayName = video.displayName,
+            mainUri = video.uri,
+            ultraWideUri = video.ultraWideUri,
+            onDismiss = { showVideoExportDialog = false }
+        )
     }
 }
 
