@@ -42,7 +42,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -321,12 +320,9 @@ internal fun GalleryPhotoEditorScreen(
             runCatching { renderGalleryPhotoEdits(source, settings) }.getOrNull()
         }
     }
-    DisposableEffect(preview) {
-        onDispose {
-            preview?.takeIf { it !== source && !it.isRecycled }?.recycle()
-        }
-    }
-
+    // Preview bitmaps are passed to Compose BitmapPainter. Avoid recycle() while a previous
+    // painter/display-list may still reference the old preview after a slider update or screen exit.
+    // The decoded source and each preview are bounded in size; the GC releases native pixels later.
     Column(Modifier.fillMaxSize().background(Color.Black)) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
