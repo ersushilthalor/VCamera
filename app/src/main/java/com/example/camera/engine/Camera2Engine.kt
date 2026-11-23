@@ -121,6 +121,9 @@ class Camera2Engine(private val context: Context) {
     /** Physical sensor that produces the EIS+ YUV stream, independent of the active preview route. */
     private var activeVideoEisPlusPhysicalCameraId: String? = null
     private var activeVideoEisPlusSessionCameraId: String? = null
+    /** Previous working lens is retained until a switched-to MGC pipeline starts. */
+    private var pendingEisPlusPreviewRollbackLens: LensInfo? = null
+    private var pendingEisPlusPreviewRollbackZoom: Float? = null
     @Volatile private var videoEisPlusOisDisabledForSession: Boolean = false
     @Volatile private var videoEisPlusCaptureGeneration: Long = 0L
     private var videoRecordingFileDescriptor: ParcelFileDescriptor? = null
@@ -2323,6 +2326,11 @@ class Camera2Engine(private val context: Context) {
     )
     val videoEisPlusStatus: StateFlow<String> = _videoEisPlusStatus.asStateFlow()
 
+    private val _isEisPlusPreviewWaitingForFirstFrame = MutableStateFlow(false)
+    /** True while the relay is holding the previous stabilized frame after a lens switch. */
+    val isEisPlusPreviewWaitingForFirstFrame: StateFlow<Boolean> =
+        _isEisPlusPreviewWaitingForFirstFrame.asStateFlow()
+
     /** Toggle only the MGC stabilization transform. The YUV/MGC/GPU path never changes. */
     fun setVideoEisPlusEnabled(enabled: Boolean) {
         preferences.videoEisPlusEnabled = enabled
@@ -3131,6 +3139,7 @@ class Camera2Engine(private val context: Context) {
             }
 
             val previousLens = _selectedLens.value
+            val previousZoom = currentZoom
             val currentRunningLens = activeSessionLens ?: previousLens
             val strategy = CameraDiscovery.resolveSwitchStrategy(currentRunningLens, lens)
             preferences.saveLastLens(lens)
@@ -3169,6 +3178,8 @@ class Camera2Engine(private val context: Context) {
                     switchingMainAndUltraWide = isSwitchBetweenMainAndUW,
                 )
             if (requiresEisPlusPhysicalLensReconfigure) {
+                pendingEisPlusPreviewRollbackLens = currentRunningLens
+                pendingEisPlusPreviewRollbackZoom = previousZoom
                 val targetSource = if (lens.lensType == LensType.ULTRAWIDE) {
                     PreviewStreamSource.ULTRAWIDE
                 } else {
@@ -3184,7 +3195,7 @@ class Camera2Engine(private val context: Context) {
                     TAG,
                     "[EIS_PLUS_LENS_SWITCH] Reconfiguring single physical preview stream to " +
                         lens.lensType + " camera=" + lens.cameraId + " physical=" + lens.physicalCameraId +
-                        "; previous relay source is not reused"
+                        "; retaining the existing preview relay and replacing only its source pipeline"
                 )
                 createCameraCaptureSession(forceLogicalStream = false)
                 return
