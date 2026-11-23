@@ -12068,7 +12068,9 @@ class Camera2Engine(private val context: Context) {
     fun release() {
         runCatching { stopUltraFastContinuousCapture() }
         runCatching { gyroStabilizationEngine.stop() }
-        runCatching { ultraFastShutterEngine.reset() }
+        // Stop the burst worker pool and its Camera2 ImageReader callback thread, not just reset its counters.
+        runCatching { ultraFastShutterEngine.release() }
+        runCatching { com.example.camera.pipeline.engine.PipelineCaptureCache.clear() }
         try {
             physicalOrientationEventListener?.disable()
             physicalOrientationEventListener = null
