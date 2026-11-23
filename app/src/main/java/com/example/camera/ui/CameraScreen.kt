@@ -236,6 +236,7 @@ fun CameraScreen(
     val photoMegapixelMode by viewModel.photoMegapixelMode.collectAsStateWithLifecycle()
     val selectedPhotoFilter by viewModel.selectedPhotoFilter.collectAsStateWithLifecycle()
     val isPhotoFilterBarOpen by viewModel.isPhotoFilterBarOpen.collectAsStateWithLifecycle()
+    var isRefocusGalleryOpen by rememberSaveable { mutableStateOf(false) }
     val isRefocusPhotoEnabled by viewModel.isRefocusPhotoEnabled.collectAsStateWithLifecycle()
     val isUltraFastShutterEnabled by viewModel.isUltraFastShutterEnabled.collectAsStateWithLifecycle()
     val ultraFastShutterFps by viewModel.ultraFastShutterFps.collectAsStateWithLifecycle()
@@ -259,6 +260,12 @@ fun CameraScreen(
     if (isQuickOptionsOpen) {
         BackHandler {
             isQuickOptionsOpen = false
+        }
+    }
+
+    if (isRefocusGalleryOpen) {
+        BackHandler {
+            isRefocusGalleryOpen = false
         }
     }
 
@@ -637,6 +644,10 @@ fun CameraScreen(
             onGridClick = { viewModel.cycleGridType() },
             onToggleMegapixelMode = { viewModel.togglePhotoMegapixelMode() },
             onPhotoFilterClick = { viewModel.togglePhotoFilterBar() },
+            onRefocusGalleryClick = {
+                isQuickOptionsOpen = false
+                isRefocusGalleryOpen = true
+            },
             onRawClick = { viewModel.toggleRawCapture() },
             onSettingsClick = { viewModel.setSettingsOpen(true) },
             isProActive = isManualProOpen,
@@ -743,6 +754,23 @@ fun CameraScreen(
                 .padding(top = 56.dp)
         )
 
+
+        if (isRefocusGalleryOpen) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(50f)
+            ) {
+                RefocusGalleryScreen(
+                    onClose = { isRefocusGalleryOpen = false },
+                    onOpenDeviceGallery = {
+                        isRefocusGalleryOpen = false
+                        viewModel.openSystemGallery(context)
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
 
         // 2b. Floating Frosted Video Settings Panel (Resolution & Frame Rate)
         if (cameraMode == CameraMode.VIDEO || cameraMode == CameraMode.CINEMA) {
@@ -1090,6 +1118,14 @@ fun CameraScreen(
                 isPipelineEnabled = isCustomPipelineEnabled,
                 onToggleEnabled = { viewModel.toggleCustomPipelineEnabled(it) },
                 onPresetSelected = { viewModel.selectPipelinePreset(it) },
+                onEditClick = {
+                    viewModel.setPipelinePresetFloatingWindowOpen(false)
+                    viewModel.setPipelineSheetOpen(true)
+                },
+                onBeforeAfterClick = {
+                    viewModel.setPipelinePresetFloatingWindowOpen(false)
+                    viewModel.setBeforeAfterOpen(true)
+                },
                 onDismiss = { viewModel.setPipelinePresetFloatingWindowOpen(false) },
                 modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 62.dp)
             )

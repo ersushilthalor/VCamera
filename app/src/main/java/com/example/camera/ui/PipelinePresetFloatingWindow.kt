@@ -145,6 +145,8 @@ fun PipelinePresetFloatingWindow(
     onPresetSelected: (PipelinePreset) -> Unit,
     isPipelineEnabled: Boolean = false,
     onToggleEnabled: (Boolean) -> Unit = {},
+    onEditClick: () -> Unit = {},
+    onBeforeAfterClick: () -> Unit = {},
     onDismiss: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -272,6 +274,20 @@ fun PipelinePresetFloatingWindow(
                 lineHeight = 14.5.sp,
                 modifier = Modifier.padding(horizontal = 4.dp)
             )
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onEditClick) {
+                    Text("EDIT PIPELINE", color = accentGold, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                }
+                TextButton(onClick = onBeforeAfterClick) {
+                    Text("BEFORE / AFTER", color = Color.White.copy(alpha = 0.9f), fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                }
+            }
         }
     }
 }

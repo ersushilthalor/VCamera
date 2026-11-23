@@ -74,6 +74,7 @@ fun QuickOptionsFloatingPanel(
     onGridClick: () -> Unit,
     onToggleMegapixelMode: () -> Unit = {},
     onPhotoFilterClick: () -> Unit = {},
+    onRefocusGalleryClick: () -> Unit = {},
     onRawClick: () -> Unit,
     onSpecialPhotoToggle: () -> Unit = {},
     onVideoSettingsClick: () -> Unit,
@@ -488,17 +489,19 @@ fun QuickOptionsFloatingPanel(
                                     compact = false,
                                     modifier = Modifier.weight(1f)
                                 )
-                            }
-
-                                    statusText = if (isSpecialPhotoEnabled) "ON" else "OFF",
-                                    isActive = isSpecialPhotoEnabled,
+                                QuickOptionCircleButton(
+                                    icon = Icons.Filled.CenterFocusStrong,
+                                    label = "Refocus",
+                                    statusText = "Gallery",
+                                    isActive = false,
                                     activeColor = accentColor,
-                                    onClick = onSpecialPhotoToggle,
-                                    testTag = "panel_special_photo_button",
+                                    onClick = onRefocusGalleryClick,
+                                    testTag = "panel_refocus_gallery_button",
                                     compact = false,
-                                    modifier = Modifier.widthIn(min = 112.dp)
+                                    modifier = Modifier.weight(1f)
                                 )
                             }
+
                         }
                     }
 
