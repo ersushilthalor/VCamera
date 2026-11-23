@@ -545,9 +545,17 @@ internal fun GalleryVideoExportDialog(
                 modifier = Modifier.fillMaxWidth().padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("Special Video Editor", color = Color.White, style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "The recording contains two synchronized camera files. Export either view or save both as separate videos without re-encoding.",
+                    if (ultraWideUri == null) "Video Export" else "Special Video Editor",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleLarge
+                )
+                Text(
+                    if (ultraWideUri == null) {
+                        "Save an untouched copy of this recording."
+                    } else {
+                        "The recording contains two synchronized camera files. Export either view or save both as separate videos without re-encoding."
+                    },
                     color = Color.White.copy(alpha = 0.72f),
                     style = MaterialTheme.typography.bodyMedium
                 )
@@ -556,7 +564,7 @@ internal fun GalleryVideoExportDialog(
                     enabled = !exporting,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Export Main video")
+                    Text(if (ultraWideUri == null) "Export video copy" else "Export Main video")
                 }
                 if (ultraWideUri != null) {
                     Button(
