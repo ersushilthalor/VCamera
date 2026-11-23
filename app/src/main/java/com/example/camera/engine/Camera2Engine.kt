@@ -2447,17 +2447,77 @@ class Camera2Engine(private val context: Context) {
     val cinemaCapabilities: StateFlow<CinemaHardwareCapabilities> = _cinemaCapabilities.asStateFlow()
     val nativeNaturalParams: StateFlow<NativeNaturalToneParams> = cinemaEngine.nativeNaturalEngine.currentParams
 
-    val isRefocusPhotoEnabled: Boolean = false
+    // Oppo computational-photo engines run alongside, not in place of, VCamera's video/EIS+ path.
+    val gyroStabilizationEngine by lazy { GyroStabilizationEngine(context) }
+    val photoHdrEngine by lazy { com.example.camera.engine.hdr.PhotoHdrEngine(context) }
+    val refocusEngine by lazy { com.example.camera.engine.RefocusEngine(context) }
+    val customImagePipelineEngine by lazy { com.example.camera.pipeline.engine.CustomImagePipelineEngine(context) }
+    val ultraFastShutterEngine by lazy {
+        com.example.camera.ultrafast.engine.UltraFastShutterEngine(
+            context,
+            com.example.camera.ultrafast.data.UltraFastBurstRepository(context)
+        )
+    }
+    val fastShutterFrameCount: StateFlow<Int> get() = ultraFastShutterEngine.liveFrameCount
+    val isFastShutterHolding: StateFlow<Boolean> get() = ultraFastShutterEngine.isHolding
+    private val isHoldingContinuousCapture = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    var photoMegapixelMode: PhotoMegapixelMode = preferences.photoMegapixelMode
+        set(value) {
+            val changed = field != value
+            field = value
+            preferences.photoMegapixelMode = value
+            if (changed && currentMode == CameraMode.PHOTO) {
+                val activeLens = _selectedLens.value
+                val cameraId = activeLens?.physicalCameraId ?: activeLens?.cameraId
+                if (cameraId != null && cameraDevice != null && !isConfiguringSession) {
+                    setupImageReaders(cameraId)
+                    createCameraCaptureSession()
+                }
+            }
+        }
+    var selectedPhotoFilter: PhotoFilter = preferences.selectedPhotoFilter
+        set(value) {
+            field = value
+            preferences.selectedPhotoFilter = value
+        }
+    var isRefocusPhotoEnabled: Boolean = preferences.isRefocusPhotoEnabled
     val refocusFrameCount: Int = 3
-    val isUltraFastShutterEnabled: Boolean = false
-    val ultraFastShutterFps: Int = 15
-    val fastShutterFrameCount: StateFlow<Int> = MutableStateFlow(0).asStateFlow()
-    val isFastShutterHolding: StateFlow<Boolean> = MutableStateFlow(false).asStateFlow()
-    fun updateFastShutterState(enabled: Boolean, fps: Int) {}
+    @Volatile var isUltraFastShutterEnabled: Boolean = preferences.isUltraFastShutterEnabled
+        private set
+    @Volatile var ultraFastShutterFps: Int = preferences.ultraFastShutterFps
+        private set
+
+    fun updateFastShutterState(enabled: Boolean, fps: Int) {
+        val wasEnabled = isUltraFastShutterEnabled
+        isUltraFastShutterEnabled = enabled
+        ultraFastShutterFps = fps.coerceIn(5, 20)
+        preferences.isUltraFastShutterEnabled = enabled
+        preferences.ultraFastShutterFps = ultraFastShutterFps
+        if (wasEnabled == enabled && ultraFastShutterFps == fps.coerceIn(5, 20)) return
+
+        if (!enabled) {
+            stopUltraFastContinuousCapture()
+            runCatching { imageReaderYuv?.close() }
+            imageReaderYuv = null
+            runCatching { ultraFastShutterEngine.reset() }
+            if (cameraDevice != null && captureSession != null && !isConfiguringSession) {
+                createCameraCaptureSession()
+            }
+        } else if (currentMode == CameraMode.PHOTO) {
+            val activeLens = _selectedLens.value
+            val cameraId = activeLens?.physicalCameraId ?: activeLens?.cameraId ?: return
+            if (cameraDevice != null && !isConfiguringSession) {
+                setupImageReaders(cameraId)
+                createCameraCaptureSession()
+            }
+        }
+    }
 
 
     init {
         initOrientationListener()
+        runCatching { gyroStabilizationEngine.start() }
         val savedCinema = preferences.getCinemaConfig()
         cinemaEngine.updateConfig(savedCinema)
         _cinemaConfig.value = savedCinema
@@ -5005,7 +5065,7 @@ class Camera2Engine(private val context: Context) {
             null
         }
 
-        val is50MMode = false
+        val is50MMode = currentMode == CameraMode.PHOTO && photoMegapixelMode == PhotoMegapixelMode.M50
         if (is50MMode && chars != null) {
             val maxNativeResolution = getMaxResolutionNative(chars, ImageFormat.JPEG)
             if (maxNativeResolution != null) {
@@ -5167,6 +5227,36 @@ class Camera2Engine(private val context: Context) {
             imageReaderYuv?.close()
         } catch (ignored: Throwable) {}
         imageReaderYuv = null
+
+        // Separate high-resolution photo burst stream; never replace the video/EIS+ encoder pipeline.
+        if (currentMode == CameraMode.PHOTO && isUltraFastShutterEnabled) {
+            try {
+                val burstSize = getOptimalBurstYuvSize(activeLens, cameraId, targetSize)
+                imageReaderYuv = ImageReader.newInstance(
+                    burstSize.width,
+                    burstSize.height,
+                    ImageFormat.YUV_420_888,
+                    4
+                )
+                ultraFastShutterEngine.configureFramePool(burstSize.width, burstSize.height)
+                imageReaderYuv?.setOnImageAvailableListener({ reader ->
+                    if (ultraFastShutterEngine.isBurstActive()) {
+                        ultraFastShutterEngine.onSensorImageAvailable(
+                            reader = reader,
+                            sensorOrientation = getCaptureJpegOrientation(),
+                            isFrontFacing = _selectedLens.value?.facing == CameraCharacteristics.LENS_FACING_FRONT,
+                            saveMirrored = saveSelfieAsPreviewed
+                        )
+                    } else {
+                        runCatching { reader.acquireLatestImage()?.close() }
+                    }
+                }, ultraFastShutterEngine.getCaptureHandler() ?: backgroundHandler)
+            } catch (t: Throwable) {
+                Log.e(TAG, "[FAST_SHUTTER] Failed to prepare photo burst YUV stream", t)
+                runCatching { imageReaderYuv?.close() }
+                imageReaderYuv = null
+            }
+        }
 
         if (caps.supportsRaw && isRawCaptureEnabled && caps.supportedRawResolutions.isNotEmpty()) {
             val rawRes = caps.supportedRawResolutions.first()
@@ -8348,10 +8438,6 @@ class Camera2Engine(private val context: Context) {
             Log.e(TAG, "Unable to start Special Photo capture", t)
             finishCapture(null)
         }
-    }
-
-    fun takePhoto50M(onComplete: (Uri?) -> Unit) {
-        onComplete(null)
     }
 
     fun captureStillBitmap(onBitmapCaptured: (Bitmap?) -> Unit) {
@@ -11967,6 +12053,9 @@ class Camera2Engine(private val context: Context) {
     }
 
     fun release() {
+        runCatching { stopUltraFastContinuousCapture() }
+        runCatching { gyroStabilizationEngine.stop() }
+        runCatching { ultraFastShutterEngine.reset() }
         try {
             physicalOrientationEventListener?.disable()
             physicalOrientationEventListener = null
