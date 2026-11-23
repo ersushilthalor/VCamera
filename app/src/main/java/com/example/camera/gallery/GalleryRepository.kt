@@ -21,21 +21,21 @@ data class MediaGalleryItem(
     val ultraWideUri: Uri? = null
 )
 
-/** Returns only VCamera-owned media; a Special Video pair is represented by its main clip. */
-class MediaGalleryRepository(context: Context) {
+/** Returns one date-sortable feed containing all accessible device media and VCamera private clips. */
+class GalleryRepository(context: Context) {
     private val appContext = context.applicationContext
     private val resolver = appContext.contentResolver
 
     fun getMedia(specialClips: List<SpecialVideoClip>): List<MediaGalleryItem> {
         val media = ArrayList<MediaGalleryItem>()
-        media += getVcameraVideos(specialClips)
-        media += getVcameraPhotos()
+        media += getVideos(specialClips)
+        media += getPhotos()
         val knownUris = media.mapTo(HashSet()) { it.uri.toString() }
         getAppSpecificVideos().forEach { if (knownUris.add(it.uri.toString())) media += it }
         return media.distinctBy { it.uri.toString() }.sortedByDescending { it.timestamp }
     }
 
-    private fun getVcameraVideos(specialClips: List<SpecialVideoClip>): List<MediaGalleryItem> {
+    private fun getVideos(specialClips: List<SpecialVideoClip>): List<MediaGalleryItem> {
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
             MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         else MediaStore.Video.Media.EXTERNAL_CONTENT_URI
@@ -86,18 +86,15 @@ class MediaGalleryRepository(context: Context) {
                     val isVCamera = owner == appContext.packageName ||
                         name.startsWith("VCAM_", true) ||
                         description.contains("VCamera", true) || specialClip != null
-                    // Strict source filter: never show ordinary system/third-party videos here.
-                    if (!isVCamera) continue
-
                     val dateTaken = if (takenCol >= 0) cursor.getLong(takenCol) else 0L
                     val dateAdded = if (addedCol >= 0) cursor.getLong(addedCol) else 0L
                     videos += MediaGalleryItem(
                         id = mediaId.toString(),
-                        displayName = name.ifBlank { "VCamera video" },
+                        displayName = name.ifBlank { "Video" },
                         uri = uri,
                         timestamp = if (dateTaken > 0L) dateTaken else dateAdded * 1000L,
                         durationMs = if (durationCol >= 0) cursor.getLong(durationCol).coerceAtLeast(0L) else 0L,
-                        isVCameraRecording = true,
+                        isVCameraRecording = isVCamera,
                         isVideo = true,
                         ultraWideUri = specialClip?.ultraWideUri
                     )
@@ -111,7 +108,7 @@ class MediaGalleryRepository(context: Context) {
         return videos
     }
 
-    private fun getVcameraPhotos(): List<MediaGalleryItem> {
+    private fun getPhotos(): List<MediaGalleryItem> {
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
             MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
@@ -125,7 +122,7 @@ class MediaGalleryRepository(context: Context) {
             else add(MediaStore.Images.Media.DATA)
         }.toTypedArray()
 
-        data class PhotoRow(val id: String, val name: String, val uri: Uri, val timestamp: Long)
+        data class PhotoRow(val id: String, val name: String, val uri: Uri, val timestamp: Long, val isVCamera: Boolean)
         val rows = ArrayList<PhotoRow>()
 
         try {
@@ -148,7 +145,6 @@ class MediaGalleryRepository(context: Context) {
                     val owner = if (ownerCol >= 0) cursor.getString(ownerCol) else null
                     val isVCamera = owner == appContext.packageName ||
                         name.startsWith("VCAM_", true) || description.contains("VCamera", true)
-                    if (!isVCamera) continue
 
                     val dateTaken = if (takenCol >= 0) cursor.getLong(takenCol) else 0L
                     val dateAdded = if (addedCol >= 0) cursor.getLong(addedCol) else 0L
@@ -156,7 +152,8 @@ class MediaGalleryRepository(context: Context) {
                         id = mediaId.toString(),
                         name = name.ifBlank { "VCamera photo" },
                         uri = uri,
-                        timestamp = if (dateTaken > 0L) dateTaken else dateAdded * 1000L
+                        timestamp = if (dateTaken > 0L) dateTaken else dateAdded * 1000L,
+                        isVCamera = isVCamera
                     )
                 }
             }
@@ -169,19 +166,19 @@ class MediaGalleryRepository(context: Context) {
         val byName = rows.associateBy { it.name.lowercase(Locale.ROOT) }
         return rows
             // The companion is reachable from its 1× image; never show it as a second tile.
-            .filterNot { it.name.endsWith("_ULTRAWIDE.jpg", ignoreCase = true) }
+            .filterNot { it.isVCamera && it.name.endsWith("_ULTRAWIDE.jpg", ignoreCase = true) }
             .map { row ->
-                val ultraWideName = if (row.name.endsWith("_MAIN.jpg", ignoreCase = true)) {
+                val ultraWideName = if (row.isVCamera && row.name.endsWith("_MAIN.jpg", ignoreCase = true)) {
                     row.name.dropLast("_MAIN.jpg".length) + "_ULTRAWIDE.jpg"
                 } else null
                 val ultraWideUri = ultraWideName?.let { byName[it.lowercase(Locale.ROOT)]?.uri }
                 MediaGalleryItem(
                     id = row.id,
-                    displayName = row.name,
+                    displayName = row.name.ifBlank { "Photo" },
                     uri = row.uri,
                     timestamp = row.timestamp,
                     durationMs = 0L,
-                    isVCameraRecording = true,
+                    isVCameraRecording = row.isVCamera,
                     isVideo = false,
                     ultraWideUri = ultraWideUri
                 )
@@ -238,7 +235,7 @@ class MediaGalleryRepository(context: Context) {
     }
 
     companion object {
-        private const val TAG = "MediaGalleryRepository"
+        private const val TAG = "GalleryRepository"
         private val VIDEO_EXTENSIONS = setOf("mp4", "m4v", "mov", "3gp", "mkv", "webm")
     }
 }

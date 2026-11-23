@@ -14,7 +14,6 @@ fun CameraSettingsHost(
     onOpenCustomUiStudio: () -> Unit = {},
     onOpenPipelineStudio: () -> Unit = {},
     onOpenBeforeAfter: () -> Unit = {},
-    onOpenGalleryChooser: () -> Unit = {},
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {

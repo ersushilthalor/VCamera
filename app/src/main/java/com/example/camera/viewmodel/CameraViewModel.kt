@@ -11,9 +11,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.camera.data.CameraPreferences
-import com.example.camera.gallery.SpecialVideoClip
 import com.example.camera.gallery.SpecialVideoGalleryRepository
-import com.example.camera.gallery.MediaGalleryRepository
+import com.example.camera.gallery.GalleryRepository
 import com.example.camera.gallery.MediaGalleryItem
 import com.example.camera.engine.Camera2Engine
 import com.example.camera.engine.CameraOpticalCalibration
@@ -48,13 +47,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     val lastCapturedMedia: StateFlow<CapturedMedia?> = engine.lastCapturedMedia
     private val specialVideoGalleryRepository = SpecialVideoGalleryRepository(application.applicationContext)
-    private val mediaGalleryRepository = MediaGalleryRepository(application.applicationContext)
+    private val galleryRepository = GalleryRepository(application.applicationContext)
     private val _mediaGalleryItems = MutableStateFlow<List<MediaGalleryItem>>(emptyList())
     val mediaGalleryItems: StateFlow<List<MediaGalleryItem>> = _mediaGalleryItems.asStateFlow()
-    private val _specialVideoClips = MutableStateFlow(specialVideoGalleryRepository.getClips())
-    val specialVideoClips: StateFlow<List<SpecialVideoClip>> = _specialVideoClips.asStateFlow()
-    private val _isSpecialVideoGalleryOpen = MutableStateFlow(false)
-    val isSpecialVideoGalleryOpen: StateFlow<Boolean> = _isSpecialVideoGalleryOpen.asStateFlow()
+    private val _isGalleryOpen = MutableStateFlow(false)
+    val isGalleryOpen: StateFlow<Boolean> = _isGalleryOpen.asStateFlow()
 
     private val _isSpecialPhotoEnabled = MutableStateFlow(preferences.isSpecialPhotoCaptureEnabled)
     val isSpecialPhotoEnabled: StateFlow<Boolean> = _isSpecialPhotoEnabled.asStateFlow()
@@ -127,12 +124,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _isVideoSettingsPanelOpen = MutableStateFlow(false)
     val isVideoSettingsPanelOpen: StateFlow<Boolean> = _isVideoSettingsPanelOpen.asStateFlow()
-
-    private val _isGallerySelectionDialogOpen = MutableStateFlow(false)
-    val isGallerySelectionDialogOpen: StateFlow<Boolean> = _isGallerySelectionDialogOpen.asStateFlow()
-
-    private val _preferredGalleryPackage = MutableStateFlow(preferences.preferredGalleryPackage)
-    val preferredGalleryPackage: StateFlow<String?> = _preferredGalleryPackage.asStateFlow()
 
     // Focus indicator ring
     private val _focusRingPoint = MutableStateFlow<Offset?>(null)
@@ -1688,17 +1679,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _isVideoSettingsPanelOpen.value = !_isVideoSettingsPanelOpen.value
     }
 
-    fun setPreferredGalleryPackage(packageName: String?) {
-        _preferredGalleryPackage.value = packageName
-        preferences.preferredGalleryPackage = packageName
-    }
-
-    fun setGallerySelectionDialogOpen(open: Boolean) {
-        _isGallerySelectionDialogOpen.value = open
-    }
-
-    fun openGallery(context: Context) {
-        _isSpecialVideoGalleryOpen.value = true
+    fun openGallery() {
+        _isGalleryOpen.value = true
         refreshMediaGallery()
     }
 
@@ -1706,31 +1688,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch(Dispatchers.IO) {
             specialVideoGalleryRepository.migrateLegacyUltraWideClipsToPrivateStorage()
             val clips = specialVideoGalleryRepository.getClips()
-            _specialVideoClips.value = clips
-            _mediaGalleryItems.value = mediaGalleryRepository.getMedia(clips)
+            _mediaGalleryItems.value = galleryRepository.getMedia(clips)
         }
     }
 
-    fun closeSpecialVideoGallery() {
-        _isSpecialVideoGalleryOpen.value = false
-    }
-
-    fun openSystemGallery(context: Context) {
-        _isSpecialVideoGalleryOpen.value = false
-        val media = lastCapturedMedia.value
-        val latestSpecialVideo = _specialVideoClips.value.firstOrNull()
-        val uri = media?.uri ?: latestSpecialVideo?.mainUri
-        val isVideo = media?.isVideo ?: (latestSpecialVideo != null)
-        if (uri != null) {
-            com.example.camera.gallery.GalleryLauncher.openMedia(
-                context = context,
-                uri = uri,
-                isVideo = isVideo,
-                preferredPackage = _preferredGalleryPackage.value
-            )
-        } else {
-            showToast("No recent media available")
-        }
+    fun closeGallery() {
+        _isGalleryOpen.value = false
     }
 
     fun onTapToFocus(point: Offset, normX: Float, normY: Float, isLock: Boolean = false) {
