@@ -3698,23 +3698,61 @@ class Camera2Engine(private val context: Context) {
                 }
                 val previewSurf = getActivePreviewSurface()
                 val relay = dualCameraRecordingRelay
+                val requiresMgcVideo = currentMode == CameraMode.VIDEO && relay != null
+                var requestedVideoRes: CameraResolution? = null
                 if (relay != null) {
-                    val targetSource = if (targetLens.lensType == LensType.ULTRAWIDE) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
-                    setActiveRecordingSource(targetSource, targetLens.cameraId)
+                    val targetSource = if (targetLens.lensType == LensType.ULTRAWIDE) {
+                        PreviewStreamSource.ULTRAWIDE
+                    } else {
+                        PreviewStreamSource.MAIN
+                    }
                     val requestedRes = activeRecordingStreamConfig?.videoResolution
                         ?: (userSelectedVideoResolution ?: _selectedVideoResolution.value ?: CameraResolution(1920, 1080))
+                    requestedVideoRes = requestedRes
                     val effectiveRes = resolveEffectiveVideoResolutionForLens(targetLens, requestedRes)
                     relay.updateInputBufferSize(
                         isUltraWide = (targetLens.lensType == LensType.ULTRAWIDE),
                         width = effectiveRes.width,
                         height = effectiveRes.height
                     )
+
+                    if (requiresMgcVideo) {
+                        val existingBinding = synchronized(videoEisPlusBindingLock) {
+                            videoEisPlusBindingsByCameraId[
+                                videoEisPlusBindingKey(camera.id, targetSource)
+                            ]?.takeIf {
+                                it.pipeline.isRunning && it.physicalCameraId == targetPhysicalId
+                            }
+                        }
+                        val targetBinding = existingBinding ?: startStandbyVideoEisPlusPipeline(
+                            camera = camera,
+                            standbyLens = targetLens,
+                            recordingSize = Size(
+                                max(effectiveRes.width, effectiveRes.height),
+                                min(effectiveRes.width, effectiveRes.height)
+                            ),
+                            physicalCameraId = targetPhysicalId,
+                            relay = relay
+                        )
+                        if (targetBinding == null) {
+                            _videoEisPlusStatus.value =
+                                "Lens switch failed: target sensor has no MGC YUV pipeline; recording stopped"
+                            completeLensSwitch(targetLens)
+                            stopVideoRecording()
+                            return@synchronized
+                        }
+                        if (existingBinding == null) {
+                            registerVideoEisPlusBinding(targetBinding, relay)
+                        }
+                    }
+                    setActiveRecordingSource(targetSource, camera.id)
                 }
                 val recSurf = relay?.getRecorderSurfaceForLens(targetLens) ?: activeRecordingSurface
-                val requiresMgcVideo = currentMode == CameraMode.VIDEO && relay != null
-                val eisSurface = activeVideoEisPlusSurface?.takeIf {
-                    activeVideoEisPlusPipeline?.isRunning == true && it.isValid
-                }
+                val eisSurface = if (requiresMgcVideo) {
+                    activeVideoEisPlusSurface?.takeIf {
+                        activeVideoEisPlusPipeline?.isRunning == true && it.isValid
+                    }
+                } else null
                 if (!_isRecordingVideo.value || previewSurf == null ||
                     (requiresMgcVideo && eisSurface == null) ||
                     (!requiresMgcVideo && (recSurf == null || !recSurf.isValid))
