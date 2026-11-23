@@ -5031,10 +5031,16 @@ class Camera2Engine(private val context: Context) {
             resolvePreviewStreamCameraId(lens, usePhysicalStream = true) ?: camera.id
         }
         val physicalId = streamCameraId.takeIf { it != camera.id }
+        val source = if (lens?.lensType == LensType.ULTRAWIDE) {
+            PreviewStreamSource.ULTRAWIDE
+        } else {
+            PreviewStreamSource.MAIN
+        }
         val existingRelay = previewVideoEisPlusRelay
         if (existingRelay != null &&
             activeVideoEisPlusPipeline?.isRunning == true &&
-            activeVideoEisPlusPhysicalCameraId == physicalId
+            activeVideoEisPlusPhysicalCameraId == physicalId &&
+            existingRelay.activeSource == source
         ) {
             return existingRelay
         }
@@ -5071,11 +5077,6 @@ class Camera2Engine(private val context: Context) {
         val sensorOrientation = lens?.let {
             getSensorOrientationForLens(it, if (isFront) 270 else 90)
         } ?: (resolvedCameraChars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90)
-        val source = if (lens?.lensType == LensType.ULTRAWIDE) {
-            PreviewStreamSource.ULTRAWIDE
-        } else {
-            PreviewStreamSource.MAIN
-        }
         val previewGeneration = videoEisPlusCaptureGeneration + 1L
         pipeline.configureDiagnostics(
             source = source.name,
