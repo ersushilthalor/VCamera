@@ -43,6 +43,7 @@ internal class MgcEisNativeEngine(cacheDirectory: File) {
             val rowHomographies: FloatArray,
             val appliedStrength: Float,
             val tripodMode: Boolean,
+            /** True only when this exact frame used realtime poses to avoid a delayed-queue coverage drop. */
             val usedRealtimeGyroFallback: Boolean,
         ) : FrameResult
 
