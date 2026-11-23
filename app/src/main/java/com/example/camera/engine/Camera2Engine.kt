@@ -137,32 +137,17 @@ class Camera2Engine(private val context: Context) {
         val mgr = cameraManager ?: return null
         cameraCharacteristicsCache[cameraId]?.let { return it }
 
-        // Physical IDs belonging to a logical multi-camera are not always exposed through
-        // CameraManager.cameraIdList. Resolve them from the owning logical camera instead of
-        // treating a valid Ultra-Wide sensor as an unavailable camera.
-        val direct = runCatching { mgr.getCameraCharacteristics(cameraId) }.getOrNull()
-        if (direct != null) {
-            cameraCharacteristicsCache.putIfAbsent(cameraId, direct)
-            return direct
-        }
+        // API 29+ allows CameraManager.getCameraCharacteristics() to resolve physical IDs
+        // that are only addressable through their logical multi-camera parent. API 28 exposes
+        // those physical IDs through cameraIdList, so the same call works there as well.
+        val characteristics = runCatching {
+            mgr.getCameraCharacteristics(cameraId)
+        }.onFailure {
+            Log.w(TAG, "Failed to get characteristics for camera/physical sensor $cameraId", it)
+        }.getOrNull() ?: return null
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            for (logicalId in runCatching { mgr.cameraIdList }.getOrDefault(emptyArray())) {
-                val logical = runCatching { mgr.getCameraCharacteristics(logicalId) }.getOrNull() ?: continue
-                if (cameraId !in logical.physicalCameraIds) continue
-                val physical = runCatching {
-                    logical.getPhysicalCameraCharacteristics(cameraId)
-                }.getOrNull()
-                if (physical != null) {
-                    cameraCharacteristicsCache.putIfAbsent(cameraId, physical)
-                    Log.i(TAG, "Resolved physical camera characteristics: physical=$cameraId logical=$logicalId")
-                    return physical
-                }
-            }
-        }
-
-        Log.w(TAG, "Camera characteristics unavailable for camera $cameraId")
-        return null
+        cameraCharacteristicsCache.putIfAbsent(cameraId, characteristics)
+        return characteristics
     }
 
     /**
