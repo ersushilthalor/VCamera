@@ -156,6 +156,9 @@ struct StabilizedFrame {
   std::vector<Mat3> strip_input_to_output;
   bool tripod_mode = false;
   double applied_strength = 0.0;
+  // True when the preferred delayed gyro stream could not cover this frame's
+  // full rolling-shutter interval and the realtime stream was selected.
+  bool used_realtime_gyro_fallback = false;
   // Internal trace values from the same output frame. They are not part of
   // the Java ABI; the JNI wrapper uses them to isolate gyro integration,
   // virtual-pose filtering and matrix adaptation on one timestamp axis.
