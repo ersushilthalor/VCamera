@@ -1653,8 +1653,13 @@ class Camera2Engine(private val context: Context) {
             ) {
                 activeLogicalMultiCamUltraWideConfigured = false
                 activeLogicalMultiCamSpecialPhotoConfigured = false
-                isUltraWideStreaming.set(false)
-                _ultraWideStreamStatus.value = BackgroundCameraStatus.OFF
+                val ultraWideIsSelected = currentLens.lensType == LensType.ULTRAWIDE
+                isUltraWideStreaming.set(ultraWideIsSelected)
+                _ultraWideStreamStatus.value = if (ultraWideIsSelected) {
+                    BackgroundCameraStatus.READY_QUIET
+                } else {
+                    BackgroundCameraStatus.OFF
+                }
                 Log.i(TAG, "[KEEP_ULTRAWIDE_READY] EIS+ preview uses one physical stream; the other lens will be session-switched on demand")
                 return
             }
@@ -5237,8 +5242,13 @@ class Camera2Engine(private val context: Context) {
             // non-EIS session so selectLens() cannot take the zero-session-reconfigure path.
             activeLogicalMultiCamUltraWideConfigured = false
             activeLogicalMultiCamSpecialPhotoConfigured = false
-            isUltraWideStreaming.set(false)
-            _ultraWideStreamStatus.value = BackgroundCameraStatus.OFF
+            val ultraWideIsSelected = activeLens?.lensType == LensType.ULTRAWIDE
+            isUltraWideStreaming.set(ultraWideIsSelected)
+            _ultraWideStreamStatus.value = if (ultraWideIsSelected) {
+                BackgroundCameraStatus.READY_QUIET
+            } else {
+                BackgroundCameraStatus.OFF
+            }
         }
         val previewSurf = previewRelay?.getRecorderSurfaceForLens(activeLens) ?: directPreviewSurf
         val previewEisPlusSurface = if (previewRelay != null) {
