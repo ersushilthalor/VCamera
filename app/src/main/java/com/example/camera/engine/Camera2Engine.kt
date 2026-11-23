@@ -5578,9 +5578,11 @@ class Camera2Engine(private val context: Context) {
             try {
                 activeSessionPhysicalCameraId = activeLens.physicalCameraId
                 val outputConfigs = mutableListOf<android.hardware.camera2.params.OutputConfiguration>()
-                val previewConfig = android.hardware.camera2.params.OutputConfiguration(previewSurf)
-                previewConfig.setPhysicalCameraId(activeLens.physicalCameraId)
-                outputConfigs.add(previewConfig)
+                if (previewRelay == null) {
+                    val previewConfig = android.hardware.camera2.params.OutputConfiguration(previewSurf)
+                    previewConfig.setPhysicalCameraId(activeLens.physicalCameraId)
+                    outputConfigs.add(previewConfig)
+                }
                 previewEisPlusSurface?.let { surface ->
                     val eisConfig = android.hardware.camera2.params.OutputConfiguration(surface)
                     eisConfig.setPhysicalCameraId(activeLens.physicalCameraId)
@@ -5626,7 +5628,7 @@ class Camera2Engine(private val context: Context) {
                     CameraDevice.TEMPLATE_PREVIEW
                 }
                 val builder = camera.createCaptureRequest(template).apply {
-                    addTarget(previewSurf)
+                    if (previewRelay == null) addTarget(previewSurf)
                     previewEisPlusSurface?.let(::addTarget)
                     applyCommonSettings(this)
                     if (previewEisPlusSurface != null) applyPreviewEisPlusCaptureSettings(this)
@@ -5691,7 +5693,7 @@ class Camera2Engine(private val context: Context) {
         try {
             activeSessionPhysicalCameraId = null
             val surfaces = mutableListOf<Surface>()
-            surfaces.add(previewSurf)
+            if (previewRelay == null) surfaces.add(previewSurf)
             previewEisPlusSurface?.let { surfaces.add(it) }
 
             imageReaderJpeg?.surface?.let { surfaces.add(it) }
@@ -5711,7 +5713,7 @@ class Camera2Engine(private val context: Context) {
             }
 
             val builder = camera.createCaptureRequest(template).apply {
-                addTarget(previewSurf)
+                if (previewRelay == null) addTarget(previewSurf)
                 previewEisPlusSurface?.let(::addTarget)
                 applyCommonSettings(this)
                 if (previewEisPlusSurface != null) applyPreviewEisPlusCaptureSettings(this)
@@ -5722,7 +5724,9 @@ class Camera2Engine(private val context: Context) {
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 val outputConfigs = mutableListOf<android.hardware.camera2.params.OutputConfiguration>()
-                outputConfigs.add(android.hardware.camera2.params.OutputConfiguration(previewSurf))
+                if (previewRelay == null) {
+                    outputConfigs.add(android.hardware.camera2.params.OutputConfiguration(previewSurf))
+                }
                 previewEisPlusSurface?.let { outputConfigs.add(android.hardware.camera2.params.OutputConfiguration(it)) }
 
                 imageReaderJpeg?.surface?.let { surf ->
