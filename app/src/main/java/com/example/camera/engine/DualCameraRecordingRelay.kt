@@ -1536,6 +1536,15 @@ class DualCameraRecordingRelay internal constructor(
                 }
                 if (hasEncoder) CameraPerformanceMonitor.onRecordingFrame()
 
+                // Special Video's companion Ultra-Wide track remains a separate stream.
+                // Drive it from the accepted MAIN MGC frame clock so its PTS stays aligned
+                // without routing the primary preview/encoder through the raw OES renderer.
+                if (hasEncoder && source == PreviewStreamSource.MAIN &&
+                    secondaryRecordingEnabled.get() && hasUltraWideFrame && ultraWideOesTexId != 0
+                ) {
+                    renderUltraWideSecondaryFrame(presentationNs)
+                }
+
                 if (previewSurface != null && previewSurface != EGL14.EGL_NO_SURFACE) {
                     val pw = if (previewWidth > 0) previewWidth else bufferWidth
                     val ph = if (previewHeight > 0) previewHeight else bufferHeight
