@@ -5879,16 +5879,24 @@ class Camera2Engine(private val context: Context) {
                 imageReaderJpeg?.surface?.let {
                     val jpegConfig = android.hardware.camera2.params.OutputConfiguration(it)
                     jpegConfig.setPhysicalCameraId(activeLens.physicalCameraId)
-                    if (false) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                         try {
-                            val chars = getCharacteristics(activeLens.physicalCameraId) ?: getCharacteristics(activeLens.cameraId)
-                            val maxResMap = chars?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)
+                            val chars = getCharacteristics(activeLens.physicalCameraId)
+                                ?: getCharacteristics(activeLens.cameraId)
+                            val maxResMap = chars?.get(
+                                CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION
+                            )
                             val ultraSizes = maxResMap?.getOutputSizes(ImageFormat.JPEG)
-                            val isUltra = ultraSizes?.any { sz -> sz.width == imageReaderJpeg?.width && sz.height == imageReaderJpeg?.height } == true
+                            val isUltra = ultraSizes?.any { size ->
+                                size.width == imageReaderJpeg?.width && size.height == imageReaderJpeg?.height
+                            } == true
                             if (isUltra) {
                                 jpegConfig.addSensorPixelModeUsed(CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
+                                Log.i(TAG, "[SESSION_50M] Physical JPEG output configured for MAXIMUM_RESOLUTION")
                             }
-                        } catch (ignored: Throwable) {}
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "Could not enable maximum-resolution mode on physical JPEG output", t)
+                        }
                     }
                     outputConfigs.add(jpegConfig)
                 }
@@ -6018,18 +6026,23 @@ class Camera2Engine(private val context: Context) {
 
                 imageReaderJpeg?.surface?.let { surf ->
                     val jpegConfig = android.hardware.camera2.params.OutputConfiguration(surf)
-                    if (false) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                         try {
-                            val chars = activeLens?.let { getCharacteristics(it.cameraId) } ?: getCharacteristics(camera.id)
-                            val maxResMap = chars?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)
+                            val chars = activeLens?.let { getCharacteristics(it.cameraId) }
+                                ?: getCharacteristics(camera.id)
+                            val maxResMap = chars?.get(
+                                CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION
+                            )
                             val ultraSizes = maxResMap?.getOutputSizes(ImageFormat.JPEG)
-                            val isUltra = ultraSizes?.any { sz -> sz.width == imageReaderJpeg?.width && sz.height == imageReaderJpeg?.height } == true
+                            val isUltra = ultraSizes?.any { size ->
+                                size.width == imageReaderJpeg?.width && size.height == imageReaderJpeg?.height
+                            } == true
                             if (isUltra) {
                                 jpegConfig.addSensorPixelModeUsed(CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
-                                Log.i(TAG, "[SESSION_50M] Configured SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION on OutputConfiguration")
+                                Log.i(TAG, "[SESSION_50M] JPEG output configured for MAXIMUM_RESOLUTION")
                             }
                         } catch (t: Throwable) {
-                            Log.w(TAG, "Could not set sensor pixel mode on OutputConfiguration", t)
+                            Log.w(TAG, "Could not enable maximum-resolution mode on JPEG output", t)
                         }
                     }
                     outputConfigs.add(jpegConfig)
