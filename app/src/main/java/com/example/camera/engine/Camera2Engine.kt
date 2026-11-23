@@ -5197,9 +5197,15 @@ class Camera2Engine(private val context: Context) {
 
     private fun getEffectiveMainPreviewSurface(
         forceLogicalStream: Boolean = false,
-        surfaceLens: LensInfo? = _selectedLens.value
+        surfaceLens: LensInfo? = _selectedLens.value,
+        selectSurfaceForLens: Boolean = false,
     ): Surface? {
         val usePhysicalStream = !forceLogicalStream
+        val shouldUseUltraWideSurface = if (selectSurfaceForLens) {
+            surfaceLens?.lensType == LensType.ULTRAWIDE
+        } else {
+            _isUsingUltraWideSurface.value
+        }
         val streamCameraId = if (forceLogicalStream) {
             surfaceLens?.cameraId ?: cameraDevice?.id
         } else {
@@ -5207,7 +5213,7 @@ class Camera2Engine(private val context: Context) {
         }
         configurePreviewSurfaceBufferSize(surfaceLens, streamCameraId)
 
-        if (_isUsingUltraWideSurface.value &&
+        if (shouldUseUltraWideSurface &&
             (!activeLogicalMultiCamUltraWideConfigured || forceLogicalStream)
         ) {
             val uwSurf = getOrCreateUltraWidePreviewSurface(
@@ -5748,7 +5754,12 @@ class Camera2Engine(private val context: Context) {
         val activeLens = _selectedLens.value
         val directPreviewSurf = getEffectiveMainPreviewSurface(
             forceLogicalStream = forceLogicalStream,
-            surfaceLens = activeLens
+            surfaceLens = activeLens,
+            // During idle Video EIS+, EGL must attach to the requested lens' TextureView,
+            // even while the UI keeps the previous lens visible until the first new frame.
+            selectSurfaceForLens = previewVideoEisPlusRelay != null &&
+                currentMode == CameraMode.VIDEO &&
+                !_isRecordingVideo.value,
         ) ?: run {
             completeLensSwitch()
             return
