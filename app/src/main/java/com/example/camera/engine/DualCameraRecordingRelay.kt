@@ -410,7 +410,9 @@ class DualCameraRecordingRelay internal constructor(
                     if (previewCurrent && encoderRestored && validCreated != null) {
                         eglPreviewSurface = validCreated
                         previewTargetSurface = targetSurface
-                        if (existingIsValid && existing != validCreated) {
+                        if (existing != null && existing != EGL14.EGL_NO_SURFACE &&
+                            existing != validCreated
+                        ) {
                             runCatching { EGL14.eglDestroySurface(display, existing) }
                         }
                         attached = true
