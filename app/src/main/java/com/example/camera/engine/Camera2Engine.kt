@@ -1643,6 +1643,22 @@ class Camera2Engine(private val context: Context) {
 
         // 1. Same logical camera device (multi-camera physical stream)
         if (dualMode == DualStreamingMode.LOGICAL_MULTI_CAMERA_PHYSICAL && mainLens.cameraId == ultraWideLens.cameraId) {
+            // The preview EIS+ relay owns a single physical sensor output in this mode.
+            // createCameraCaptureSession() intentionally skips the dual-physical output
+            // configuration when that relay is present. Do not advertise the opposite
+            // sensor as prewarmed: it has no Camera2 output and cannot produce relay frames.
+            if (currentMode == CameraMode.VIDEO &&
+                !_isRecordingVideo.value &&
+                previewVideoEisPlusRelay != null
+            ) {
+                activeLogicalMultiCamUltraWideConfigured = false
+                activeLogicalMultiCamSpecialPhotoConfigured = false
+                isUltraWideStreaming.set(false)
+                _ultraWideStreamStatus.value = BackgroundCameraStatus.OFF
+                Log.i(TAG, "[KEEP_ULTRAWIDE_READY] EIS+ preview uses one physical stream; the other lens will be session-switched on demand")
+                return
+            }
+
             val camera = cameraDevice ?: return
             getOrCreateUltraWidePreviewSurface(ultraWideLens.cameraId)
             getOrCreateMainPreviewSurface(mainLens.cameraId, mainLens)
@@ -3033,6 +3049,41 @@ class Camera2Engine(private val context: Context) {
                     !isPhysicalStreamRequired &&
                     canUseLogicalZoomForLens(lens.cameraId, lens, effectiveTargetZoom)
 
+            // EIS+ preview currently configures one physical output at a time. A logical
+            // multi-camera session cannot be switched by changing only the relay source,
+            // because the standby physical sensor has no output configured in that session.
+            // Recreate the active logical Camera2 session for the requested physical sensor;
+            // preparePreviewEisPlusRelay() will create/bind that sensor's own MGC pipeline.
+            val requiresEisPlusPhysicalLensReconfigure =
+                requiresPhysicalLensReconfigurationForEisPlusPreview(
+                    isVideoPreview = currentMode == CameraMode.VIDEO,
+                    previewRelayActive = previewVideoEisPlusRelay != null,
+                    isRecording = _isRecordingVideo.value,
+                    sameCameraDevice = isSameCameraDevice,
+                    switchingMainAndUltraWide = isSwitchBetweenMainAndUW,
+                )
+            if (requiresEisPlusPhysicalLensReconfigure) {
+                val targetSource = if (lens.lensType == LensType.ULTRAWIDE) {
+                    PreviewStreamSource.ULTRAWIDE
+                } else {
+                    PreviewStreamSource.MAIN
+                }
+                activeLogicalMultiCamUltraWideConfigured = false
+                activeLogicalMultiCamSpecialPhotoConfigured = false
+                _isUsingUltraWideSurface.value = lens.lensType == LensType.ULTRAWIDE
+                _displayedPreviewSource.value = targetSource
+                activeSessionLens = lens
+                _selectedLens.value = lens
+                Log.i(
+                    TAG,
+                    "[EIS_PLUS_LENS_SWITCH] Reconfiguring single physical preview stream to " +
+                        lens.lensType + " camera=" + lens.cameraId + " physical=" + lens.physicalCameraId +
+                        "; previous relay source is not reused"
+                )
+                createCameraCaptureSession(forceLogicalStream = false)
+                return
+            }
+
             // 1. Instant 0ms switch when Keep Ultra Wide Ready or continuous zoom transition is active (both Photo mode AND active Video recording):
             // Neither close(), stopRepeating(), openCamera(), nor createCameraCaptureSession() is called!
             if ((shouldKeepUltraWideStreamReady() || isContinuousZoomTransitionActive || isContinuousTransition || ultraWideStandbyCaptureSession != null) && isSwitchBetweenMainAndUW) {
@@ -3042,7 +3093,8 @@ class Camera2Engine(private val context: Context) {
                     ?: backLenses.firstOrNull { it.lensType == LensType.WIDE }
 
                 // Case A: Logical multi-camera with simultaneous Main + Physical Ultra-Wide surfaces already active in captureSession
-                val isLogicalPrewarmedReady = isSameCameraDevice &&
+                val isLogicalPrewarmedReady = previewVideoEisPlusRelay == null &&
+                    isSameCameraDevice &&
                     captureSession != null &&
                     activeLogicalMultiCamUltraWideConfigured &&
                     (!_isRecordingVideo.value || !logicalMultiCamRecordingFailed)
@@ -5179,6 +5231,15 @@ class Camera2Engine(private val context: Context) {
             previewTargetSurface = directPreviewSurf,
             forceLogicalStream = forceLogicalStream
         )
+        if (previewRelay != null) {
+            // The EIS+ preview relay's current session has only the selected sensor's
+            // physical output. Clear any stale "both lenses ready" state from an earlier
+            // non-EIS session so selectLens() cannot take the zero-session-reconfigure path.
+            activeLogicalMultiCamUltraWideConfigured = false
+            activeLogicalMultiCamSpecialPhotoConfigured = false
+            isUltraWideStreaming.set(false)
+            _ultraWideStreamStatus.value = BackgroundCameraStatus.OFF
+        }
         val previewSurf = previewRelay?.getRecorderSurfaceForLens(activeLens) ?: directPreviewSurf
         val previewEisPlusSurface = if (previewRelay != null) {
             activeVideoEisPlusSurface?.takeIf { it.isValid }
