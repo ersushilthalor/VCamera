@@ -5495,7 +5495,9 @@ class Camera2Engine(private val context: Context) {
             stopVideoRecording()
             return
         }
-        if (isRecording && recSurface != null && recSurface.isValid) {
+        if (isRecording &&
+            (requiresMgcVideo || recSurface != null && recSurface.isValid)
+        ) {
             try {
                 val useLogicalZoom = forceLogicalStream ||
                         (activeLens != null && canUseLogicalZoomForLens(camera.id, activeLens, currentZoom))
