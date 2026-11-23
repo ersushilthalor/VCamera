@@ -7521,6 +7521,182 @@ class Camera2Engine(private val context: Context) {
      */
     private val photoCaptureInProgress = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    private fun takePhotoHdrBurst(
+        plan: com.example.camera.engine.hdr.HdrCapturePlan,
+        onComplete: (Uri?) -> Unit
+    ) {
+        val camera = cameraDevice
+        val session = captureSession
+        val jpegReader = imageReaderJpeg
+        val handler = backgroundHandler
+        if (camera == null || session == null || jpegReader == null || handler == null ||
+            !_isCameraReady.value || !jpegReader.surface.isValid ||
+            !photoCaptureInProgress.compareAndSet(false, true)
+        ) {
+            onComplete(null)
+            return
+        }
+
+        _isCapturing.value = true
+        val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+        val processing = java.util.concurrent.atomic.AtomicBoolean(false)
+        val receivedCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val frames = java.util.Collections.synchronizedList(
+            mutableListOf<com.example.camera.engine.hdr.HdrInputFrame>()
+        )
+        val resultByTimestamp = java.util.concurrent.ConcurrentHashMap<Long, TotalCaptureResult>()
+        val resultByIndex = java.util.concurrent.ConcurrentHashMap<Int, TotalCaptureResult>()
+        val expectedCount = plan.specs.size.coerceAtLeast(1)
+        val rawReader = imageReaderRaw?.takeIf { isRawCaptureEnabled && _capabilities.value.supportsRaw }
+
+        fun finish(uri: Uri?) {
+            if (!finished.compareAndSet(false, true)) return
+            runCatching { jpegReader.setOnImageAvailableListener(null, null) }
+            photoCaptureInProgress.set(false)
+            _isCapturing.value = false
+            updateStorageStats()
+            engineScope.launch(Dispatchers.Main) { onComplete(uri) }
+        }
+
+        fun processCapturedFrames(force: Boolean = false) {
+            if (!force && frames.size < expectedCount) return
+            if (!processing.compareAndSet(false, true)) return
+            val captured = synchronized(frames) { frames.toList() }
+            if (captured.isEmpty()) {
+                finish(null)
+                return
+            }
+            val reference = captured.firstOrNull {
+                it.role == com.example.camera.engine.hdr.FrameRole.REFERENCE_BASE
+            } ?: captured.first()
+            engineScope.launch(Dispatchers.Default) {
+                val savedUri = try {
+                    val merged = photoHdrEngine.processHdrCapture(
+                        frames = captured,
+                        plan = plan,
+                        jpegQuality = preferences.jpegQuality
+                    )
+                    saveJpegBytesToMediaStore(merged)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "[PHOTO_HDR] Fusion failed; saving the reference exposure", t)
+                    runCatching { saveJpegBytesToMediaStore(reference.jpegBytes) }.getOrNull()
+                }
+                finish(savedUri)
+            }
+        }
+
+        jpegReader.setOnImageAvailableListener({ reader ->
+            val image = try { reader.acquireNextImage() } catch (t: Throwable) {
+                Log.e(TAG, "[PHOTO_HDR] Failed to acquire bracket frame", t)
+                null
+            } ?: return@setOnImageAvailableListener
+            val bytes = try {
+                val buffer = image.planes.firstOrNull()?.buffer
+                    ?: throw IllegalStateException("HDR frame has no JPEG plane")
+                ByteArray(buffer.remaining()).also { buffer.get(it) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "[PHOTO_HDR] Failed to copy JPEG bytes", t)
+                image.close()
+                return@setOnImageAvailableListener
+            }
+            val timestamp = image.timestamp
+            image.close()
+
+            val index = receivedCount.getAndIncrement().coerceAtMost(expectedCount - 1)
+            val spec = plan.specs.getOrNull(index) ?: plan.specs.first()
+            val result = resultByTimestamp[timestamp] ?: resultByIndex[index] ?: lastCaptureResult
+            frames.add(
+                com.example.camera.engine.hdr.HdrInputFrame(
+                    jpegBytes = bytes,
+                    role = spec.role,
+                    evOffset = spec.evOffset,
+                    exposureTimeNs = result?.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+                        ?: plan.estimatedExpTimeNs,
+                    iso = result?.get(CaptureResult.SENSOR_SENSITIVITY) ?: plan.estimatedIso,
+                    timestampNs = timestamp,
+                    gyroYawSpeed = gyroStabilizationEngine.latestYawSpeed,
+                    gyroPitchSpeed = gyroStabilizationEngine.latestPitchSpeed,
+                    gyroRollSpeed = gyroStabilizationEngine.latestRollSpeed,
+                    actualAeCompensation = result?.get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION)
+                        ?: spec.aeCompIndex
+                )
+            )
+            processCapturedFrames()
+        }, handler)
+
+        rawReader?.setOnImageAvailableListener({ reader ->
+            val raw = runCatching { reader.acquireLatestImage() }.getOrNull()
+                ?: return@setOnImageAvailableListener
+            engineScope.launch(Dispatchers.IO) {
+                try {
+                    val lens = _selectedLens.value
+                    val chars = lens?.let { getCharacteristics(it.cameraId) }
+                    if (chars != null) saveRawToMediaStore(raw, chars)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "[PHOTO_HDR] Optional RAW save failed", t)
+                } finally {
+                    raw.close()
+                }
+            }
+        }, handler)
+
+        try {
+            val requests = plan.specs.mapIndexed { index, spec ->
+                camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                    addTarget(jpegReader.surface)
+                    if (rawReader != null && spec.isReference) addTarget(rawReader.surface)
+                    applyCommonSettings(this, isStillCapture = true)
+                    set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
+                    set(CaptureRequest.JPEG_ORIENTATION, getCaptureJpegOrientation())
+                    set(CaptureRequest.JPEG_QUALITY, preferences.jpegQuality.coerceIn(90, 100).toByte())
+                    if (spec.aeCompIndex != 0) {
+                        set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, spec.aeCompIndex)
+                    }
+                    set(CaptureRequest.CONTROL_AWB_LOCK, true)
+                    setTag(index)
+                }.build()
+            }
+            session.captureBurst(requests, object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    result: TotalCaptureResult
+                ) {
+                    result.get(CaptureResult.SENSOR_TIMESTAMP)?.let { resultByTimestamp[it] = result }
+                    (request.tag as? Int)?.let { resultByIndex[it] = result }
+                    lastCaptureResult = result
+                }
+
+                override fun onCaptureFailed(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    failure: CaptureFailure
+                ) {
+                    Log.w(TAG, "[PHOTO_HDR] Bracket frame failed: " + failure.reason)
+                    if (frames.isNotEmpty()) processCapturedFrames(force = true)
+                    else finish(null)
+                }
+
+                override fun onCaptureSequenceAborted(session: CameraCaptureSession, sequenceId: Int) {
+                    processCapturedFrames(force = true)
+                }
+            }, handler)
+
+            handler.postDelayed({
+                if (!finished.get() && !processing.get()) {
+                    Log.w(TAG, "[PHOTO_HDR] Watchdog fired; frames received=" + frames.size + "/" + expectedCount)
+                    processCapturedFrames(force = true)
+                }
+            }, 2600L)
+        } catch (t: Throwable) {
+            Log.e(TAG, "[PHOTO_HDR] Unable to submit capture bracket", t)
+            runCatching { jpegReader.setOnImageAvailableListener(null, null) }
+            photoCaptureInProgress.set(false)
+            _isCapturing.value = false
+            takePhotoStandard(onComplete)
+        }
+    }
+
     fun takePhoto50M(onComplete: (Uri?) -> Unit) {
         val camera = cameraDevice
         val session = captureSession
@@ -7778,6 +7954,20 @@ class Camera2Engine(private val context: Context) {
             if (isRefocusPhotoEnabled) {
                 takePhotoRefocus(onComplete)
                 return
+            }
+            if (preferences.autoHdrEnabled) {
+                val lens = _selectedLens.value
+                val plan = photoHdrEngine.planCapture(
+                    chars = lens?.let { getCharacteristics(it.cameraId) },
+                    lastResult = lastCaptureResult,
+                    flashMode = flashMode,
+                    stats = latestLuminanceStats,
+                    gyroEngine = gyroStabilizationEngine
+                )
+                if (plan.bracketType != com.example.camera.engine.hdr.HdrBracketType.SINGLE_FRAME) {
+                    takePhotoHdrBurst(plan, onComplete)
+                    return
+                }
             }
         }
         takePhotoStandard(onComplete)
@@ -11115,9 +11305,55 @@ class Camera2Engine(private val context: Context) {
     }
 
     private fun processPhotoWithCustomPipeline(jpegBytes: ByteArray): Pair<ByteArray, Boolean> {
-        return Pair(jpegBytes, false)
-    }
+        try {
+            val preset = preferences.getActivePipelinePreset()
+            val params = preferences.getPipelineParams(preset.id)
+            val lens = _selectedLens.value
+            val front = lens?.facing == CameraCharacteristics.LENS_FACING_FRONT
+            val source = decodeUprightBitmapFromJpeg(
+                jpegBytes = jpegBytes,
+                captureOrientation = getCaptureJpegOrientation(),
+                isFrontFacing = front,
+                mirrorHorizontally = front && saveSelfieAsPreviewed,
+                mutable = true
+            ) ?: return Pair(jpegBytes, false)
 
+            val processed = runBlocking(Dispatchers.Default) {
+                customImagePipelineEngine.processAndEncodeToJpegBytes(
+                    source = source,
+                    params = params,
+                    jpegQuality = preferences.jpegQuality
+                )
+            }
+            val maxDimension = max(source.width, source.height)
+            val scale = (1080f / maxDimension).coerceAtMost(1f)
+            val preview = if (scale < 0.95f) {
+                Bitmap.createScaledBitmap(
+                    source,
+                    (source.width * scale).roundToInt().coerceAtLeast(1),
+                    (source.height * scale).roundToInt().coerceAtLeast(1),
+                    true
+                )
+            } else {
+                source.copy(Bitmap.Config.ARGB_8888, true)
+            }
+            com.example.camera.pipeline.engine.PipelineCaptureCache.setCapture(
+                com.example.camera.pipeline.engine.PipelineCaptureSource(
+                    fullResBitmap = source,
+                    previewBitmap = preview,
+                    orientationDegrees = 0,
+                    isFrontFacing = front,
+                    lensInfo = lens,
+                    appliedPreset = preset,
+                    appliedParams = params
+                )
+            )
+            return Pair(copyExifFromOriginal(jpegBytes, processed, forceOrientationNormal = true), true)
+        } catch (t: Throwable) {
+            Log.e(TAG, "Custom photo pipeline failed; preserving the original JPEG", t)
+            return Pair(jpegBytes, false)
+        }
+    }
     private fun copyExifFromOriginal(
         srcBytes: ByteArray,
         dstBytes: ByteArray,
@@ -11151,14 +11387,18 @@ class Camera2Engine(private val context: Context) {
         var effectiveBytes = bytes
         var wasProcessingApplied = false
 
-        // Video-only camera: still pipeline bypassed
+        if (!skipPipeline && currentMode == CameraMode.PHOTO && preferences.isCustomPipelineEnabled) {
+            val (pipelineBytes, applied) = processPhotoWithCustomPipeline(effectiveBytes)
+            effectiveBytes = pipelineBytes
+            if (applied) wasProcessingApplied = true
+        }
 
         val activeLens = _selectedLens.value
         val isFrontFacing = activeLens?.facing == CameraCharacteristics.LENS_FACING_FRONT
         val captureOrientation = getCaptureJpegOrientation()
 
         val isProAdjusted = (proSaturation.value != 0f || proContrast.value != 1.0f || proHighlights.value != 0f || proShadows.value != 0f)
-        val needsColorProcessing = !skipPipeline && isProAdjusted
+        val needsColorProcessing = !skipPipeline && (isProAdjusted || (currentMode == CameraMode.PHOTO && selectedPhotoFilter != PhotoFilter.ORIGINAL))
 
         // Check whether effectiveBytes still needs physical rotation or front-camera mirroring
         val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -11209,9 +11449,15 @@ class Camera2Engine(private val context: Context) {
                         rawBitmap
                     }
 
-                    // Apply filter and Pro image adjustments if active
+                    // Apply the selected Oppo photo look and VCamera Pro controls to the final still.
                     val colorMatrix = android.graphics.ColorMatrix()
                     var hasColorTransform = false
+                    if (!skipPipeline && currentMode == CameraMode.PHOTO) {
+                        selectedPhotoFilter.toAndroidColorMatrix()?.let { filterMatrix ->
+                            colorMatrix.postConcat(filterMatrix)
+                            hasColorTransform = true
+                        }
+                    }
                     if (needsColorProcessing) {
                         if (proSaturation.value != 0f) {
                             val satMat = android.graphics.ColorMatrix().apply {
