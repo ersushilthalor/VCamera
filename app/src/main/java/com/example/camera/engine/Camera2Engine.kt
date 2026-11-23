@@ -9092,9 +9092,11 @@ class Camera2Engine(private val context: Context) {
 
                 val activeLensRecorderSurface = dualCameraRecordingRelay?.getRecorderSurfaceForLens(lens) ?: recorderSurface
                 activeRecordingSurface = activeLensRecorderSurface
+                // Standard Video is camera-YUV -> MGC -> one EGL output fan-out (viewfinder + encoder).
+                // The relay's OES SurfaceTexture inputs are not Camera2 recording/preview targets.
+                val eisPlusOnlyVideoOutput = currentMode == CameraMode.VIDEO && !isSpecialVideoRecording
 
-                // Native Camera2 video recording session:
-                // Feeds camera frames to both previewSurface and recorderSurface.
+                // Native Camera2 video recording session: EIS+ YUV is the only active camera frame target.
                 backgroundHandler?.post {
                     try {
                         val dualMode = if (shouldKeepUltraWideStreamReady() && lens.facing == CameraCharacteristics.LENS_FACING_BACK) {
@@ -9121,7 +9123,8 @@ class Camera2Engine(private val context: Context) {
                         // Logical Multi-Camera with Physical Sub-Cameras:
                         // Configure BOTH Main and Ultra-Wide physical streams in the same recording CameraCaptureSession
                         // so Main <-> Ultra-Wide switching during recording is 0ms without closing or reconfiguring the session.
-                        if (shouldKeepUltraWideStreamReady() &&
+                        if (!eisPlusOnlyVideoOutput &&
+                            shouldKeepUltraWideStreamReady() &&
                             Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
                             dualMode == DualStreamingMode.LOGICAL_MULTI_CAMERA_PHYSICAL &&
                             mainLensForRec != null &&
@@ -9394,10 +9397,17 @@ class Camera2Engine(private val context: Context) {
                         activeSessionPhysicalCameraId = targetPhysId
 
                         val recordBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                            if (!eisPlusPreviewViaRelay) addTarget(previewSurf)
-                            addTarget(activeLensRecorderSurface)
-                            if (eisPlusStarted) {
-                                activeVideoEisPlusSurface?.takeIf { it.isValid }?.let(::addTarget)
+                            if (eisPlusOnlyVideoOutput) {
+                                val requiredYuvSurface = activeVideoEisPlusSurface
+                                    ?.takeIf { eisPlusStarted && it.isValid }
+                                    ?: throw IllegalStateException("Mandatory EIS+ YUV output surface is unavailable")
+                                addTarget(requiredYuvSurface)
+                            } else {
+                                if (!eisPlusPreviewViaRelay) addTarget(previewSurf)
+                                addTarget(activeLensRecorderSurface)
+                                if (eisPlusStarted) {
+                                    activeVideoEisPlusSurface?.takeIf { it.isValid }?.let(::addTarget)
+                                }
                             }
                             applyCommonSettings(this)
                             set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
@@ -9421,7 +9431,6 @@ class Camera2Engine(private val context: Context) {
                             previewRequestBuilder = recordBuilder
                         }
 
-                        var isFallbackActive = false
                         fun startConfiguredRecordingSession(session: CameraCaptureSession) {
                             Log.i(TAG, "[RECORDING_SESSION] Video recording session configured")
                             captureSession = session
@@ -9517,12 +9526,11 @@ class Camera2Engine(private val context: Context) {
                         createRecordingCaptureSession(
                             camera = camera,
                             previewSurface = previewSurf,
-                            recorderSurface = activeLensRecorderSurface,
+                            recorderSurface = if (eisPlusOnlyVideoOutput) null else activeLensRecorderSurface,
                             is10Bit = is10BitSession,
                             physicalCameraId = targetPhysId,
                             stabilizationSurface = if (eisPlusStarted) activeVideoEisPlusSurface else null,
-                                                     stabilizationPhysicalCameraId = eisPlusPhysicalId,
-
+                            stabilizationPhysicalCameraId = eisPlusPhysicalId,
                             previewViaRelay = eisPlusPreviewViaRelay,
                             callback = checkNotNull(sessionCallback) { "Recording session callback was unavailable" }
                         )
