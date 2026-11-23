@@ -3699,7 +3699,6 @@ class Camera2Engine(private val context: Context) {
                 val previewSurf = getActivePreviewSurface()
                 val relay = dualCameraRecordingRelay
                 val requiresMgcVideo = currentMode == CameraMode.VIDEO && relay != null
-                var requestedVideoRes: CameraResolution? = null
                 if (relay != null) {
                     val targetSource = if (targetLens.lensType == LensType.ULTRAWIDE) {
                         PreviewStreamSource.ULTRAWIDE
@@ -3708,7 +3707,6 @@ class Camera2Engine(private val context: Context) {
                     }
                     val requestedRes = activeRecordingStreamConfig?.videoResolution
                         ?: (userSelectedVideoResolution ?: _selectedVideoResolution.value ?: CameraResolution(1920, 1080))
-                    requestedVideoRes = requestedRes
                     val effectiveRes = resolveEffectiveVideoResolutionForLens(targetLens, requestedRes)
                     relay.updateInputBufferSize(
                         isUltraWide = (targetLens.lensType == LensType.ULTRAWIDE),
@@ -5512,7 +5510,9 @@ class Camera2Engine(private val context: Context) {
                 BackgroundCameraStatus.OFF
             }
         }
-        val previewSurf = previewRelay?.getRecorderSurfaceForLens(activeLens) ?: directPreviewSurf
+        // The MGC renderer owns the preview output. Never route idle Video preview through
+        // the relay's legacy OES input surface (which is intentionally not allocated).
+        val previewSurf = directPreviewSurf
         val previewEisPlusSurface = if (previewRelay != null) {
             activeVideoEisPlusSurface?.takeIf { it.isValid }
         } else null
