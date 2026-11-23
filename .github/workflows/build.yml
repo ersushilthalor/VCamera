@@ -2,9 +2,9 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ main, master, 'feature/photon-eis-plus' ]
+    branches: [ main, master, 'feature/photon-eis-plus', 'fix/photon-eis-plus-dual-lens-handoff' ]
   pull_request:
-    branches: [ main, master, 'feature/photon-eis-plus' ]
+    branches: [ main, master, 'feature/photon-eis-plus', 'fix/photon-eis-plus-dual-lens-handoff' ]
   workflow_dispatch:
 
 jobs:
