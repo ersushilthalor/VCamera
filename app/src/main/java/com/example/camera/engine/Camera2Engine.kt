@@ -5422,7 +5422,7 @@ class Camera2Engine(private val context: Context) {
             )
 
             if (activeRelay == null) {
-                activeRelay = DualCameraRecordingRelay(
+                val createdRelay = DualCameraRecordingRelay(
                     encoderTargetSurface = null,
                     bufferWidth = previewBuffer.width,
                     bufferHeight = previewBuffer.height,
@@ -5437,24 +5437,23 @@ class Camera2Engine(private val context: Context) {
                     initialAdjustments = currentVideoAdjustments,
                     eisPlusPipeline = candidate,
                 )
-                if (!activeRelay.isRelayReady) {
+                if (!createdRelay.isRelayReady) {
                     candidate.stop()
-                    activeRelay.release()
-                    activeRelay = null
+                    createdRelay.release()
                     lastFailureReason = "preview EGL relay initialization failed"
                     EisPlusDiagnosticLog.event("CAMERA2", "PREVIEW_RELAY_FAILED", lastFailureReason, "ERROR")
                     break
                 }
-                val initializedRelay = activeRelay
-                initializedRelay.onFirstPreviewFrameAfterSwitch = {
-                    val renderedSource = initializedRelay.activeSource
+                createdRelay.onFirstPreviewFrameAfterSwitch = {
+                    val renderedSource = createdRelay.activeSource
                     _isUsingUltraWideSurface.value = renderedSource == PreviewStreamSource.ULTRAWIDE
                     _displayedPreviewSource.value = renderedSource
                     _isEisPlusPreviewWaitingForFirstFrame.value = false
                     pendingEisPlusPreviewRollbackLens = null
                     pendingEisPlusPreviewRollbackZoom = null
                 }
-                previewVideoEisPlusRelay = initializedRelay
+                activeRelay = createdRelay
+                previewVideoEisPlusRelay = createdRelay
             }
 
             if (activeRelay == null) {
