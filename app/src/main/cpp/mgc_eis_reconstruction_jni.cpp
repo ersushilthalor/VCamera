@@ -315,12 +315,13 @@ Java_com_example_camera_stabilization_MgcEisNativeBridge_processFrame(
     }
     env->ReleaseFloatArrayElements(row_homographies, matrices, 0);
 
-    if (output_state && env->GetArrayLength(output_state) >= 2) {
-      const jfloat values[2] = {
+    if (output_state && env->GetArrayLength(output_state) >= 3) {
+      const jfloat values[3] = {
           static_cast<jfloat>(result->applied_strength),
           result->tripod_mode ? 1.0f : 0.0f,
+          result->used_realtime_gyro_fallback ? 1.0f : 0.0f,
       };
-      env->SetFloatArrayRegion(output_state, 0, 2, values);
+      env->SetFloatArrayRegion(output_state, 0, 3, values);
     }
     return result->source_timestamp_ns;
   } catch (const std::exception &error) {
