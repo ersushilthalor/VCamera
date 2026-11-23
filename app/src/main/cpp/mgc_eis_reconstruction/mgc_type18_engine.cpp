@@ -1115,6 +1115,9 @@ private:
       selected_queue = &realtime_gyro_;
     }
     const type18::GyroPoseQueue &queue = *selected_queue;
+    const bool used_realtime_gyro_fallback =
+        !frame.half_resolution_sensor_mode &&
+        selected_queue == &realtime_gyro_;
     // 0x22D660C..0x22D666C uses the current output frame minus the previous
     // output frame. It never uses the next buffered frame's period.
     const std::int64_t measured_period =
@@ -1160,6 +1163,7 @@ private:
       StabilizedFrame output;
       output.timestamp_ns = frame.frame_timestamp_ns;
       output.tripod_mode = tripod_mode_;
+      output.used_realtime_gyro_fallback = used_realtime_gyro_fallback;
       output.applied_strength = config_.stabilization_strength;
       output.diagnostic_measured_pose = current.primary;
       output.diagnostic_secondary_measured_pose = current.secondary;
@@ -1345,6 +1349,7 @@ private:
     StabilizedFrame output;
     output.timestamp_ns = frame.frame_timestamp_ns;
     output.tripod_mode = tripod_mode_;
+    output.used_realtime_gyro_fallback = used_realtime_gyro_fallback;
     output.applied_strength = config_.stabilization_strength;
     output.diagnostic_measured_pose = current.primary;
     output.diagnostic_secondary_measured_pose = current.secondary;
