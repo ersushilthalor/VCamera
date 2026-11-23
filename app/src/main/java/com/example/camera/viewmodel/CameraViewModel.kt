@@ -856,6 +856,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private fun resetLensToDefaultOneX(
         availableLenses: List<LensInfo> = engine.availableLenses.value
     ) {
+        // Prevent an in-flight transition from applying an old mode's zoom after this reset.
+        engine.zoomTransitionController.cancelTransition()
+        engine.isContinuousZoomTransitionActive = false
+
         val currentLens = engine.selectedLens.value
         val facing = currentLens?.facing ?: preferences.lastFacing
         val targetLens = if (facing == CameraCharacteristics.LENS_FACING_FRONT) {
