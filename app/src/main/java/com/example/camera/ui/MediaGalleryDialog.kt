@@ -67,6 +67,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -544,8 +545,8 @@ private fun MediaGalleryPhotoViewer(
     ) {
         val decoded = try {
             withContext(Dispatchers.IO) {
-                val main = decodeGalleryImage(context, photo.uri, 2400)
-                val ultraWide = photo.ultraWideUri?.let { decodeGalleryImage(context, it, 2400) }
+                val main = decodeGalleryImage(context, photo.uri, 1800)
+                val ultraWide = photo.ultraWideUri?.let { decodeGalleryImage(context, it, 1800) }
                 Pair(main, ultraWide)
             }
         } catch (e: Exception) {
@@ -567,6 +568,14 @@ private fun MediaGalleryPhotoViewer(
             bitmap = decoded.first,
             expandedBitmap = expanded
         )
+    }
+    DisposableEffect(photoLoadState) {
+        val ownedMain = photoLoadState.bitmap
+        val ownedExpanded = photoLoadState.expandedBitmap
+        onDispose {
+            runCatching { ownedMain?.takeIf { !it.isRecycled }?.recycle() }
+            runCatching { ownedExpanded?.takeIf { !it.isRecycled }?.recycle() }
+        }
     }
 
     val selectedBitmap = if (isExpanded) photoLoadState.expandedBitmap else photoLoadState.bitmap
