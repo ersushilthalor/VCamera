@@ -93,6 +93,7 @@ fun Viewfinder(
     cinemaConfig: CinemaConfig? = null,
     videoAdjustments: com.example.camera.model.VideoAdjustments? = null,
     isGpuRelayPreviewActive: Boolean = false,
+    isEisPlusPreviewWaitingForFirstFrame: Boolean = false,
     proSaturation: Float = 0f,
     proContrast: Float = 1.0f,
     proHighlights: Float = 0f,
@@ -672,6 +673,30 @@ fun Viewfinder(
                                 } else if (currentIsUsingUltraWideSurface) 2f else if (currentIsSpecialVideoPreviewEnabled) 3f else 1f
                             )
                     )
+                }
+
+                AnimatedVisibility(
+                    visible = isEisPlusPreviewWaitingForFirstFrame &&
+                        isGpuRelayPreviewActive && cameraMode == CameraMode.VIDEO,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .zIndex(7f),
+                    enter = fadeIn(animationSpec = tween(120)),
+                    exit = fadeOut(animationSpec = tween(240)),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(Color.Black.copy(alpha = 0.48f))
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            text = "Switching lens",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
                 }
 
                 if (currentIsSpecialVideoPreviewEnabled && !currentIsUsingUltraWideSurface) {
