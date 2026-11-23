@@ -36,6 +36,18 @@ fun normalizeStabilizationStrength(strength: Float): Float =
 fun normalizeStabilizationLookahead(lookahead: Int): Int =
     lookahead.coerceIn(MIN_VIDEO_STABILIZATION_LOOKAHEAD, MAX_VIDEO_STABILIZATION_LOOKAHEAD)
 
+/**
+ * The feeder must not hand future sensor samples to MGC before the corresponding camera-frame
+ * boundary has arrived. Camera2 and SensorManager callbacks are independent; the gyro callback
+ * can legitimately run 1- several frames ahead of ImageReader.
+ */
+internal fun isGyroSampleWithinFeedBoundary(
+    sampleTimestampNs: Long,
+    boundaryTimestampNs: Long,
+): Boolean = sampleTimestampNs > 0L &&
+    boundaryTimestampNs > 0L &&
+    sampleTimestampNs <= boundaryTimestampNs
+
 enum class StabilizationUseCase(
     internal val defaultStrength: Float,
 ) {
@@ -979,8 +991,15 @@ class RealtimeStabilizationCoordinator(context: Context) {
     }
 
     private fun feedGyroThroughBoundaryLocked() {
+        val boundaryTimestampNs = gyroFeedBoundaryNs
+        if (boundaryTimestampNs <= 0L) return
+
+        // Preserve future samples in timestamp order. They become eligible only after an
+        // ImageReader frame advances gyroFeedBoundaryNs to (or beyond) their sensor time.
         while (pendingGyroSamples.isNotEmpty()) {
-            val sample = pendingGyroSamples.removeFirst()
+            val sample = pendingGyroSamples.peekFirst() ?: break
+            if (!isGyroSampleWithinFeedBoundary(sample.timestampNs, boundaryTimestampNs)) break
+            pendingGyroSamples.removeFirst()
             nativeEngine.processGyro(sample.x, sample.y, sample.z, sample.timestampNs)
             lastProcessedGyroTimestampNs = sample.timestampNs
         }
