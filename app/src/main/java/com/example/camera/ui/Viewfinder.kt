@@ -60,6 +60,7 @@ import android.graphics.Bitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.camera.model.CameraMode
+import com.example.camera.model.PhotoFilter
 import com.example.camera.model.CinemaColorProfile
 import com.example.camera.model.CinemaConfig
 import com.example.camera.model.CinematicLut

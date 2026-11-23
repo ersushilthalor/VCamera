@@ -642,12 +642,6 @@ fun CameraScreen(
             onFlashClick = { viewModel.cycleFlashMode() },
             onTimerClick = { viewModel.cycleTimerMode() },
             onGridClick = { viewModel.cycleGridType() },
-            onToggleMegapixelMode = { viewModel.togglePhotoMegapixelMode() },
-            onPhotoFilterClick = { viewModel.togglePhotoFilterBar() },
-            onRefocusGalleryClick = {
-                isQuickOptionsOpen = false
-                isRefocusGalleryOpen = true
-            },
             onRawClick = { viewModel.toggleRawCapture() },
             onSettingsClick = { viewModel.setSettingsOpen(true) },
             isProActive = isManualProOpen,
@@ -707,6 +701,12 @@ fun CameraScreen(
             onFlashClick = { viewModel.cycleFlashMode() },
             onTimerClick = { viewModel.cycleTimerMode() },
             onGridClick = { viewModel.cycleGridType() },
+            onToggleMegapixelMode = { viewModel.togglePhotoMegapixelMode() },
+            onPhotoFilterClick = { viewModel.togglePhotoFilterBar() },
+            onRefocusGalleryClick = {
+                isQuickOptionsOpen = false
+                isRefocusGalleryOpen = true
+            },
             onRawClick = { viewModel.toggleRawCapture() },
             onSpecialPhotoToggle = { viewModel.setSpecialPhotoCaptureEnabled(!isSpecialPhotoEnabled) },
             onVideoSettingsClick = {
