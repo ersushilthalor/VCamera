@@ -32,9 +32,9 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -273,8 +273,8 @@ internal fun renderGalleryPhotoEdits(
     }
     Canvas(output).drawBitmap(transformed, 0f, 0f, paint)
 
-    if (transformed !== source && !transformed.isRecycled && transformed !== cropped) transformed.recycle()
-    if (cropped !== source && cropped !== transformed && !cropped.isRecycled) cropped.recycle()
+    if (transformed !== source && transformed !== cropped && !transformed.isRecycled) transformed.recycle()
+    if (cropped !== source && !cropped.isRecycled) cropped.recycle()
     return output
 }
 
