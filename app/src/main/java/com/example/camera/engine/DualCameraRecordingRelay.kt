@@ -216,6 +216,10 @@ class DualCameraRecordingRelay internal constructor(
     // The OES streams may still be drained for Camera2/standby synchronization, but all
     // user-visible preview and primary encoder frames must come from the matched YUV/MGC path.
     private val requiresEisPlusOutput: Boolean = eisPlusPipeline != null
+    // Standard EIS+ preview/recording has no Camera2 OES input at all. Keep OES surfaces
+    // only for legacy/non-EIS+ relay users or Special Video's independent UW companion track.
+    private val requiresOesCameraInputs: Boolean =
+        !requiresEisPlusOutput || secondaryEncoderTargetSurface != null
     // Accessed only from the relay GL thread; prevents one warning per raw camera frame.
     private var loggedEisPlusSourceBypass: PreviewStreamSource? = null
 
@@ -872,44 +876,46 @@ class DualCameraRecordingRelay internal constructor(
             throw IllegalStateException("eglMakeCurrent failed")
         }
 
-        val vertexShader = """
-            uniform mat4 uMVPMatrix;
-            uniform mat4 uSTMatrix;
-            attribute vec4 aPosition;
-            attribute vec4 aTextureCoord;
-            varying vec2 vTextureCoord;
-            void main() {
-                gl_Position = uMVPMatrix * aPosition;
-                vTextureCoord = (uSTMatrix * aTextureCoord).xy;
-            }
-        """.trimIndent()
-
-        val passthroughFragmentShader = """
-            #extension GL_OES_EGL_image_external : require
-            precision mediump float;
-            varying vec2 vTextureCoord;
-            uniform samplerExternalOES sTexture;
-            void main() {
-                gl_FragColor = texture2D(sTexture, vTextureCoord);
-            }
-        """.trimIndent()
-
-        passthroughProgramId = createProgram(vertexShader, passthroughFragmentShader)
-        ptUMVPMatrixHandle = GLES20.glGetUniformLocation(passthroughProgramId, "uMVPMatrix")
-        ptUSTMatrixHandle = GLES20.glGetUniformLocation(passthroughProgramId, "uSTMatrix")
-        ptAPositionHandle = GLES20.glGetAttribLocation(passthroughProgramId, "aPosition")
-        ptATextureCoordHandle = GLES20.glGetAttribLocation(passthroughProgramId, "aTextureCoord")
-        ptSTextureHandle = GLES20.glGetUniformLocation(passthroughProgramId, "sTexture")
-
-        val fragmentShader = VideoAdjustmentsPipeline.GLES_VIDEO_ADJUSTMENTS_FRAGMENT_SHADER
-
-        programId = createProgram(vertexShader, fragmentShader)
-        vadjHandles = VideoAdjustmentsPipeline.VideoAdjustmentsShaderHandles(programId)
-        uMVPMatrixHandle = GLES20.glGetUniformLocation(programId, "uMVPMatrix")
-        uSTMatrixHandle = GLES20.glGetUniformLocation(programId, "uSTMatrix")
-        aPositionHandle = GLES20.glGetAttribLocation(programId, "aPosition")
-        aTextureCoordHandle = GLES20.glGetAttribLocation(programId, "aTextureCoord")
-        sTextureHandle = GLES20.glGetUniformLocation(programId, "sTexture")
+        if (requiresOesCameraInputs) {
+            val vertexShader = """
+                uniform mat4 uMVPMatrix;
+                uniform mat4 uSTMatrix;
+                attribute vec4 aPosition;
+                attribute vec4 aTextureCoord;
+                varying vec2 vTextureCoord;
+                void main() {
+                    gl_Position = uMVPMatrix * aPosition;
+                    vTextureCoord = (uSTMatrix * aTextureCoord).xy;
+                }
+            """.trimIndent()
+    
+            val passthroughFragmentShader = """
+                #extension GL_OES_EGL_image_external : require
+                precision mediump float;
+                varying vec2 vTextureCoord;
+                uniform samplerExternalOES sTexture;
+                void main() {
+                    gl_FragColor = texture2D(sTexture, vTextureCoord);
+                }
+            """.trimIndent()
+    
+            passthroughProgramId = createProgram(vertexShader, passthroughFragmentShader)
+            ptUMVPMatrixHandle = GLES20.glGetUniformLocation(passthroughProgramId, "uMVPMatrix")
+            ptUSTMatrixHandle = GLES20.glGetUniformLocation(passthroughProgramId, "uSTMatrix")
+            ptAPositionHandle = GLES20.glGetAttribLocation(passthroughProgramId, "aPosition")
+            ptATextureCoordHandle = GLES20.glGetAttribLocation(passthroughProgramId, "aTextureCoord")
+            ptSTextureHandle = GLES20.glGetUniformLocation(passthroughProgramId, "sTexture")
+    
+            val fragmentShader = VideoAdjustmentsPipeline.GLES_VIDEO_ADJUSTMENTS_FRAGMENT_SHADER
+    
+            programId = createProgram(vertexShader, fragmentShader)
+            vadjHandles = VideoAdjustmentsPipeline.VideoAdjustmentsShaderHandles(programId)
+            uMVPMatrixHandle = GLES20.glGetUniformLocation(programId, "uMVPMatrix")
+            uSTMatrixHandle = GLES20.glGetUniformLocation(programId, "uSTMatrix")
+            aPositionHandle = GLES20.glGetAttribLocation(programId, "aPosition")
+            aTextureCoordHandle = GLES20.glGetAttribLocation(programId, "aTextureCoord")
+            sTextureHandle = GLES20.glGetUniformLocation(programId, "sTexture")
+        }
 
         if (eisPlusPipeline != null) {
             val eisVertexShader = """
@@ -1003,36 +1009,38 @@ class DualCameraRecordingRelay internal constructor(
         relayTexMatrix[5] = -1.0f
         relayTexMatrix[13] = 1.0f
 
-        val texIds = IntArray(2)
-        GLES20.glGenTextures(2, texIds, 0)
-        mainOesTexId = texIds[0]
-        ultraWideOesTexId = texIds[1]
-
-        for (texId in texIds) {
-            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texId)
-            GLES20.glTexParameterf(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR.toFloat())
-            GLES20.glTexParameterf(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR.toFloat())
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        if (requiresOesCameraInputs) {
+            val texIds = IntArray(2)
+            GLES20.glGenTextures(2, texIds, 0)
+            mainOesTexId = texIds[0]
+            ultraWideOesTexId = texIds[1]
+    
+            for (texId in texIds) {
+                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texId)
+                GLES20.glTexParameterf(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR.toFloat())
+                GLES20.glTexParameterf(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR.toFloat())
+                GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            }
+    
+            val mainSt = SurfaceTexture(mainOesTexId).apply {
+                setDefaultBufferSize(mainBufferW, mainBufferH)
+                setOnFrameAvailableListener({
+                    onFrameAvailable(isUltraWide = false)
+                }, glHandler)
+            }
+            val uwSt = SurfaceTexture(ultraWideOesTexId).apply {
+                setDefaultBufferSize(ultraWideBufferW, ultraWideBufferH)
+                setOnFrameAvailableListener({
+                    onFrameAvailable(isUltraWide = true)
+                }, glHandler)
+            }
+    
+            mainSurfaceTexture = mainSt
+            ultraWideSurfaceTexture = uwSt
+            internalMainSurface = Surface(mainSt)
+            internalUltraWideSurface = Surface(uwSt)
         }
-
-        val mainSt = SurfaceTexture(mainOesTexId).apply {
-            setDefaultBufferSize(mainBufferW, mainBufferH)
-            setOnFrameAvailableListener({
-                onFrameAvailable(isUltraWide = false)
-            }, glHandler)
-        }
-        val uwSt = SurfaceTexture(ultraWideOesTexId).apply {
-            setDefaultBufferSize(ultraWideBufferW, ultraWideBufferH)
-            setOnFrameAvailableListener({
-                onFrameAvailable(isUltraWide = true)
-            }, glHandler)
-        }
-
-        mainSurfaceTexture = mainSt
-        ultraWideSurfaceTexture = uwSt
-        internalMainSurface = Surface(mainSt)
-        internalUltraWideSurface = Surface(uwSt)
     }
 
     private fun onFrameAvailable(isUltraWide: Boolean) {
