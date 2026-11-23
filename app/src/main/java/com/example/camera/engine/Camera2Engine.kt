@@ -8846,8 +8846,7 @@ class Camera2Engine(private val context: Context) {
                     is10BitSession -> "10-bit/HDR recording is not supported"
                     else -> null
                 }
-                val eisPlusEligible = preferences.videoEisPlusEnabled &&
-                    eisPlusModeFailureReason == null
+                val eisPlusEligible = eisPlusModeFailureReason == null
                 val eisPlusPipelineProbe = if (
                     eisPlusEligible && eisPlusCameraChars != null &&
                     eisPlusTimingChars != null && eisPlusYuvSize != null
@@ -8864,6 +8863,7 @@ class Camera2Engine(private val context: Context) {
                     eisPlusSupportFailureReason == null
                 }
                 val primaryEisPlusGeneration = videoEisPlusCaptureGeneration + 1L
+                eisPlusCandidate?.setStabilizationEnabled(preferences.videoEisPlusEnabled)
                 eisPlusCandidate?.configureDiagnostics(
                     source = initialStreamSource.name,
                     role = "RECORDING_PRIMARY",
@@ -8873,7 +8873,6 @@ class Camera2Engine(private val context: Context) {
                     generation = primaryEisPlusGeneration,
                 )
                 val eisPlusUnavailableReason = when {
-                    !preferences.videoEisPlusEnabled -> "disabled in Settings"
                     eisPlusModeFailureReason != null -> eisPlusModeFailureReason
                     eisPlusCameraChars == null -> "camera characteristics unavailable"
                     eisPlusTimingChars == null -> "sensor timestamp characteristics unavailable"
@@ -8882,7 +8881,7 @@ class Camera2Engine(private val context: Context) {
                     eisPlusSupportFailureReason != null -> eisPlusSupportFailureReason
                     else -> "available"
                 }
-                if (preferences.videoEisPlusEnabled) {
+                if (currentMode == CameraMode.VIDEO) {
                     EisPlusDiagnosticLog.beginIfNeeded(
                         context.applicationContext,
                         "mode=$currentMode camera=${camera.id} lens=${lens.lensType} resolution=${videoRes.width}x${videoRes.height} fps=$targetFps " +
@@ -8898,12 +8897,12 @@ class Camera2Engine(private val context: Context) {
                         if (eisPlusCandidate == null) "WARN" else "INFO",
                     )
                 }
-                if (preferences.videoEisPlusEnabled && eisPlusCandidate == null) {
-                    _videoEisPlusStatus.value = "Unavailable: $eisPlusUnavailableReason"
-                    Log.w(TAG, "Photon EIS+ unavailable: $eisPlusUnavailableReason")
-                    EisPlusDiagnosticLog.event("CAMERA2", "EIS_UNAVAILABLE", eisPlusUnavailableReason, "ERROR")
-                } else if (!preferences.videoEisPlusEnabled) {
-                    _videoEisPlusStatus.value = "Disabled"
+                if (currentMode == CameraMode.VIDEO && eisPlusCandidate == null) {
+                    val reason = "Mandatory EIS+ pipeline unavailable: $eisPlusUnavailableReason"
+                    _videoEisPlusStatus.value = reason
+                    EisPlusDiagnosticLog.event("CAMERA2", "EIS_UNAVAILABLE", reason, "ERROR")
+                    cleanupFailedRecording(onError, reason)
+                    return
                 }
 
                 // Initialize DualCameraRecordingRelay as the live GPU processing surface:
@@ -8921,7 +8920,7 @@ class Camera2Engine(private val context: Context) {
                     sensorOrientation = sensorOrient,
                     deviceRotation = currentRot,
                     isFront = isFront,
-                    previewTargetSurface = if (eisPlusCandidate != null) previewSurf else null,
+                    previewTargetSurface = if (currentMode == CameraMode.VIDEO) previewSurf else null,
                     previewWidth = viewfinderWidth,
                     previewHeight = viewfinderHeight,
                     initialAdjustments = currentVideoAdjustments,
@@ -8935,25 +8934,32 @@ class Camera2Engine(private val context: Context) {
                     } else null,
                     eisPlusPipeline = eisPlusCandidate
                 )
-                // EGL preview attachment is deferred until Camera2 has replaced the old preview session.
-                // The relay can still encode stabilized YUV frames if its optional preview output fails.
+                // Both the viewfinder and encoder must consume the same MGC/YUV output.
+                // If EGL cannot service both targets, fail closed instead of rendering raw OES.
                 var eisPlusPreviewViaRelay = eisPlusCandidate != null && relay.isRelayReady
                 var eisPlusStarted = false
-                if (eisPlusCandidate != null && !eisPlusPreviewViaRelay) {
-                    val reason = "GPU recording relay preview path unavailable"
-                    _videoEisPlusStatus.value = "Unavailable: $reason"
+                if (!eisPlusPreviewViaRelay || eisPlusCandidate == null ||
+                    eisPlusYuvSize == null || eisPlusCameraChars == null || eisPlusTimingChars == null
+                ) {
+                    val reason = "Mandatory EIS+ GPU preview/record relay is unavailable"
+                    _videoEisPlusStatus.value = reason
                     EisPlusDiagnosticLog.event("CAMERA2", "RELAY_NOT_READY", reason, "ERROR")
-                    Log.w(TAG, "Photon EIS+ unavailable: $reason; using synchronized relay fallback")
+                    relay.release()
+                    cleanupFailedRecording(onError, reason)
+                    return
                 }
-                if (eisPlusPreviewViaRelay && eisPlusCandidate != null && eisPlusYuvSize != null &&
+                if (eisPlusCandidate != null && eisPlusYuvSize != null &&
                     eisPlusCameraChars != null && eisPlusTimingChars != null
                 ) {
                     eisPlusCandidate.onRuntimeUnavailable = {
-                        _videoEisPlusStatus.value = "Disabled by HAL conflict"
-                        Log.w(
-                            TAG,
-                            "Photon EIS+ fallback: HAL kept CONTROL_VIDEO_STABILIZATION_MODE non-OFF after an OFF request",
-                        )
+                        val reason = "EIS+ stopped: camera HAL stabilization conflict"
+                        _videoEisPlusStatus.value = reason
+                        Log.e(TAG, reason)
+                        (backgroundHandler ?: mainHandler)?.post {
+                            if (_isRecordingVideo.value || isStartingRecording.get()) {
+                                cleanupFailedRecording(onError, reason)
+                            }
+                        }
                     }
                     val started = eisPlusCandidate.start(
                         cameraId = eisPlusCameraId,
@@ -8969,8 +8975,8 @@ class Camera2Engine(private val context: Context) {
                         onUnavailable = {
                             val reason = eisPlusCandidate.lastStartFailureReason
                                 ?: "input pipeline did not start"
-                            _videoEisPlusStatus.value = "Unavailable: $reason"
-                            Log.w(TAG, "Photon EIS+ fallback reason: $reason; using synchronized relay frames")
+                            _videoEisPlusStatus.value = "EIS+ input unavailable: $reason; raw fallback blocked"
+                            Log.e(TAG, "Mandatory EIS+ input unavailable: $reason")
                         }
                     )
                     if (started && eisPlusCandidate.surface?.isValid == true) {
@@ -9007,9 +9013,11 @@ class Camera2Engine(private val context: Context) {
                         eisPlusCandidate.stop()
                         val reason = eisPlusCandidate.lastStartFailureReason
                             ?: "input pipeline initialization failed"
-                        _videoEisPlusStatus.value = "Unavailable: $reason"
+                        _videoEisPlusStatus.value = "Mandatory EIS+ start failed: $reason"
                         EisPlusDiagnosticLog.event("CAMERA2", "PIPELINE_START_FAILED", reason, "ERROR")
-                        Log.w(TAG, "Photon EIS+ fallback reason: $reason; using unwarped relay frames")
+                        relay.release()
+                        cleanupFailedRecording(onError, "Mandatory EIS+ input failed to start: $reason")
+                        return
                     }
                 }
 
@@ -9452,35 +9460,15 @@ class Camera2Engine(private val context: Context) {
                                                 _isGpuRelayPreviewActive.value = true
                                                 startConfiguredRecordingSession(session)
                                             } else {
-                                                Log.w(
+                                                Log.e(
                                                     TAG,
-                                                    "EIS+ preview attachment failed; keeping stabilized encoder output and restoring direct Camera2 preview",
+                                                    "Mandatory EIS+ preview attachment failed; refusing direct Camera2 preview fallback",
                                                 )
                                                 eisPlusPreviewViaRelay = false
                                                 _isGpuRelayPreviewActive.value = false
-                                                runCatching { recordBuilder.addTarget(previewSurf) }
-                                                    .onFailure {
-                                                        cleanupFailedRecording(
-                                                            onError,
-                                                            "Could not restore the direct preview surface: ${it.message}",
-                                                        )
-                                                        return@post
-                                                    }
-                                                createRecordingCaptureSession(
-                                                    camera = camera,
-                                                    previewSurface = previewSurf,
-                                                    recorderSurface = activeLensRecorderSurface,
-                                                    is10Bit = is10BitSession,
-                                                    physicalCameraId = targetPhysId,
-                                                    stabilizationSurface = if (eisPlusStarted) activeVideoEisPlusSurface else null,
-                                                    stabilizationPhysicalCameraId = eisPlusPhysicalId,
-
-                                                    previewViaRelay = false,
-                                                    callback = sessionCallback
-                                                        ?: run {
-                                                            cleanupFailedRecording(onError, "Recording session callback was unavailable")
-                                                            return@post
-                                                        },
+                                                cleanupFailedRecording(
+                                                    onError,
+                                                    "Mandatory EIS+ EGL preview could not attach to the viewfinder",
                                                 )
                                             }
                                         }
@@ -9491,125 +9479,17 @@ class Camera2Engine(private val context: Context) {
                             }
 
                             override fun onConfigureFailed(session: CameraCaptureSession) {
-                                EisPlusDiagnosticLog.event("CAMERA2", "RECORDING_SESSION_CONFIGURE_FAILED", "Camera2 rejected recording output surfaces including EIS+ YUV", "ERROR")
-                                Log.w(TAG, "[RECORDING_SESSION] Video capture session configuration failed, trying safe standard fallback")
-                                if (activeVideoEisPlusPipeline != null) {
-                                    val reason = "Camera2 rejected the recording session with the MGC EIS+ YUV output"
-                                    _videoEisPlusStatus.value = "Unavailable: $reason"
-                                    Log.w(TAG, "Photon EIS+ fallback reason: $reason")
-                                }
-                                stopActiveVideoEisPlus()
-                                // The failed Camera2 session never handed the viewfinder Surface to EGL.
-                                // Restore that Surface as a direct Camera2 output for the safe fallback.
-                                eisPlusPreviewViaRelay = false
+                                val reason = "Camera2 rejected the mandatory EIS+ YUV recording session"
+                                EisPlusDiagnosticLog.event(
+                                    "CAMERA2",
+                                    "RECORDING_SESSION_CONFIGURE_FAILED",
+                                    reason,
+                                    "ERROR",
+                                )
+                                _videoEisPlusStatus.value = "$reason; normal pipeline fallback blocked"
                                 _isGpuRelayPreviewActive.value = false
-                                activeSessionPhysicalCameraId = null
-                                if (!isFallbackActive) {
-                                    isFallbackActive = true
-                                    try {
-                                        // Build safe fallback capture request: standard FPS, standard template
-                                        val safeBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                                            if (!eisPlusPreviewViaRelay) addTarget(previewSurf)
-                                            addTarget(activeLensRecorderSurface)
-                                            applyCommonSettings(this)
-                                            set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
-                                            // Set safe 30fps range
-                                            val fpsRanges = chars?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: emptyArray()
-                                            val safeRange = fpsRanges.firstOrNull { it.upper == 30 } ?: fpsRanges.firstOrNull()
-                                            if (safeRange != null) {
-                                                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, safeRange)
-                                            }
-                                        }
-                                        synchronized(previewRequestLock) {
-                                            previewRequestBuilder = safeBuilder
-                                        }
-
-                                        @Suppress("DEPRECATION")
-                                        val fallbackSurfaces = mutableListOf<Surface>().apply {
-                                            if (!eisPlusPreviewViaRelay) add(previewSurf)
-                                            add(activeLensRecorderSurface)
-                                        }
-                                        camera.createCaptureSession(fallbackSurfaces, object : CameraCaptureSession.StateCallback() {
-                                            override fun onConfigured(fallbackSession: CameraCaptureSession) {
-                                                Log.i(TAG, "[RECORDING_SESSION] Fallback video recording session configured successfully")
-                                                captureSession = fallbackSession
-                                                try {
-                                                    synchronized(previewRequestLock) {
-                                                        applyCommonSettings(safeBuilder)
-                                                        fallbackSession.setRepeatingRequest(safeBuilder.build(), captureCallback, backgroundHandler)
-                                                    }
-                                                    if (!isSoftwareCinema) {
-                                                        mediaRecorder?.start()
-                                                    }
-                                                    dualCameraRecordingRelay?.startRecording()
-                                                    _isRecordingVideo.value = true
-                                                    isStartingRecording.set(false)
-                                                    startVideoTimer()
-                                                    val is4kRec = maxOf(videoRes.width, videoRes.height) >= 3840
-                                                    if (shouldKeepUltraWideStreamReady() && !is4kRec) {
-                                                        ensureUltraWideSimultaneousReady()
-                                                    }
-                                                    if (pendingLensWhileSwitching != null || pendingZoomWhileSwitching != null) {
-                                                        completeLensSwitch(lens)
-                                                    }
-                                                } catch (e: Exception) {
-                                                    cleanupFailedRecording(onError, "Failed to start fallback recording: ${e.message}")
-                                                }
-                                            }
-
-                                            override fun onConfigureFailed(fallbackSession: CameraCaptureSession) {
-                                                Log.e(TAG, "[RECORDING_SESSION] Fallback video session failed, trying preview-only recording fallback")
-                                                // Extreme hardware compatibility fallback (e.g. LEGACY or budget devices)
-                                                try {
-                                                    val previewTemplateBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                                                        if (!eisPlusPreviewViaRelay) addTarget(previewSurf)
-                                                        addTarget(activeLensRecorderSurface)
-                                                        applyCommonSettings(this)
-                                                    }
-                                                    synchronized(previewRequestLock) {
-                                                        previewRequestBuilder = previewTemplateBuilder
-                                                    }
-                                                    @Suppress("DEPRECATION")
-                                                    camera.createCaptureSession(fallbackSurfaces, object : CameraCaptureSession.StateCallback() {
-                                                        override fun onConfigured(prevSession: CameraCaptureSession) {
-                                                            captureSession = prevSession
-                                                            try {
-                                                                synchronized(previewRequestLock) {
-                                                                    applyCommonSettings(previewTemplateBuilder)
-                                                                    prevSession.setRepeatingRequest(previewTemplateBuilder.build(), captureCallback, backgroundHandler)
-                                                                }
-                                                                if (!isSoftwareCinema) {
-                                                                    mediaRecorder?.start()
-                                                                }
-                                                                dualCameraRecordingRelay?.startRecording()
-                                                                _isRecordingVideo.value = true
-                                                                isStartingRecording.set(false)
-                                                                startVideoTimer()
-                                                                if (pendingLensWhileSwitching != null || pendingZoomWhileSwitching != null) {
-                                                                    completeLensSwitch(lens)
-                                                                }
-                                                            } catch (e: Exception) {
-                                                                cleanupFailedRecording(onError, "Recording initialization failed: ${e.message}")
-                                                            }
-                                                        }
-
-                                                        override fun onConfigureFailed(prevSession: CameraCaptureSession) {
-                                                            cleanupFailedRecording(onError, "Camera hardware failed to configure video capture session")
-                                                        }
-                                                    }, backgroundHandler)
-                                                    return
-                                                } catch (e: Exception) {
-                                                    Log.e(TAG, "Secondary fallback exception", e)
-                                                }
-                                                cleanupFailedRecording(onError, "Camera hardware failed to configure video capture session")
-                                            }
-                                        }, backgroundHandler)
-                                        return
-                                    } catch (e: Exception) {
-                                        Log.e(TAG, "Fallback capture session creation exception", e)
-                                    }
-                                }
-                                cleanupFailedRecording(onError, "Camera hardware failed to configure video capture session")
+                                stopActiveVideoEisPlus()
+                                cleanupFailedRecording(onError, reason)
                             }
                         }
 
