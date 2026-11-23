@@ -196,7 +196,8 @@ fun Viewfinder(
             opticalScale = calib.scaleCorrection,
             opticalOffsetX = calib.offsetXNorm,
             opticalOffsetY = calib.offsetYNorm,
-            isFrontCamera = isFrontCamera
+            isFrontCamera = isFrontCamera,
+            sensorRotationAlreadyApplied = isGpuRelayPreviewActive
         )
     }
     LaunchedEffect(
@@ -210,6 +211,7 @@ fun Viewfinder(
         cameraMode,
         sensorOrientation,
         isFrontCamera,
+        isGpuRelayPreviewActive,
         isUsingUltraWideSurface
     ) {
         mainTransformPendingFirstFrame = true
@@ -883,6 +885,28 @@ fun CameraGridOverlay(
 }
 
 /**
+ * Camera2 sensor-to-display rotation in degrees.
+ * Back cameras rotate against device rotation; front cameras rotate with it.
+ */
+internal fun calculateCameraPreviewRotationDegrees(
+    sensorOrientation: Int,
+    displayRotation: Int,
+    isFrontCamera: Boolean
+): Int {
+    val displayDegrees = when (displayRotation) {
+        Surface.ROTATION_90 -> 90
+        Surface.ROTATION_180 -> 180
+        Surface.ROTATION_270 -> 270
+        else -> 0
+    }
+    val normalizedSensor = Math.floorMod(sensorOrientation, 360)
+    return Math.floorMod(
+        if (isFrontCamera) normalizedSensor + displayDegrees else normalizedSensor - displayDegrees,
+        360
+    )
+}
+
+/**
  * Open Camera architecture viewfinder transformation engine.
  *
  * Fully replaces the previous OppoCam viewfinder aspect-ratio and mode-transition implementation
@@ -903,6 +927,8 @@ fun configureTransform(
     displayRotation: Int = Surface.ROTATION_0,
     sensorOrientation: Int = 90,
     isFrontCamera: Boolean = false,
+    /** True when an upstream relay has already applied sensor-to-display rotation. */
+    sensorRotationAlreadyApplied: Boolean = false,
     isHorizonLockEnabled: Boolean = false,
     horizonRollDegrees: Float = 0f,
     horizonNormX: Float = 0f,
@@ -933,14 +959,13 @@ fun configureTransform(
             // stretches that landscape buffer into its portrait bounds on common 90/270-degree
             // sensors. Calculate the sensor-to-display rotation for the active lens instead of
             // assuming that display rotation alone describes the required transform.
-            val deviceRotationDegrees = ((displayRotation % 4) + 4) % 4 * 90
-            val normalizedSensorOrientation = ((sensorOrientation % 360) + 360) % 360
-            val relativeRotation = if (isFrontCamera) {
-                (normalizedSensorOrientation + deviceRotationDegrees) % 360
-            } else {
-                (normalizedSensorOrientation - deviceRotationDegrees + 360) % 360
-            }
+            val relativeRotation = calculateCameraPreviewRotationDegrees(
+                sensorOrientation = sensorOrientation,
+                displayRotation = displayRotation,
+                isFrontCamera = isFrontCamera
+            )
             val swapsAxes = relativeRotation == 90 || relativeRotation == 270
+            val matrixRotation = if (sensorRotationAlreadyApplied) 0 else relativeRotation
             val orientedBufferW = if (swapsAxes) bufferH else bufferW
             val orientedBufferH = if (swapsAxes) bufferW else bufferH
 
@@ -957,7 +982,7 @@ fun configureTransform(
             val correctionScaleX = uniformFillScale / defaultScaleX
             val correctionScaleY = uniformFillScale / defaultScaleY
 
-            matrix.setRotate(relativeRotation.toFloat(), centerX, centerY)
+            matrix.setRotate(matrixRotation.toFloat(), centerX, centerY)
             matrix.postScale(correctionScaleX, correctionScaleY, centerX, centerY)
         }
     }
@@ -991,6 +1016,7 @@ internal fun updateTextureViewTransform(
     targetRatio: Float,
     sensorOrientation: Int = 90,
     isFrontCamera: Boolean = false,
+    sensorRotationAlreadyApplied: Boolean = false,
     isHorizonLockEnabled: Boolean = false,
     horizonRollDegrees: Float = 0f,
     horizonNormX: Float = 0f,
@@ -1023,6 +1049,7 @@ internal fun updateTextureViewTransform(
         displayRotation = displayRotation,
         sensorOrientation = sensorOrientation,
         isFrontCamera = isFrontCamera,
+        sensorRotationAlreadyApplied = sensorRotationAlreadyApplied,
         isHorizonLockEnabled = isHorizonLockEnabled,
         horizonRollDegrees = horizonRollDegrees,
         horizonNormX = horizonNormX,
