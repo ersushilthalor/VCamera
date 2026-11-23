@@ -5398,6 +5398,15 @@ class Camera2Engine(private val context: Context) {
         // Seamless lens switch during active video recording (Front, Back, Ultra-Wide)
         val isRecording = _isRecordingVideo.value
         val recSurface = activeRecordingSurface
+        val requiresMgcVideo = isRecording && currentMode == CameraMode.VIDEO && dualCameraRecordingRelay != null
+        val recordingEisPlusSurface = activeVideoEisPlusSurface?.takeIf {
+            activeVideoEisPlusPipeline?.isRunning == true && it.isValid
+        }
+        if (requiresMgcVideo && recordingEisPlusSurface == null) {
+            _videoEisPlusStatus.value = "Recording reconfiguration blocked: active EIS+ YUV stream is missing"
+            stopVideoRecording()
+            return
+        }
         if (isRecording && recSurface != null && recSurface.isValid) {
             try {
                 val useLogicalZoom = forceLogicalStream ||
@@ -5410,8 +5419,12 @@ class Camera2Engine(private val context: Context) {
 
                 val template = CameraDevice.TEMPLATE_RECORD
                 val recBuilder = camera.createCaptureRequest(template).apply {
-                    addTarget(previewSurf)
-                    addTarget(recSurface)
+                    if (requiresMgcVideo) {
+                        addTarget(recordingEisPlusSurface!!)
+                    } else {
+                        addTarget(previewSurf)
+                        addTarget(recSurface)
+                    }
                     applyCommonSettings(this)
                     set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
                 }
@@ -5424,9 +5437,12 @@ class Camera2Engine(private val context: Context) {
                 createRecordingCaptureSession(
                     camera = camera,
                     previewSurface = previewSurf,
-                    recorderSurface = recSurface,
+                    recorderSurface = if (requiresMgcVideo) null else recSurface,
                     is10Bit = is10BitMode,
                     physicalCameraId = targetPhysId,
+                    stabilizationSurface = if (requiresMgcVideo) recordingEisPlusSurface else null,
+                    stabilizationPhysicalCameraId = if (requiresMgcVideo) activeVideoEisPlusPhysicalCameraId else targetPhysId,
+                    previewViaRelay = requiresMgcVideo,
                     callback = object : CameraCaptureSession.StateCallback() {
                         override fun onConfigured(session: CameraCaptureSession) {
                             onSessionConfigurationFinished()
@@ -5459,6 +5475,7 @@ class Camera2Engine(private val context: Context) {
                             completeLensSwitch(_selectedLens.value)
                             Log.e(TAG, "Failed to configure video recording session after lens switch")
                             _isCameraReady.value = false
+                            if (requiresMgcVideo) stopVideoRecording()
                         }
                     }
                 )
@@ -5466,6 +5483,11 @@ class Camera2Engine(private val context: Context) {
             } catch (e: Exception) {
                 activeSessionPhysicalCameraId = null
                 Log.e(TAG, "Error configuring video recording capture session during lens switch", e)
+                if (requiresMgcVideo) {
+                    _videoEisPlusStatus.value = "Recording reconfiguration failed; raw fallback blocked"
+                    stopVideoRecording()
+                    return
+                }
             }
         }
 
