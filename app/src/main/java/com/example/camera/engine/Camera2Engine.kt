@@ -5194,8 +5194,8 @@ class Camera2Engine(private val context: Context) {
     }
 
     /**
-     * Starts the timestamp-matched MGC pipeline for idle Video preview. Camera2 feeds a
-     * relay-owned SurfaceTexture plus the matched YUV ImageReader; EGL alone owns the UI Surface.
+     * Starts the timestamp-matched MGC pipeline for idle Video preview. Camera2 feeds only
+     * the matched YUV ImageReader; the MGC renderer and EGL relay own the UI preview output.
      */
     private fun preparePreviewEisPlusRelay(
         lens: LensInfo?,
@@ -5362,7 +5362,8 @@ class Camera2Engine(private val context: Context) {
         )
         activateVideoEisPlusForSource(source, camera.id)
         videoEisPlusOisDisabledForSession = false
-        _videoEisPlusStatus.value = "Active · Live preview · $source"
+        val stabilizationLabel = if (preferences.videoEisPlusEnabled) "Stabilization ON" else "Stabilization OFF"
+        _videoEisPlusStatus.value = "$stabilizationLabel · MGC live preview · $source"
         _isGpuRelayPreviewActive.value = true
         EisPlusDiagnosticLog.event(
             "CAMERA2",
@@ -8185,7 +8186,6 @@ class Camera2Engine(private val context: Context) {
     private fun updateVideoEisPlusSourceStatus(source: PreviewStreamSource, preview: Boolean) {
         val stabilizationLabel = if (preferences.videoEisPlusEnabled) "Stabilization ON" else "Stabilization OFF"
         val unsupportedMode = currentMode != CameraMode.VIDEO ||
-            isSpecialVideoRecordingActive ||
             isSoftwareCinemaRecording ||
             activeRecordingStreamConfig?.is10Bit == true
         _videoEisPlusStatus.value = when {
