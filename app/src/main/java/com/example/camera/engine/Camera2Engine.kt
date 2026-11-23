@@ -5314,13 +5314,15 @@ class Camera2Engine(private val context: Context) {
             null
         }
 
-        currentRelay?.onFirstPreviewFrameAfterSwitch = {
-            val renderedSource = currentRelay.activeSource
-            _isUsingUltraWideSurface.value = renderedSource == PreviewStreamSource.ULTRAWIDE
-            _displayedPreviewSource.value = renderedSource
-            _isEisPlusPreviewWaitingForFirstFrame.value = false
-            pendingEisPlusPreviewRollbackLens = null
-            pendingEisPlusPreviewRollbackZoom = null
+        currentRelay?.let { relayForCallback ->
+            relayForCallback.onFirstPreviewFrameAfterSwitch = {
+                val renderedSource = relayForCallback.activeSource
+                _isUsingUltraWideSurface.value = renderedSource == PreviewStreamSource.ULTRAWIDE
+                _displayedPreviewSource.value = renderedSource
+                _isEisPlusPreviewWaitingForFirstFrame.value = false
+                pendingEisPlusPreviewRollbackLens = null
+                pendingEisPlusPreviewRollbackZoom = null
+            }
         }
         val relayWasReused = currentRelay != null
         val previousSource = currentRelay?.activeSource
@@ -5443,15 +5445,16 @@ class Camera2Engine(private val context: Context) {
                     EisPlusDiagnosticLog.event("CAMERA2", "PREVIEW_RELAY_FAILED", lastFailureReason, "ERROR")
                     break
                 }
-                activeRelay.onFirstPreviewFrameAfterSwitch = {
-                    val renderedSource = activeRelay.activeSource
+                val initializedRelay = activeRelay
+                initializedRelay.onFirstPreviewFrameAfterSwitch = {
+                    val renderedSource = initializedRelay.activeSource
                     _isUsingUltraWideSurface.value = renderedSource == PreviewStreamSource.ULTRAWIDE
                     _displayedPreviewSource.value = renderedSource
                     _isEisPlusPreviewWaitingForFirstFrame.value = false
                     pendingEisPlusPreviewRollbackLens = null
                     pendingEisPlusPreviewRollbackZoom = null
                 }
-                previewVideoEisPlusRelay = activeRelay
+                previewVideoEisPlusRelay = initializedRelay
             }
 
             if (activeRelay == null) {
