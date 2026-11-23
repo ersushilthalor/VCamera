@@ -333,6 +333,8 @@ class Camera2Engine(private val context: Context) {
     @Volatile
     private var standbyRecordingSessionFailed: Boolean = false
     @Volatile
+    private var logicalMultiCamStandbyEisPlusRejected: Boolean = false
+    @Volatile
     private var logicalMultiCamRecordingFailed: Boolean = false
     @Volatile
     private var logicalMultiCamDualRecSurfacesConfigured: Boolean = false
@@ -1685,7 +1687,9 @@ class Camera2Engine(private val context: Context) {
             val logicalCompanionEisPlusReady = videoEisPlusBindingsBySource[logicalCompanionSource]
                 ?.let { it.sessionCameraId == camera.id && it.pipeline.isRunning } == true
             val logicalCompanionEisPlusRequired = currentMode == CameraMode.VIDEO &&
-                preferences.videoEisPlusEnabled && previewVideoEisPlusRelay?.isRelayReady == true
+                preferences.videoEisPlusEnabled &&
+                previewVideoEisPlusRelay?.isRelayReady == true &&
+                !logicalMultiCamStandbyEisPlusRejected
             if ((!activeLogicalMultiCamUltraWideConfigured ||
                     activeLogicalMultiCamSpecialPhotoConfigured != needsSpecialPhotoReader ||
                     readerWasRecreated ||
@@ -2271,6 +2275,7 @@ class Camera2Engine(private val context: Context) {
     fun setVideoEisPlusEnabled(enabled: Boolean) {
         preferences.videoEisPlusEnabled = enabled
         previewEisPlusUnavailableForSession = false
+        logicalMultiCamStandbyEisPlusRejected = false
         if (_isRecordingVideo.value || isStartingRecording.get() || isStoppingRecording.get()) {
             _videoEisPlusStatus.value = if (enabled) "Will activate after recording" else "Disabled"
             return
@@ -5341,7 +5346,8 @@ class Camera2Engine(private val context: Context) {
                         val companionEisPlusBinding = if (
                             previewRelay != null &&
                             currentMode == CameraMode.VIDEO &&
-                            preferences.videoEisPlusEnabled
+                            preferences.videoEisPlusEnabled &&
+                            !logicalMultiCamStandbyEisPlusRejected
                         ) {
                             val requestedVideo = _selectedVideoResolution.value
                                 ?: CameraResolution(1920, 1080)
@@ -5507,14 +5513,30 @@ class Camera2Engine(private val context: Context) {
                                 override fun onConfigureFailed(session: CameraCaptureSession) {
                                     if (configGen != sessionConfigGeneration.get() || cameraDevice != camera) return
                                     onSessionConfigurationFinished()
-                                    companionEisPlusBinding?.let { binding ->
-                                        previewRelay?.let { unregisterVideoEisPlusBinding(binding, it) }
+                                    if (companionEisPlusBinding != null) {
+                                        logicalMultiCamStandbyEisPlusRejected = true
+                                        companionEisPlusBinding.let { binding ->
+                                            previewRelay?.let { unregisterVideoEisPlusBinding(binding, it) }
+                                        }
+                                        EisPlusDiagnosticLog.event(
+                                            "CAMERA2",
+                                            "LOGICAL_STANDBY_EIS_PLUS_HAL_REJECTED",
+                                            "camera=${camera.id} companion=${companionLensForEisPlus.lensType} " +
+                                                "physical=${companionPhysicalIdForEisPlus}; retrying dual preview without the standby YUV reader",
+                                            "ERROR"
+                                        )
+                                        Log.w(TAG, "[KEEP_ULTRAWIDE_READY] HAL rejected companion EIS+ output; retrying dual-physical preview without standby EIS+")
+                                        standbyPreviewEisPlusConfigured = false
+                                        activeLogicalMultiCamUltraWideConfigured = false
+                                        activeLogicalMultiCamSpecialPhotoConfigured = false
+                                        createCameraCaptureSession()
+                                    } else {
+                                        standbyPreviewEisPlusConfigured = false
+                                        activeLogicalMultiCamUltraWideConfigured = false
+                                        activeLogicalMultiCamSpecialPhotoConfigured = false
+                                        Log.w(TAG, "[KEEP_ULTRAWIDE_READY] Simultaneous dual-physical session rejected by HAL; falling back to standard session")
+                                        createCameraCaptureSession(forceLogicalStream = true)
                                     }
-                                    standbyPreviewEisPlusConfigured = false
-                                    activeLogicalMultiCamUltraWideConfigured = false
-                                    activeLogicalMultiCamSpecialPhotoConfigured = false
-                                    Log.w(TAG, "[KEEP_ULTRAWIDE_READY] Simultaneous dual-physical session rejected by HAL (including companion EIS+ output); falling back to standard session")
-                                    createCameraCaptureSession(forceLogicalStream = true)
                                 }
                             }
                         )
@@ -7896,6 +7918,9 @@ class Camera2Engine(private val context: Context) {
             activeRecordingStreamConfig?.is10Bit == true
         _videoEisPlusStatus.value = when {
             unsupportedMode -> "Unavailable: Photon EIS+ is limited to standard SDR Video"
+            logicalMultiCamStandbyEisPlusRejected &&
+                videoEisPlusBindingsBySource[source]?.pipeline?.isRunning != true ->
+                "Unavailable: HAL rejected standby lens EIS+ output"
             activeVideoEisPlusPipeline?.isRunning == true -> {
                 if (preview) "Active · Live preview · $source" else "Active · Recording · $source"
             }
