@@ -707,6 +707,15 @@ class DualCameraRecordingRelay internal constructor(
             )
             return
         }
+        if (activeSource == source && encoderTargetSurface?.isValid == true) {
+            // A physical sensor may change while the relay's logical source remains MAIN or
+            // ULTRAWIDE. Treat replacement of that source's EIS+ input as a clock handoff too.
+            pendingClockSyncOnSwitch = true
+            EisPlusDiagnosticLog.event(
+                "HANDOFF", "ACTIVE_SENSOR_PIPELINE_REPLACED",
+                "source=$source previous=${expectedPipeline.diagnosticSummary()} pendingClockSync=true",
+            )
+        }
         EisPlusDiagnosticLog.event(
             "RELAY", "EIS_PLUS_PIPELINE_DETACHED",
             "source=$source previous=${expectedPipeline.diagnosticSummary()} activeSource=$activeSource",
@@ -1484,26 +1493,28 @@ class DualCameraRecordingRelay internal constructor(
 
                 val sourceTimestampNs = frame.timestampNs
                 if (recordingStartMonotonicNs <= 0L) recordingStartMonotonicNs = sourceTimestampNs
-                if (sourceTimestampNs < recordingStartMonotonicNs) continue
                 val frameIntervalNs = 1_000_000_000L / fps.coerceAtLeast(1)
-                var presentationNs = sourceTimestampNs - recordingStartMonotonicNs - totalPausedDurationNs
-                // OES callbacks are suppressed for a matched EIS+ source; consume the same
-                // PTS handoff here or a sensor switch can leave an old clock offset in place.
-                if (pendingClockSyncOnSwitch) {
+                val handoffPending = pendingClockSyncOnSwitch
+                val clockResult = calculateEisPlusPresentationTimestamp(
+                    sourceTimestampNs = sourceTimestampNs,
+                    recordingStartTimestampNs = recordingStartMonotonicNs,
+                    totalPausedDurationNs = totalPausedDurationNs,
+                    lastOutputTimestampNs = lastOutputPtsNs,
+                    frameIntervalNs = frameIntervalNs,
+                    currentStreamClockOffsetNs = streamClockOffsetNs,
+                    handoffPending = handoffPending,
+                ) ?: continue
+
+                if (handoffPending) {
                     pendingClockSyncOnSwitch = false
-                    if (lastOutputPtsNs > 0L) {
-                        val expectedNext = lastOutputPtsNs + frameIntervalNs
-                        if (kotlin.math.abs(presentationNs - expectedNext) > 150_000_000L) {
-                            streamClockOffsetNs += expectedNext - presentationNs
-                            presentationNs = expectedNext
-                        }
-                    }
+                    EisPlusDiagnosticLog.event(
+                        "HANDOFF", "SENSOR_TIMESTAMP_REBASED",
+                        "source=$source sourceTsNs=$sourceTimestampNs lastPtsNs=$lastOutputPtsNs " +
+                            "newPtsNs=${clockResult.presentationTimeNs} offsetNs=${clockResult.streamClockOffsetNs}",
+                    )
                 }
-                presentationNs += streamClockOffsetNs
-                if (presentationNs < 0L) presentationNs = 0L
-                if (lastOutputPtsNs >= 0L && presentationNs <= lastOutputPtsNs) {
-                    presentationNs = lastOutputPtsNs + max(1_000_000L, frameIntervalNs / 4)
-                }
+                streamClockOffsetNs = clockResult.streamClockOffsetNs
+                val presentationNs = clockResult.presentationTimeNs
 
                 val hasEncoder = encoderSurface != null && encoderSurface != EGL14.EGL_NO_SURFACE
                 val encoded = if (hasEncoder) {
