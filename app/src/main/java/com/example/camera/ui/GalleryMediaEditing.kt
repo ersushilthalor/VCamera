@@ -435,16 +435,22 @@ internal fun GalleryPhotoEditorScreen(
                     saving = true
                     saveError = null
                     scope.launch {
-                        val saved = withContext(Dispatchers.IO) {
-                            val rendered = renderGalleryPhotoEdits(source, settings)
-                            try {
-                                GalleryMediaActions.saveEditedPhoto(context, rendered, displayName)
-                            } finally {
-                                if (!rendered.isRecycled) rendered.recycle()
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching {
+                                val rendered = renderGalleryPhotoEdits(source, settings)
+                                try {
+                                    GalleryMediaActions.saveEditedPhoto(context, rendered, displayName)
+                                } finally {
+                                    if (!rendered.isRecycled) rendered.recycle()
+                                }
                             }
                         }
                         saving = false
-                        if (saved != null) onSaved(saved) else saveError = "Could not save edited photo."
+                        result.onSuccess { saved ->
+                            if (saved != null) onSaved(saved) else saveError = "Could not save edited photo."
+                        }.onFailure { error ->
+                            saveError = error.message?.takeIf(String::isNotBlank) ?: "Could not save edited photo."
+                        }
                     }
                 }
             },
