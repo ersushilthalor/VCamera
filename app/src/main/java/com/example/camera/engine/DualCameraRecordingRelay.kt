@@ -14,6 +14,7 @@ import android.opengl.Matrix
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import com.example.camera.model.LensInfo
@@ -106,6 +107,107 @@ class DualCameraRecordingRelay internal constructor(
     /** Toggle the Ultra-Wide inset baked into encoder frames. */
     fun setSpecialVideoPiPEnabled(enabled: Boolean) {
         specialVideoPiPEnabled = enabled
+    }
+
+    private class SourceDiagnosticCounters {
+        val rawOesFrames = AtomicLong(0L)
+        val stabilizedFramesDequeued = AtomicLong(0L)
+        val encodedFrames = AtomicLong(0L)
+        val previewFrames = AtomicLong(0L)
+        val skippedFrames = AtomicLong(0L)
+    }
+
+    private data class HandoffBaseline(
+        val rawOesFrames: Long,
+        val stabilizedFramesDequeued: Long,
+        val encodedFrames: Long,
+        val previewFrames: Long,
+        val captureResults: Long,
+        val yuvImages: Long,
+        val pipelineFramesDelivered: Long,
+    )
+
+    private val sourceDiagnosticCounters = ConcurrentHashMap<PreviewStreamSource, SourceDiagnosticCounters>()
+    private val handoffGeneration = AtomicLong(0L)
+    private val handoffWatchdogHandler = Handler(Looper.getMainLooper())
+
+    private fun diagnosticsFor(source: PreviewStreamSource): SourceDiagnosticCounters =
+        sourceDiagnosticCounters.computeIfAbsent(source) { SourceDiagnosticCounters() }
+
+    private fun captureHandoffBaseline(source: PreviewStreamSource, pipeline: VideoEisPlusPipeline?): HandoffBaseline {
+        val counters = diagnosticsFor(source)
+        return HandoffBaseline(
+            rawOesFrames = counters.rawOesFrames.get(),
+            stabilizedFramesDequeued = counters.stabilizedFramesDequeued.get(),
+            encodedFrames = counters.encodedFrames.get(),
+            previewFrames = counters.previewFrames.get(),
+            captureResults = pipeline?.captureResultsReceived ?: 0L,
+            yuvImages = pipeline?.yuvImagesReceived ?: 0L,
+            pipelineFramesDelivered = pipeline?.framesDelivered ?: 0L,
+        )
+    }
+
+    private fun scheduleEisPlusHandoffWatchdog(
+        handoffId: Long,
+        source: PreviewStreamSource,
+        baseline: HandoffBaseline,
+    ) {
+        longArrayOf(250L, 850L, 1800L).forEach { delayMs ->
+            handoffWatchdogHandler.postDelayed({
+                if (isReleased.get() || handoffGeneration.get() != handoffId || activeSource != source) return@postDelayed
+                val pipeline = eisPlusPipelinesBySource[source]
+                val counters = diagnosticsFor(source)
+                val rawFrames = counters.rawOesFrames.get()
+                val dequeuedFrames = counters.stabilizedFramesDequeued.get()
+                val encodedFrames = counters.encodedFrames.get()
+                val previewFrames = counters.previewFrames.get()
+                val captureResults = pipeline?.captureResultsReceived ?: 0L
+                val yuvImages = pipeline?.yuvImagesReceived ?: 0L
+                val deliveredFrames = pipeline?.framesDelivered ?: 0L
+                val encoderAdvanced = encodedFrames > baseline.encodedFrames
+                val previewAdvanced = previewFrames > baseline.previewFrames
+                val reason = when {
+                    isPaused.get() -> "RECORDING_PAUSED_DURING_HANDOFF"
+                    pipeline == null -> "TARGET_EIS_PLUS_PIPELINE_NOT_BOUND"
+                    !pipeline.isRunning -> "TARGET_EIS_PLUS_PIPELINE_NOT_RUNNING:${pipeline.lastStartFailureReason.orEmpty()}"
+                    rawFrames <= baseline.rawOesFrames -> "TARGET_CAMERA_PREVIEW_FRAMES_NOT_ARRIVING"
+                    captureResults <= baseline.captureResults -> "TARGET_CAMERA_CAPTURE_RESULTS_NOT_ARRIVING"
+                    yuvImages <= baseline.yuvImages -> "TARGET_EIS_YUV_IMAGE_READER_NOT_RECEIVING_FRAMES"
+                    deliveredFrames <= baseline.pipelineFramesDelivered -> "YUV_AND_CAPTURE_DATA_ARRIVE_BUT_EIS_FEEDER_HAS_NO_OUTPUT_CHECK_GYRO_METADATA_LOOKAHEAD"
+                    dequeuedFrames <= baseline.stabilizedFramesDequeued -> "STABILIZED_RESULTS_NOT_DRAINED_BY_RELAY_GL_THREAD"
+                    !encoderAdvanced && encoderTargetSurface?.isValid == true -> "STABILIZED_FRAMES_REACHED_RELAY_BUT_ENCODER_RENDER_NOT_ADVANCING_CHECK_YUV_RENDER_EGL"
+                    !previewAdvanced && eglPreviewSurface != null && eglPreviewSurface != EGL14.EGL_NO_SURFACE -> "PREVIEW_EIS_OUTPUT_NOT_ADVANCING"
+                    else -> "WAITING_FOR_TARGET_LENS_STABILIZED_OUTPUT"
+                }
+                val confirmed = encoderAdvanced || (encoderTargetSurface?.isValid != true && previewAdvanced)
+                val finalCheck = delayMs == 1800L
+                val eventName = when {
+                    confirmed -> "TARGET_LENS_EIS_PLUS_CONFIRMED"
+                    finalCheck && isPaused.get() -> "TARGET_LENS_EIS_PLUS_PENDING_PAUSED"
+                    finalCheck -> "TARGET_LENS_EIS_PLUS_TIMEOUT"
+                    else -> "TARGET_LENS_EIS_PLUS_WAITING"
+                }
+                val level = when {
+                    confirmed -> "INFO"
+                    finalCheck && !isPaused.get() -> "ERROR"
+                    else -> "WARN"
+                }
+                EisPlusDiagnosticLog.event(
+                    "HANDOFF",
+                    eventName,
+                    "handoff=$handoffId source=$source elapsedMs=$delayMs reason=$reason " +
+                        "rawOes=$rawFrames(+${rawFrames - baseline.rawOesFrames}) " +
+                        "captureResults=$captureResults(+${captureResults - baseline.captureResults}) " +
+                        "yuvImages=$yuvImages(+${yuvImages - baseline.yuvImages}) " +
+                        "pipelineDelivered=$deliveredFrames(+${deliveredFrames - baseline.pipelineFramesDelivered}) " +
+                        "relayDequeued=$dequeuedFrames(+${dequeuedFrames - baseline.stabilizedFramesDequeued}) " +
+                        "encoderFrames=$encodedFrames(+${encodedFrames - baseline.encodedFrames}) " +
+                        "previewFrames=$previewFrames(+${previewFrames - baseline.previewFrames}) " +
+                        "pending=${pipeline?.pendingFrameCount ?: 0} pipeline=${pipeline?.diagnosticSummary() ?: "missing"}",
+                    level,
+                )
+            }, delayMs)
+        }
     }
 
     /** Sensor-specific pipelines. Never share one lens' transform history with the other. */
@@ -513,6 +615,11 @@ class DualCameraRecordingRelay internal constructor(
         // During Special Video the primary encoder is permanently the main lens;
         // the ultra-wide OES stream is written to its own encoder surface.
         if (secondaryEncoderTargetSurface?.isValid == true && source == PreviewStreamSource.ULTRAWIDE) {
+            EisPlusDiagnosticLog.event(
+                "HANDOFF", "SPECIAL_VIDEO_SOURCE_PINNED",
+                "requested=$source active=$activeSource reason=secondary_encoder_keeps_primary_on_MAIN",
+                "WARN",
+            )
             if (activeSource != PreviewStreamSource.MAIN) {
                 activeSource = PreviewStreamSource.MAIN
                 cinemaRecorder?.setActiveStreamSource(PreviewStreamSource.MAIN)
@@ -520,15 +627,31 @@ class DualCameraRecordingRelay internal constructor(
             return
         }
         if (activeSource != source) {
+            val previousSource = activeSource
             activeSource = source
             pendingClockSyncOnSwitch = true
-            switchCount.incrementAndGet()
+            val switchNumber = switchCount.incrementAndGet()
             cinemaRecorder?.setActiveStreamSource(source)
-            Log.i(TAG, "[RECORDING_RELAY] Switched active recording stream to $source (switches=${switchCount.get()})")
+            val targetPipeline = eisPlusPipelinesBySource[source]
+            val baseline = captureHandoffBaseline(source, targetPipeline)
+            val handoffId = handoffGeneration.incrementAndGet()
+            EisPlusDiagnosticLog.event(
+                "HANDOFF", "LENS_SWITCH_BEGIN",
+                "handoff=$handoffId switch=$switchNumber from=$previousSource to=$source " +
+                    "pipelineBound=${targetPipeline != null} pipelineRunning=${targetPipeline?.isRunning == true} " +
+                    "pending=${targetPipeline?.pendingFrameCount ?: 0} encoderValid=${encoderTargetSurface?.isValid == true} " +
+                    "previewValid=${eglPreviewSurface != null && eglPreviewSurface != EGL14.EGL_NO_SURFACE} " +
+                    "baselineRawOes=${baseline.rawOesFrames} baselineCapture=${baseline.captureResults} " +
+                    "baselineYuv=${baseline.yuvImages} baselineDelivered=${baseline.pipelineFramesDelivered} " +
+                    "pipeline=${targetPipeline?.diagnosticSummary() ?: "missing"}",
+                if (targetPipeline?.isRunning == true) "INFO" else "WARN",
+            )
+            Log.i(TAG, "[RECORDING_RELAY] Switched active recording stream $previousSource -> $source (switches=$switchNumber)")
             EisPlusDiagnosticLog.event(
                 "RELAY", "EIS_PLUS_SOURCE_SWITCH",
-                "activeSource=$source pipelineReady=${eisPlusPipelinesBySource[source]?.isRunning == true}"
+                "from=$previousSource activeSource=$source pipelineReady=${targetPipeline?.isRunning == true}",
             )
+            scheduleEisPlusHandoffWatchdog(handoffId, source, baseline)
             notifyEisPlusFrameAvailable()
         } else {
             cinemaRecorder?.setActiveStreamSource(source)
@@ -539,10 +662,13 @@ class DualCameraRecordingRelay internal constructor(
     internal fun setEisPlusPipelineForSource(source: PreviewStreamSource, pipeline: VideoEisPlusPipeline?) {
         if (pipeline != null && pipeline.isRunning) {
             eisPlusPipelinesBySource[source] = pipeline
-            EisPlusDiagnosticLog.event("RELAY", "EIS_PLUS_PIPELINE_ATTACHED", "source=$source running=true")
+            EisPlusDiagnosticLog.event("RELAY", "EIS_PLUS_PIPELINE_ATTACHED", "source=$source running=true pipeline=${pipeline.diagnosticSummary()}")
         } else {
-            eisPlusPipelinesBySource.remove(source)
-            EisPlusDiagnosticLog.event("RELAY", "EIS_PLUS_PIPELINE_DETACHED", "source=$source")
+            val previous = eisPlusPipelinesBySource.remove(source)
+            EisPlusDiagnosticLog.event("RELAY", "EIS_PLUS_PIPELINE_DETACHED",
+                "source=$source previous=${previous?.diagnosticSummary() ?: "missing"} activeSource=$activeSource",
+                if (activeSource == source) "ERROR" else "INFO",
+            )
         }
         notifyEisPlusFrameAvailable()
     }
@@ -883,7 +1009,14 @@ class DualCameraRecordingRelay internal constructor(
             st.updateTexImage()
             st.getTransformMatrix(sourceTexMatrix)
             if (isUltraWide) hasUltraWideFrame = true
+            diagnosticsFor(if (isUltraWide) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN)
+                .rawOesFrames.incrementAndGet()
         } catch (_: Throwable) {
+            EisPlusDiagnosticLog.event(
+                "RELAY", "CAMERA_OES_FRAME_UPDATE_FAILED",
+                "source=${if (isUltraWide) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN} error=SurfaceTexture_update_or_transform_failed",
+                "WARN",
+            )
             return
         }
 
@@ -1257,7 +1390,17 @@ class DualCameraRecordingRelay internal constructor(
             val pipeline = pipelineBySource[source] ?: continue
             if (!pipeline.isRunning) continue
             val pending = pipeline.dequeueFrame() ?: continue
+                val sourceCounters = diagnosticsFor(source)
+                val dequeuedCount = sourceCounters.stabilizedFramesDequeued.incrementAndGet()
+                if (dequeuedCount <= 2L) {
+                    EisPlusDiagnosticLog.event(
+                        "HANDOFF", "STABILIZED_FRAME_DEQUEUED",
+                        "source=$source count=$dequeuedCount tsNs=${pending.timestampNs} activeSource=$activeSource " +
+                            "running=${pipeline.isRunning} pending=${pipeline.pendingFrameCount}",
+                    )
+                }
                 if (source != activeSource || isPaused.get() || !isStreamingActive.get()) {
+                    sourceCounters.skippedFrames.incrementAndGet()
                     if (source == activeSource) {
                         EisPlusDiagnosticLog.event(
                             "RELAY", "FRAME_SKIPPED",
@@ -1332,6 +1475,16 @@ class DualCameraRecordingRelay internal constructor(
                 }
                 lastOutputPtsNs = presentationNs
                 val renderedOutputCount = relayedFrameCount.incrementAndGet()
+                if (hasEncoder) {
+                    val sourceEncodedCount = sourceCounters.encodedFrames.incrementAndGet()
+                    if (sourceEncodedCount <= 2L) {
+                        EisPlusDiagnosticLog.event(
+                            "HANDOFF", "STABILIZED_ENCODER_FRAME_CONFIRMED",
+                            "source=$source sourceTsNs=$sourceTimestampNs ptsNs=$presentationNs " +
+                                "frameSize=${frame.width}x${frame.height} outputSize=${bufferWidth}x${bufferHeight}",
+                        )
+                    }
+                }
                 if (hasEncoder && (renderedOutputCount <= 3L || renderedOutputCount % 30L == 0L)) {
                     EisPlusDiagnosticLog.event(
                         "RELAY", "ENCODER_FRAME_PRESENTED",
@@ -1347,6 +1500,7 @@ class DualCameraRecordingRelay internal constructor(
                     val previewRendered = renderEisPlusOutput(
                         display, context, previewSurface, frame, presentationNs, pw, ph
                     )
+                    if (previewRendered) sourceCounters.previewFrames.incrementAndGet()
                     if (!previewRendered && renderedOutputCount <= 3L) {
                         EisPlusDiagnosticLog.event(
                             "RELAY", "PREVIEW_RENDER_FAILED",
@@ -1356,7 +1510,6 @@ class DualCameraRecordingRelay internal constructor(
                 }
             }
         }
-    }
 
     private fun renderEisPlusOutput(
         display: EGLDisplay,
@@ -1880,6 +2033,7 @@ class DualCameraRecordingRelay internal constructor(
 
     fun release() {
         if (!isReleased.compareAndSet(false, true)) return
+        handoffGeneration.incrementAndGet()
         isRelayReady = false
         if (isDelegatingToNativeGlRecorder) {
             internalMainSurface = null

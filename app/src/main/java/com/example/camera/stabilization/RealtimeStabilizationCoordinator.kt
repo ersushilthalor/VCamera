@@ -219,6 +219,43 @@ class RealtimeStabilizationCoordinator(context: Context) {
             MAX_BUFFERED_STABILIZATION_IMAGES + 2
     }
 
+    @Volatile private var diagnosticSource: String = "UNKNOWN"
+    @Volatile private var diagnosticRole: String = "UNBOUND"
+    @Volatile private var diagnosticSessionCameraId: String = "unknown"
+    @Volatile private var diagnosticPipelineCameraId: String = "unknown"
+    @Volatile private var diagnosticPhysicalCameraId: String? = null
+    @Volatile private var diagnosticGeneration: Long = -1L
+
+    fun setDiagnosticContext(
+        source: String,
+        role: String,
+        sessionCameraId: String,
+        pipelineCameraId: String,
+        physicalCameraId: String?,
+        generation: Long,
+    ) {
+        diagnosticSource = source
+        diagnosticRole = role
+        diagnosticSessionCameraId = sessionCameraId
+        diagnosticPipelineCameraId = pipelineCameraId
+        diagnosticPhysicalCameraId = physicalCameraId
+        diagnosticGeneration = generation
+        diagnosticEvent("COORDINATOR", "DIAGNOSTIC_CONTEXT",
+            "source=$source role=$role sessionCamera=$sessionCameraId pipelineCamera=$pipelineCameraId " +
+                "physicalCamera=$physicalCameraId generation=$generation")
+    }
+
+    private fun diagnosticEvent(
+        component: String,
+        name: String,
+        details: String = "",
+        level: String = "INFO",
+    ) {
+        val identity = "source=$diagnosticSource role=$diagnosticRole " +
+            "sessionCamera=$diagnosticSessionCameraId pipelineCamera=$diagnosticPipelineCameraId " +
+            "physicalCamera=$diagnosticPhysicalCameraId generation=$diagnosticGeneration"
+        EisPlusDiagnosticLog.event(component, name, "$identity $details", level)
+    }
     private val sensorManager = context.applicationContext
         .getSystemService(Context.SENSOR_SERVICE) as SensorManager
     // MGC's EIS path requests Android sensor type 4: the calibrated gyroscope.
@@ -355,10 +392,10 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 )
             }
             if (rawGyroCallbackCount <= 3L || rawGyroCallbackCount % 500L == 0L) {
-                EisPlusDiagnosticLog.event("GYRO", "SAMPLE", "callbacks=$rawGyroCallbackCount tsNs=${event.timestamp} values=${event.values.contentToString()}")
+                diagnosticEvent("GYRO", "SAMPLE", "callbacks=$rawGyroCallbackCount tsNs=${event.timestamp} values=${event.values.contentToString()}")
             }
             if (event.values.size < 3) {
-                EisPlusDiagnosticLog.event("GYRO", "INVALID_SAMPLE", "valuesCount=${event.values.size}", "WARN")
+                diagnosticEvent("GYRO", "INVALID_SAMPLE", "valuesCount=${event.values.size}", "WARN")
                 return
             }
             val mapped = remapMgcGyro(
@@ -372,7 +409,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 val previousTimestampNs = pendingGyroSamples.lastOrNull()?.timestampNs
                     ?: lastProcessedGyroTimestampNs
                 if (event.timestamp <= previousTimestampNs) {
-                    EisPlusDiagnosticLog.event("GYRO", "NON_MONOTONIC_SAMPLE", "sampleTs=${event.timestamp} previousTs=$previousTimestampNs", "WARN")
+                    diagnosticEvent("GYRO", "NON_MONOTONIC_SAMPLE", "sampleTs=${event.timestamp} previousTs=$previousTimestampNs", "WARN")
                     return
                 }
                 pendingGyroSamples.addLast(
@@ -463,7 +500,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 "externalMagnification=" +
                 externalLensStabilizationConfig.magnificationFor(cameraId),
         )
-        EisPlusDiagnosticLog.event(
+        diagnosticEvent(
             "CAMERA", "CALIBRATION",
             "camera=$cameraId activeArray=$activeArray physicalSize=$physicalSize facing=${calibration?.lensFacing} " +
                 "orientation=${calibration?.sensorOrientationDegrees} timestampSource=${calibration?.timestampSource} " +
@@ -488,7 +525,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
         ) {
             // A logical result for the other active lens is not a substitute for this sensor's
             // timestamp/metadata. Wait for the matching physical result instead.
-            EisPlusDiagnosticLog.event(
+            diagnosticEvent(
                 "CAPTURE", "PHYSICAL_RESULT_MISSING",
                 "requestedPhysical=$outputPhysicalCameraId available=${physicalResults.keys}",
                 "WARN",
@@ -644,7 +681,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 )
             }
             if (captureResultCount <= 3L || captureResultCount % 30L == 0L) {
-                EisPlusDiagnosticLog.event(
+                diagnosticEvent(
                     "CAMERA2", "CAPTURE_RESULT",
                     "count=$captureResultCount tsNs=$timestampNs frameDurationNs=${metadata.frameDurationNs} exposureNs=${metadata.exposureTimeNs} " +
                         "rollingShutterNs=${metadata.rollingShutterSkewNs} requestedVideoStab=$requestedVideoStabilization " +
@@ -699,7 +736,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
             if (image.owner.isClosed || activeSessionCount <= 0 || timestampNs <= 0L ||
                 image.width != nativeFrameWidth || image.height != nativeFrameHeight
             ) {
-                EisPlusDiagnosticLog.event(
+                diagnosticEvent(
                     "IMAGE_READER", "FRAME_REJECTED",
                     "tsNs=$timestampNs size=${image.width}x${image.height} expected=${nativeFrameWidth}x$nativeFrameHeight " +
                         "readerClosed=${image.owner.isClosed} activeSessions=$activeSessionCount", "WARN",
@@ -708,11 +745,11 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 return
             }
             if (timestampNs in bufferedImages) {
-                EisPlusDiagnosticLog.event("IMAGE_READER", "DUPLICATE_TIMESTAMP", "tsNs=$timestampNs", "WARN")
+                diagnosticEvent("IMAGE_READER", "DUPLICATE_TIMESTAMP", "tsNs=$timestampNs", "WARN")
             }
             bufferedImages.remove(timestampNs)?.let(::retireBufferedImageLocked)
             if (boundaryCount < 3L || boundaryCount % 30L == 0L) {
-                EisPlusDiagnosticLog.event("IMAGE_READER", "FRAME_ACCEPTED", "tsNs=$timestampNs size=${image.width}x${image.height} buffered=${bufferedImages.size}")
+                diagnosticEvent("IMAGE_READER", "FRAME_ACCEPTED", "tsNs=$timestampNs size=${image.width}x${image.height} buffered=${bufferedImages.size}")
             }
             bufferedImages[timestampNs] = BufferedStabilizationImage(
                 image = image,
@@ -763,7 +800,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 else -> "camera/lens is unsupported"
             }
             Log.w(TAG, "MGC EIS+ start unavailable: $reason")
-            EisPlusDiagnosticLog.event("COORDINATOR", "START_REJECTED", reason, "ERROR")
+            diagnosticEvent("COORDINATOR", "START_REJECTED", reason, "ERROR")
             return null
         }
         val normalizedLookahead = normalizeStabilizationLookahead(lookaheadFrames)
@@ -812,7 +849,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 "MGC EIS+ native start failed: size=${frameWidth}x${frameHeight}, " +
                     "lookahead=$normalizedLookahead",
             )
-            EisPlusDiagnosticLog.event("COORDINATOR", "NATIVE_START_FAILED", "size=${frameWidth}x${frameHeight} lookahead=$normalizedLookahead", "ERROR")
+            diagnosticEvent("COORDINATOR", "NATIVE_START_FAILED", "size=${frameWidth}x${frameHeight} lookahead=$normalizedLookahead", "ERROR")
             return null
         }
 
@@ -838,7 +875,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 nativeStrength = 0f
                 nativeLookaheadFrames = DEFAULT_VIDEO_STABILIZATION_LOOKAHEAD
                 Log.e(TAG, "Unable to register MGC calibrated gyroscope stream")
-                EisPlusDiagnosticLog.event("COORDINATOR", "GYRO_REGISTRATION_FAILED", "sensor=${sensor.name}", "ERROR")
+                diagnosticEvent("COORDINATOR", "GYRO_REGISTRATION_FAILED", "sensor=${sensor.name}", "ERROR")
                 return null
             }
             sensorThread = thread
@@ -851,7 +888,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 "lookahead=$normalizedLookahead, gyro=${sensor.name}, " +
                 "timestampSource=${currentCalibration.timestampSource}, active=$activeSessionCount",
         )
-        EisPlusDiagnosticLog.event("COORDINATOR", "SESSION_ACQUIRED", "id=$sessionId size=${frameWidth}x${frameHeight} strength=$strength lookahead=$normalizedLookahead gyro=${sensor.name} timestampSource=${currentCalibration.timestampSource}")
+        diagnosticEvent("COORDINATOR", "SESSION_ACQUIRED", "id=$sessionId size=${frameWidth}x${frameHeight} strength=$strength lookahead=$normalizedLookahead gyro=${sensor.name} timestampSource=${currentCalibration.timestampSource}")
         resultSequence
     }
 
@@ -1031,7 +1068,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                     "(sourceBehind=${latestMetadataTimestampNs < currentBoundaryNs},dead=$metadataDead), " +
                     "attempts=$nativeFrameAttemptCount resultSequence=$resultSequence storedResults=${nativeResults.size}",
             )
-            EisPlusDiagnosticLog.event(
+            diagnosticEvent(
                 "FEEDER", "HEALTH_SNAPSHOT",
                 "boundary=$boundaryCount tsNs=$currentBoundaryNs gyroDead=$gyroDead gyroDeltaMs=${timestampDeltaMs(currentBoundaryNs, lastProcessedGyroTimestampNs)} " +
                     "gyroSourceAhead=${lastProcessedGyroTimestampNs > currentBoundaryNs} pendingGyro=${pendingGyroSamples.size} " +
@@ -1064,7 +1101,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 val nearestMetadataTimestampNs = frameMetadata.keys.minByOrNull {
                     absoluteTimestampDifference(it, frameTimestampNs)
                 }
-                EisPlusDiagnosticLog.event("FEEDER", "METADATA_MISSING", "frameTs=$frameTimestampNs nearest=$nearestMetadataTimestampNs deltaNs=${nearestMetadataTimestampNs?.minus(frameTimestampNs)}", "WARN")
+                diagnosticEvent("FEEDER", "METADATA_MISSING", "frameTs=$frameTimestampNs nearest=$nearestMetadataTimestampNs deltaNs=${nearestMetadataTimestampNs?.minus(frameTimestampNs)}", "WARN")
                 Log.w(
                     TAG,
                     "MGC has no exact metadata for boundary=$frameTimestampNs; " +
@@ -1104,7 +1141,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 Log.i(TAG, "MGC native processFrame #$nativeFrameAttemptCount returned $resultName")
                 val stabilized = result as? MgcEisNativeEngine.FrameResult.Stabilized
                 val dropped = result as? MgcEisNativeEngine.FrameResult.Dropped
-                EisPlusDiagnosticLog.event(
+                diagnosticEvent(
                     "NATIVE", "FRAME_RESULT",
                     "attempt=$nativeFrameAttemptCount inputTs=${metadata.timestampNs} result=$resultName " +
                         (stabilized?.let {
@@ -1158,7 +1195,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
             } else {
                 Log.w(TAG, "MGC feeder waiting for $source: $detail")
             }
-            EisPlusDiagnosticLog.event("FEEDER", eventName, detail, severity)
+            diagnosticEvent("FEEDER", eventName, detail, severity)
         }
     }
 
@@ -1170,14 +1207,14 @@ class RealtimeStabilizationCoordinator(context: Context) {
         nativeResults.addLast(SequencedNativeResult(resultSequence, result))
         if (evictingOldest) nativeResults.removeFirst()
         if (resultSequence <= 3L || resultSequence % 30L == 0L) {
-            EisPlusDiagnosticLog.event(
+            diagnosticEvent(
                 "NATIVE", "RESULT_QUEUED",
                 "sequence=$resultSequence type=${result.javaClass.simpleName} storedHistorySize=${nativeResults.size}/$MAX_RESULT_COUNT evictingOldest=$evictingOldest",
                 if (result is MgcEisNativeEngine.FrameResult.Dropped) "WARN" else "INFO",
             )
         }
         if (evictingOldest && (resultSequence <= 3L || resultSequence % 30L == 0L)) {
-            EisPlusDiagnosticLog.event(
+            diagnosticEvent(
                 "NATIVE", "RESULT_HISTORY_ROLLOVER",
                 "sequence=$resultSequence oldestHistoryEntryEvicted=true storedResults=${nativeResults.size}/$MAX_RESULT_COUNT",
                 "INFO",
@@ -1277,7 +1314,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 lookaheadFrames = lookaheadFrames,
             )
             active = startSequence != null
-            EisPlusDiagnosticLog.event(
+            diagnosticEvent(
                 "SESSION", if (active) "CONSUMER_STARTED" else "CONSUMER_START_FAILED",
                 "id=$sessionId size=${frameWidth}x$frameHeight strength=$strength lookahead=$lookaheadFrames cursor=$startSequence",
                 if (active) "INFO" else "ERROR",
@@ -1328,7 +1365,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 }
                 val image = coordinator.acquireImageForSession(sessionId, timestampNs)
                 if (image == null) {
-                    EisPlusDiagnosticLog.event("SESSION", "IMAGE_FOR_RESULT_MISSING", "sequence=${next.sequence} timestampNs=$timestampNs", "WARN")
+                    diagnosticEvent("SESSION", "IMAGE_FOR_RESULT_MISSING", "sequence=${next.sequence} timestampNs=$timestampNs", "WARN")
                     if (next.sequence <= 3L || next.sequence % 30L == 0L) {
                         Log.i(
                             TAG,
@@ -1362,7 +1399,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                     )
                 }
                 if (next.sequence <= 3L || next.sequence % 30L == 0L || next.result is MgcEisNativeEngine.FrameResult.Dropped) {
-                    EisPlusDiagnosticLog.event(
+                    diagnosticEvent(
                         "SESSION", "FRAME_DEQUEUED",
                         "sequence=${next.sequence} tsNs=$timestampNs transformApplied=${outputFrame.transform != null} image=${image.width}x${image.height}",
                         if (outputFrame.transform != null) "INFO" else "WARN",

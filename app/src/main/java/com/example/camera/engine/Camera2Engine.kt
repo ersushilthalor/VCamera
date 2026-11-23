@@ -5009,6 +5009,15 @@ class Camera2Engine(private val context: Context) {
         } else {
             PreviewStreamSource.MAIN
         }
+        val previewGeneration = videoEisPlusCaptureGeneration + 1L
+        pipeline.configureDiagnostics(
+            source = source.name,
+            role = "PREVIEW",
+            sessionCameraId = camera.id,
+            pipelineCameraId = streamCameraId,
+            physicalCameraId = physicalId,
+            generation = previewGeneration,
+        )
         val relay = DualCameraRecordingRelay(
             encoderTargetSurface = null,
             bufferWidth = previewBuffer.width,
@@ -5069,7 +5078,6 @@ class Camera2Engine(private val context: Context) {
         activeVideoEisPlusPipeline = pipeline
         activeVideoEisPlusSurface = pipeline.surface
         activeVideoEisPlusPhysicalCameraId = physicalId
-        val previewGeneration = videoEisPlusCaptureGeneration + 1L
         videoEisPlusCaptureGeneration = previewGeneration
         registerVideoEisPlusBinding(
             VideoEisPlusBinding(
@@ -7742,6 +7750,11 @@ class Camera2Engine(private val context: Context) {
             activeVideoEisPlusPhysicalCameraId = binding.physicalCameraId
             activeVideoEisPlusSessionCameraId = binding.sessionCameraId
             videoEisPlusOisDisabledForSession = false
+            EisPlusDiagnosticLog.event(
+                "CAMERA2", "EIS_PLUS_BINDING_ACTIVATED",
+                "source=$source sessionCamera=${binding.sessionCameraId} pipelineCamera=${binding.pipelineCameraId} " +
+                    "physical=${binding.physicalCameraId} generation=${binding.generation} pipeline=${binding.pipeline.diagnosticSummary()}",
+            )
         } else {
             // Never retain the previous lens' pipeline when this source has no matching
             // sensor binding, even when both physical lenses share one logical CameraDevice.
@@ -7750,6 +7763,15 @@ class Camera2Engine(private val context: Context) {
             activeVideoEisPlusPhysicalCameraId = null
             activeVideoEisPlusSessionCameraId = null
             videoEisPlusOisDisabledForSession = false
+            val matching = videoEisPlusBindingsByCameraId.values
+                .filter { it.source == source }
+                .joinToString(";") { it.pipeline.diagnosticSummary() }
+            EisPlusDiagnosticLog.event(
+                "CAMERA2", "EIS_PLUS_BINDING_MISSING",
+                "requestedSource=$source requestedSessionCamera=$sessionCameraId knownSources=${videoEisPlusBindingsBySource.keys} " +
+                    "matchingBindings=${matching.ifBlank { "none" }} reason=no_running_sensor_matched_pipeline",
+                "ERROR",
+            )
         }
     }
 
@@ -7807,38 +7829,81 @@ class Camera2Engine(private val context: Context) {
         physicalCameraId: String?,
         relay: DualCameraRecordingRelay
     ): VideoEisPlusBinding? {
-        if (!preferences.videoEisPlusEnabled ||
-            currentMode != CameraMode.VIDEO ||
-            isSpecialVideoRecordingActive ||
-            isSoftwareCinemaRecording ||
-            activeRecordingStreamConfig?.is10Bit == true ||
-            (activeVideoEisPlusPipeline?.isRunning != true &&
-                videoEisPlusBindingsByCameraId.values.none { it.pipeline.isRunning })
-        ) return null
+        val source = if (standbyLens.lensType == LensType.ULTRAWIDE) {
+            PreviewStreamSource.ULTRAWIDE
+        } else PreviewStreamSource.MAIN
+        val hasAnyPrimaryPipeline = activeVideoEisPlusPipeline?.isRunning == true ||
+            videoEisPlusBindingsByCameraId.values.any { it.pipeline.isRunning }
+        val skipReason = when {
+            !preferences.videoEisPlusEnabled -> "eis_plus_disabled_in_settings"
+            currentMode != CameraMode.VIDEO -> "not_standard_video_mode:$currentMode"
+            isSpecialVideoRecordingActive -> "special_video_recording_active"
+            isSoftwareCinemaRecording -> "software_cinema_recording_active"
+            activeRecordingStreamConfig?.is10Bit == true -> "10_bit_recording_active"
+            !hasAnyPrimaryPipeline -> "no_primary_eis_plus_pipeline_running"
+            else -> null
+        }
+        if (skipReason != null) {
+            EisPlusDiagnosticLog.event(
+                "CAMERA2", "SECONDARY_EIS_PLUS_DECISION",
+                "decision=SKIP source=$source lensType=${standbyLens.lensType} lensCamera=${standbyLens.cameraId} " +
+                    "lensPhysical=${standbyLens.physicalCameraId} sessionCamera=${camera.id} pipelinePhysical=$physicalCameraId " +
+                    "mode=$currentMode specialVideo=$isSpecialVideoRecordingActive softwareCinema=$isSoftwareCinemaRecording " +
+                    "tenBit=${activeRecordingStreamConfig?.is10Bit} primaryRunning=$hasAnyPrimaryPipeline reason=$skipReason",
+                "WARN",
+            )
+            return null
+        }
 
         val pipelineCameraId = physicalCameraId ?: camera.id
-        val characteristics = getCharacteristics(pipelineCameraId) ?: return null
+        val characteristics = getCharacteristics(pipelineCameraId) ?: run {
+            EisPlusDiagnosticLog.event(
+                "CAMERA2", "SECONDARY_EIS_PLUS_DECISION",
+                "decision=SKIP source=$source sessionCamera=${camera.id} pipelineCamera=$pipelineCameraId reason=camera_characteristics_unavailable",
+                "ERROR",
+            )
+            return null
+        }
         val timingCharacteristics = getCharacteristics(camera.id) ?: characteristics
         val yuvSize = resolveVideoEisPlusYuvSize(
             pipelineCameraId,
             recordingSize.width,
             recordingSize.height
         ) ?: run {
-            EisPlusDiagnosticLog.event("CAMERA2", "SECONDARY_EIS_PLUS_UNAVAILABLE",
-                "camera=${camera.id} reason=no_matching_yuv_size", "WARN")
+            EisPlusDiagnosticLog.event(
+                "CAMERA2", "SECONDARY_EIS_PLUS_DECISION",
+                "decision=SKIP source=$source lensCamera=${standbyLens.cameraId} sessionCamera=${camera.id} " +
+                    "pipelineCamera=$pipelineCameraId recordingSize=${recordingSize.width}x${recordingSize.height} reason=no_matching_yuv_size",
+                "ERROR",
+            )
             return null
         }
         val candidate = VideoEisPlusPipeline(context)
         val supportFailure = candidate.supportFailureReason(characteristics, timingCharacteristics)
         if (supportFailure != null) {
-            EisPlusDiagnosticLog.event("CAMERA2", "SECONDARY_EIS_PLUS_UNAVAILABLE",
-                "camera=${camera.id} reason=$supportFailure", "WARN")
+            EisPlusDiagnosticLog.event(
+                "CAMERA2", "SECONDARY_EIS_PLUS_DECISION",
+                "decision=SKIP source=$source sessionCamera=${camera.id} pipelineCamera=$pipelineCameraId " +
+                    "physical=$physicalCameraId reason=$supportFailure",
+                "ERROR",
+            )
             return null
         }
-        val source = if (standbyLens.lensType == LensType.ULTRAWIDE) {
-            PreviewStreamSource.ULTRAWIDE
-        } else PreviewStreamSource.MAIN
+        EisPlusDiagnosticLog.event(
+            "CAMERA2", "SECONDARY_EIS_PLUS_DECISION",
+            "decision=START source=$source lensCamera=${standbyLens.cameraId} sessionCamera=${camera.id} " +
+                "pipelineCamera=$pipelineCameraId physical=$physicalCameraId yuv=${yuvSize.width}x${yuvSize.height} " +
+                "strength=${preferences.videoEisPlusStrength} lookahead=${preferences.videoEisPlusLookahead}",
+        )
         val generation = videoEisPlusCaptureGeneration + 1L
+        candidate.configureDiagnostics(
+            source = source.name,
+            role = "RECORDING_STANDBY",
+            sessionCameraId = camera.id,
+            pipelineCameraId = pipelineCameraId,
+            physicalCameraId = physicalCameraId,
+            generation = generation,
+        )
         val started = candidate.start(
             cameraId = pipelineCameraId,
             characteristics = characteristics,
@@ -8564,6 +8629,15 @@ class Camera2Engine(private val context: Context) {
                 val eisPlusCandidate = eisPlusPipelineProbe?.takeIf {
                     eisPlusSupportFailureReason == null
                 }
+                val primaryEisPlusGeneration = videoEisPlusCaptureGeneration + 1L
+                eisPlusCandidate?.configureDiagnostics(
+                    source = initialStreamSource.name,
+                    role = "RECORDING_PRIMARY",
+                    sessionCameraId = camera.id,
+                    pipelineCameraId = eisPlusCameraId,
+                    physicalCameraId = eisPlusPhysicalId,
+                    generation = primaryEisPlusGeneration,
+                )
                 val eisPlusUnavailableReason = when {
                     !preferences.videoEisPlusEnabled -> "disabled in Settings"
                     eisPlusModeFailureReason != null -> eisPlusModeFailureReason
@@ -8670,7 +8744,7 @@ class Camera2Engine(private val context: Context) {
                         activeVideoEisPlusSurface = eisPlusCandidate.surface
                         activeVideoEisPlusPhysicalCameraId = eisPlusPhysicalId
                         activeVideoEisPlusSessionCameraId = camera.id
-                        videoEisPlusCaptureGeneration += 1L
+                        videoEisPlusCaptureGeneration = primaryEisPlusGeneration
                         registerVideoEisPlusBinding(
                             VideoEisPlusBinding(
                                 sessionCameraId = camera.id,

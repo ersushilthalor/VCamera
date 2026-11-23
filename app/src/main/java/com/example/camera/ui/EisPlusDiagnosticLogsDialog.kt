@@ -92,7 +92,7 @@ internal fun EisPlusDiagnosticLogsDialog(onDismiss: () -> Unit) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("EIS+ Diagnostic Logs", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Sensor timing, matched frames, stabilization output and failure reasons",
+                            "Per-lens switch timeline: capture results, YUV frames, gyro/metadata matching, EIS output and encoder delivery",
                             color = Color.White.copy(alpha = 0.65f),
                             fontSize = 11.sp,
                         )
@@ -176,7 +176,7 @@ internal fun EisPlusDiagnosticLogsDialog(onDismiss: () -> Unit) {
                         )
                     }
                     Text(
-                        "CSV = bounded raw gyro/native trace. LOG = sampled timeline for the complete recording session.",
+                        "LOG = per-lens recording timeline with switch watchdogs and the exact stalled stage. CSV = bounded raw gyro/native trace.",
                         color = Color.White.copy(alpha = 0.55f),
                         fontSize = 10.sp,
                     )
