@@ -1223,11 +1223,20 @@ class DualCameraRecordingRelay internal constructor(
         ) return
 
         // Both sensors keep independent Camera2 metadata, gyro timelines, look-ahead queues,
-        // calibration and native state. Drain both here; encode only the active source.
-        for ((source, pipeline) in eisPlusPipelinesBySource.entries.toList()) {
-            if (!pipeline.isRunning) continue
-            while (true) {
-                val pending = pipeline.dequeueFrame() ?: break
+        // calibration and native state. Snapshot each queue once and drain round-robin.
+        // An unbounded per-source while-loop can starve the other sensor when the first camera
+        // produces frames continuously (the relay GL thread may never reach the second queue).
+        // Results arriving after this snapshot are picked up by notifyEisPlusFrameAvailable()'s
+        // pending-queue recheck, so this pass remains bounded without dropping new results.
+        val pipelineSnapshot = eisPlusPipelinesBySource.entries.toList()
+        val frameBudgets = pipelineSnapshot.associate { (source, pipeline) ->
+            source to if (pipeline.isRunning) pipeline.pendingFrameCount else 0
+        }
+        val maxFramesToDrain = frameBudgets.values.maxOrNull() ?: 0
+        for (frameIndex in 0 until maxFramesToDrain) {
+            for ((source, pipeline) in pipelineSnapshot) {
+                if (frameIndex >= (frameBudgets[source] ?: 0) || !pipeline.isRunning) continue
+                val pending = pipeline.dequeueFrame() ?: continue
                 if (source != activeSource || isPaused.get() || !isStreamingActive.get()) {
                     if (source == activeSource) {
                         EisPlusDiagnosticLog.event(
