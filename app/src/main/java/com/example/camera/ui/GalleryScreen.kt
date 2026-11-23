@@ -989,8 +989,8 @@ private fun MediaGalleryPlayer(
                 val subtitle = when {
                     hasLensPair && isUltraWide -> "Ultra-wide camera"
                     hasLensPair -> "Main camera"
-                    !video.isVideo -> "VCamera photo"
-                    else -> "VCamera recording"
+                    !video.isVideo -> "Photo"
+                    else -> "Recording"
                 }
                 Text(
                     subtitle,
