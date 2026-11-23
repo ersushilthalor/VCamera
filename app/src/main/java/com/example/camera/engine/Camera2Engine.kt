@@ -1242,6 +1242,10 @@ class Camera2Engine(private val context: Context) {
                             standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, recordingRelay) }
                             return
                         }
+                        // Publish the standby pipeline only after Camera2 accepted the
+                        // complete session. A failed/stale configuration must not replace
+                        // the currently working preview source in the relay.
+                        standbyEisPlusBinding?.let { registerVideoEisPlusBinding(it, recordingRelay) }
                         ultraWideStandbyCaptureSession = session
                         standbyConfiguredForRecording = true
                         standbyRecordingSessionFailed = false
@@ -1475,6 +1479,9 @@ class Camera2Engine(private val context: Context) {
                         }
                         return
                     }
+                    // Commit the prepared EIS+ source only once this Camera2 session is
+                    // valid; until then the currently active lens keeps its old pipeline.
+                    previewEisPlusBinding?.let { registerVideoEisPlusBinding(it, it.relay) }
                     ultraWideStandbyCaptureSession = session
                     standbyConfiguredWithJpegReader = includeJpegReader && ultraWideStandbyJpegReader?.surface?.isValid == true
                     standbyPreviewEisPlusConfigured = previewEisPlusBinding != null
@@ -8015,7 +8022,7 @@ class Camera2Engine(private val context: Context) {
             pipeline = candidate,
             relay = relay,
             generation = generation
-        ).also { registerVideoEisPlusBinding(it, relay) }
+        )
     }
 
     private fun stopActiveVideoEisPlus(closeCameraSession: Boolean = false) {
