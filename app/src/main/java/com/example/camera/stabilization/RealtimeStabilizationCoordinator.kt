@@ -1088,7 +1088,10 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 EisPlusDiagnosticLog.event(
                     "NATIVE", "FRAME_RESULT",
                     "attempt=$nativeFrameAttemptCount inputTs=${metadata.timestampNs} result=$resultName " +
-                        (stabilized?.let { "outputTs=${it.sensorTimestampNs} strength=${it.appliedStrength} tripod=${it.tripodMode}" } ?: "") +
+                        (stabilized?.let {
+                            "outputTs=${it.sensorTimestampNs} strength=${it.appliedStrength} " +
+                                "tripod=${it.tripodMode} gyroQueue=${if (it.usedRealtimeGyroFallback) "realtime-fallback" else "delayed"}"
+                        } ?: "") +
                         (dropped?.let { " droppedTs=${it.sensorTimestampNs}" } ?: ""),
                     if (dropped != null) "WARN" else "INFO",
                 )
