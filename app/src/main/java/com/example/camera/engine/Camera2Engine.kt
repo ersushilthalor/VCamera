@@ -5439,7 +5439,12 @@ class Camera2Engine(private val context: Context) {
                 previewVideoEisPlusRelay = activeRelay
             }
 
-            val candidateRelay = activeRelay
+            if (activeRelay == null) {
+                candidate.stop()
+                lastFailureReason = "preview relay unavailable after initialization"
+                break
+            }
+            val candidateRelay: DualCameraRecordingRelay = activeRelay
             candidate.onRuntimeUnavailable = {
                 previewEisPlusUnavailableForSession = true
                 _videoEisPlusStatus.value = "Unavailable: HAL stabilization conflict"
@@ -5495,16 +5500,16 @@ class Camera2Engine(private val context: Context) {
                 "attempt=${attempt + 1}/2 source=$source physical=${physicalId ?: "logical"} reason=$lastFailureReason",
                 "ERROR",
             )
-            if (relayWasReused) candidateRelay.detachEisPlusPipelineForSource(source, candidate)
             candidate.stop()
         }
 
         val readyPipeline = successfulPipeline
-        if (readyPipeline == null || activeRelay == null) {
+        val failedRelay = activeRelay
+        if (readyPipeline == null || failedRelay == null) {
             if (!relayWasReused) {
-                activeRelay?.let { failedRelay ->
-                    if (previewVideoEisPlusRelay === failedRelay) previewVideoEisPlusRelay = null
-                    runCatching { failedRelay.release() }
+                failedRelay?.let { relayToRelease ->
+                    if (previewVideoEisPlusRelay === relayToRelease) previewVideoEisPlusRelay = null
+                    runCatching { relayToRelease.release() }
                 }
             }
             EisPlusDiagnosticLog.event(
@@ -5513,12 +5518,14 @@ class Camera2Engine(private val context: Context) {
                     "retryCount=2 relayRetained=$relayWasReused", "ERROR",
             )
             _videoEisPlusStatus.value = "Lens switch failed: $lastFailureReason"
-            if (relayWasReused && rollbackFailedPreviewEisPlusSwitch(activeRelay, lastFailureReason)) {
+            if (relayWasReused && failedRelay != null &&
+                rollbackFailedPreviewEisPlusSwitch(failedRelay, lastFailureReason)
+            ) {
                 return null
             }
-            _isGpuRelayPreviewActive.value = relayWasReused && activeRelay.isRelayPreviewActive
+            _isGpuRelayPreviewActive.value = relayWasReused && failedRelay?.isRelayPreviewActive == true
             _isEisPlusPreviewWaitingForFirstFrame.value =
-                activeRelay?.isWaitingForFirstPreviewFrameAfterSwitch == true
+                failedRelay?.isWaitingForFirstPreviewFrameAfterSwitch == true
             return null
         }
 
@@ -5624,16 +5631,17 @@ class Camera2Engine(private val context: Context) {
         return true
     }
 
-    /** Attach EGL to the viewfinder only after Camera2 has released that preview Surface. */
+    /** Attach EGL after Camera2 has configured the YUV producer surface. */
     private fun attachPreviewEisPlusOutput(
         session: CameraCaptureSession,
         camera: CameraDevice,
-        configGeneration: Int
+        configGeneration: Int,
+        targetSurface: Surface,
     ): Boolean {
         val relay = previewVideoEisPlusRelay ?: return true
         val latch = CountDownLatch(1)
         var attached = false
-        relay.attachPreviewTargetSurface {
+        relay.attachPreviewTargetSurface(targetSurface) {
             attached = it
             latch.countDown()
         }
@@ -5647,12 +5655,22 @@ class Camera2Engine(private val context: Context) {
             configGeneration != sessionConfigGeneration.get()
         ) return false
         if (!completed || !attached) {
-            previewEisPlusUnavailableForSession = true
-            _isGpuRelayPreviewActive.value = false
-            _videoEisPlusStatus.value = "Unavailable: preview Surface attachment failed"
-            stopActiveVideoEisPlus(closeCameraSession = true)
-            createCameraCaptureSession(forceLogicalStream = true)
-            return false
+            val previousSurfaceStillVisible = relay.hasPreviewSurface()
+            EisPlusDiagnosticLog.event(
+                "CAMERA2", "PREVIEW_SURFACE_ATTACH_FAILED",
+                "completed=$completed attached=$attached previousSurfaceVisible=$previousSurfaceStillVisible " +
+                    "targetValid=${targetSurface.isValid}; keeping the old EGL frame and relay",
+                "ERROR",
+            )
+            _videoEisPlusStatus.value = if (previousSurfaceStillVisible) {
+                "Lens changed; retaining last stabilized preview while surface reconnects"
+            } else {
+                "Unavailable: preview Surface attachment failed; EIS+ relay retained"
+            }
+            _isGpuRelayPreviewActive.value = previousSurfaceStillVisible
+            // Do not tear down the relay or switch to raw Camera2. If the previous EGL
+            // surface remains valid it continues showing the cached stabilized frame.
+            return previousSurfaceStillVisible
         }
         _isGpuRelayPreviewActive.value = true
         return true
@@ -5690,6 +5708,13 @@ class Camera2Engine(private val context: Context) {
             previewTargetSurface = directPreviewSurf,
             forceLogicalStream = forceLogicalStream
         )
+        if (_selectedLens.value != activeLens) {
+            // preparePreviewEisPlusRelay rolled back to the last working sensor after
+            // both incoming-pipeline startup attempts failed. Rebuild this session for
+            // the restored lens, keeping the existing EGL relay and frozen frame alive.
+            createCameraCaptureSession(forceLogicalStream = false)
+            return
+        }
         if (currentMode == CameraMode.VIDEO &&
             !_isRecordingVideo.value &&
             !isStartingRecording.get() &&
@@ -6062,7 +6087,7 @@ class Camera2Engine(private val context: Context) {
                                 return
                             }
                             captureSession = session
-                            if (!attachPreviewEisPlusOutput(session, camera, configGen)) return
+                            if (!attachPreviewEisPlusOutput(session, camera, configGen, directPreviewSurf)) return
                             try {
                                 activeSessionPhysicalCameraId = activeLens.physicalCameraId
                                 synchronized(previewRequestLock) {
@@ -6175,7 +6200,7 @@ class Camera2Engine(private val context: Context) {
                                 return
                             }
                             captureSession = session
-                            if (!attachPreviewEisPlusOutput(session, camera, configGen)) return
+                            if (!attachPreviewEisPlusOutput(session, camera, configGen, directPreviewSurf)) return
                             try {
                                 activeSessionPhysicalCameraId = null
                                 synchronized(previewRequestLock) {
@@ -6238,7 +6263,7 @@ class Camera2Engine(private val context: Context) {
                             return
                         }
                         captureSession = session
-                        if (!attachPreviewEisPlusOutput(session, camera, configGen)) return
+                        if (!attachPreviewEisPlusOutput(session, camera, configGen, directPreviewSurf)) return
                         try {
                             activeSessionPhysicalCameraId = null
                             synchronized(previewRequestLock) {
