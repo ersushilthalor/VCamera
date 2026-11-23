@@ -23,6 +23,17 @@ internal class MgcEisYuvRenderer(private val tag: String = "MgcEisYuvRenderer") 
         }
     }
 
+    // Exact identity mesh used when the user turns stabilization OFF. YUV conversion,
+    // 12-strip mesh rendering, GPU texture output and downstream relay stay unchanged.
+    private val identityRowHomographies = FloatArray(STABILIZATION_ROW_COUNT * 9).also { values ->
+        repeat(STABILIZATION_ROW_COUNT) { row ->
+            val offset = row * 9
+            values[offset] = 1f
+            values[offset + 4] = 1f
+            values[offset + 8] = 1f
+        }
+    }
+
     private var programId = 0
     private var positionLocation = -1
     private var textureCoordinateLocation = -1
@@ -47,7 +58,7 @@ internal class MgcEisYuvRenderer(private val tag: String = "MgcEisYuvRenderer") 
     private var chromaHeight = 0
 
     /** Consumes and closes the frame's retained Image on every success/failure path. */
-    fun render(frame: StabilizationFrame): Frame? {
+    fun render(frame: StabilizationFrame, applyStabilization: Boolean = true): Frame? {
         val image = frame.image.image
         return try {
             if (image.planes.size < 3 || image.width <= 0 || image.height <= 0) return null
@@ -78,10 +89,15 @@ internal class MgcEisYuvRenderer(private val tag: String = "MgcEisYuvRenderer") 
             GLES30.glUniform2i(crSizeLocation, requestedCrWidth, logicalChromaHeight)
             GLES30.glUniform1i(cbStepLocation, cbPlane.pixelStride)
             GLES30.glUniform1i(crStepLocation, crPlane.pixelStride)
+            val rowHomographies = when {
+                !applyStabilization -> identityRowHomographies
+                frame.transform != null -> frame.transform.rowHomographies
+                else -> droppedFrameHomographies
+            }
             mesh.draw(
                 positionLocation,
                 textureCoordinateLocation,
-                frame.transform?.rowHomographies ?: droppedFrameHomographies
+                rowHomographies
             )
             GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
             repeat(3) { unit ->
