@@ -122,8 +122,8 @@ class Camera2Engine(private val context: Context) {
     private var activeVideoEisPlusPhysicalCameraId: String? = null
     private var activeVideoEisPlusSessionCameraId: String? = null
     /** Previous working lens is retained until a switched-to MGC pipeline starts. */
-    private var pendingEisPlusPreviewRollbackLens: LensInfo? = null
-    private var pendingEisPlusPreviewRollbackZoom: Float? = null
+    @Volatile private var pendingEisPlusPreviewRollbackLens: LensInfo? = null
+    @Volatile private var pendingEisPlusPreviewRollbackZoom: Float? = null
     @Volatile private var videoEisPlusOisDisabledForSession: Boolean = false
     @Volatile private var videoEisPlusCaptureGeneration: Long = 0L
     private var videoRecordingFileDescriptor: ParcelFileDescriptor? = null
@@ -5313,6 +5313,11 @@ class Camera2Engine(private val context: Context) {
             null
         }
 
+        currentRelay?.onFirstPreviewFrameAfterSwitch = {
+            _isEisPlusPreviewWaitingForFirstFrame.value = false
+            pendingEisPlusPreviewRollbackLens = null
+            pendingEisPlusPreviewRollbackZoom = null
+        }
         val relayWasReused = currentRelay != null
         val previousSource = currentRelay?.activeSource
         val activeBinding = previousSource?.let { sourceKey ->
@@ -5378,8 +5383,7 @@ class Camera2Engine(private val context: Context) {
                 currentRelay.isWaitingForFirstPreviewFrameAfterSwitch
             val label = if (preferences.videoEisPlusEnabled) "Stabilization ON" else "Stabilization OFF"
             _videoEisPlusStatus.value = "$label · MGC live preview · $source"
-            pendingEisPlusPreviewRollbackLens = null
-            pendingEisPlusPreviewRollbackZoom = null
+            schedulePreviewEisPlusFirstFrameWatchdog(currentRelay, source, lens)
             EisPlusDiagnosticLog.event(
                 "CAMERA2", "PREVIEW_PIPELINE_ATTACHED",
                 "source=$source pipelineReused=true physical=${physicalId ?: "logical"} " +
@@ -5437,6 +5441,8 @@ class Camera2Engine(private val context: Context) {
                 }
                 activeRelay.onFirstPreviewFrameAfterSwitch = {
                     _isEisPlusPreviewWaitingForFirstFrame.value = false
+                    pendingEisPlusPreviewRollbackLens = null
+                    pendingEisPlusPreviewRollbackZoom = null
                 }
                 previewVideoEisPlusRelay = activeRelay
             }
@@ -5557,8 +5563,7 @@ class Camera2Engine(private val context: Context) {
         val stabilizationLabel = if (preferences.videoEisPlusEnabled) "Stabilization ON" else "Stabilization OFF"
         _videoEisPlusStatus.value = "$stabilizationLabel · MGC live preview · $source"
         _isGpuRelayPreviewActive.value = true
-        pendingEisPlusPreviewRollbackLens = null
-        pendingEisPlusPreviewRollbackZoom = null
+        schedulePreviewEisPlusFirstFrameWatchdog(activeRelay, source, lens)
         EisPlusDiagnosticLog.event(
             "CAMERA2", "PREVIEW_PIPELINE_ATTACHED",
             "source=$source pipelineReused=false camera=$streamCameraId physical=${physicalId ?: "logical"} " +
@@ -5566,6 +5571,43 @@ class Camera2Engine(private val context: Context) {
                 "preview=${previewBuffer.width}x${previewBuffer.height} generation=$successfulGeneration",
         )
         return activeRelay
+    }
+
+    /**
+     * A Camera2 session can configure successfully while the new MGC path still produces
+     * no stabilized preview frames. Keep the rollback pipeline alive until the first frame
+     * arrives; then retire the rollback state. A timeout restores the old lens instead of
+     * leaving a permanently frozen viewfinder.
+     */
+    private fun schedulePreviewEisPlusFirstFrameWatchdog(
+        relay: DualCameraRecordingRelay,
+        source: PreviewStreamSource,
+        requestedLens: LensInfo?,
+    ) {
+        val lensAtStart = requestedLens ?: return
+        if (pendingEisPlusPreviewRollbackLens == null) return
+        mainHandler.postDelayed({
+            if (previewVideoEisPlusRelay !== relay ||
+                currentMode != CameraMode.VIDEO ||
+                _isRecordingVideo.value ||
+                _selectedLens.value != lensAtStart ||
+                relay.activeSource != source ||
+                !relay.isWaitingForFirstPreviewFrameAfterSwitch ||
+                pendingEisPlusPreviewRollbackLens == null
+            ) return@postDelayed
+
+            val reason = "first stabilized preview frame timed out after lens switch"
+            EisPlusDiagnosticLog.event(
+                "CAMERA2", "PREVIEW_FIRST_FRAME_TIMEOUT",
+                "source=$source lens=${lensAtStart.lensType} waitedMs=3000",
+                "ERROR",
+            )
+            if (rollbackFailedPreviewEisPlusSwitch(relay, reason)) {
+                createCameraCaptureSession(forceLogicalStream = false)
+            } else {
+                _videoEisPlusStatus.value = "Waiting for stabilized preview frame · $source"
+            }
+        }, 3000L)
     }
 
     /**
@@ -8662,6 +8704,9 @@ class Camera2Engine(private val context: Context) {
                 Log.w(TAG, "Failed to stop Photon EIS+ input pipeline", t)
             }
         }
+        _isEisPlusPreviewWaitingForFirstFrame.value = false
+        pendingEisPlusPreviewRollbackLens = null
+        pendingEisPlusPreviewRollbackZoom = null
         EisPlusDiagnosticLog.finish("camera2_recording_cleanup closeCameraSession=$closeCameraSession")
         if (_videoEisPlusStatus.value.startsWith("Active")) {
             _videoEisPlusStatus.value = "Ready for supported SDR video"
