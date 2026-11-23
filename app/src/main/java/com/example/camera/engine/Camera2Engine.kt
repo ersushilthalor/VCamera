@@ -77,11 +77,14 @@ class Camera2Engine(private val context: Context) {
         val physicalCameraId: String?,
         val source: PreviewStreamSource,
         val pipeline: VideoEisPlusPipeline,
+        val relay: DualCameraRecordingRelay,
         val generation: Long
     )
 
     private val videoEisPlusBindingsByCameraId = ConcurrentHashMap<String, VideoEisPlusBinding>()
     private val videoEisPlusBindingsBySource = ConcurrentHashMap<PreviewStreamSource, VideoEisPlusBinding>()
+    /** Serializes source/camera binding ownership across Camera2 state callbacks. */
+    private val videoEisPlusBindingLock = Any()
 
     // One logical CameraDevice can own both main and ultra-wide physical sensors.
     // Keep the two sensor pipelines independently addressable even though sessionCameraId matches.
@@ -5086,6 +5089,7 @@ class Camera2Engine(private val context: Context) {
                 physicalCameraId = physicalId,
                 source = source,
                 pipeline = pipeline,
+                relay = relay,
                 generation = previewGeneration
             ),
             relay
@@ -7662,32 +7666,61 @@ class Camera2Engine(private val context: Context) {
         binding: VideoEisPlusBinding,
         relay: DualCameraRecordingRelay
     ) {
-        val oldForCamera = videoEisPlusBindingsByCameraId.put(
-            videoEisPlusBindingKey(binding.sessionCameraId, binding.source),
-            binding
-        )
-        val oldForSource = videoEisPlusBindingsBySource.put(binding.source, binding)
-        if (oldForCamera != null && oldForCamera !== binding) {
-            val oldSourceWasStillOwned = videoEisPlusBindingsBySource.remove(oldForCamera.source, oldForCamera)
-            if (oldSourceWasStillOwned) {
-                relay.setEisPlusPipelineForSource(oldForCamera.source, null)
-            }
-            runCatching { oldForCamera.pipeline.stop() }
-        }
-        if (oldForSource != null && oldForSource !== binding &&
-            oldForSource.sessionCameraId != binding.sessionCameraId
-        ) {
-            videoEisPlusBindingsByCameraId.remove(
-                videoEisPlusBindingKey(oldForSource.sessionCameraId, oldForSource.source),
-                oldForSource
+        if (binding.relay !== relay) {
+            EisPlusDiagnosticLog.event(
+                "CAMERA2", "EIS_PLUS_BINDING_REJECTED",
+                "source=${binding.source} generation=${binding.generation} reason=relay_owner_mismatch",
+                "ERROR",
             )
-            runCatching { oldForSource.pipeline.stop() }
+            return
         }
-        relay.setEisPlusPipelineForSource(binding.source, binding.pipeline)
+
+        val replaced = linkedSetOf<VideoEisPlusBinding>()
+        synchronized(videoEisPlusBindingLock) {
+            val cameraKey = videoEisPlusBindingKey(binding.sessionCameraId, binding.source)
+            val oldForCamera = videoEisPlusBindingsByCameraId[cameraKey]
+            val oldForSource = videoEisPlusBindingsBySource[binding.source]
+            if (oldForCamera != null && oldForCamera !== binding) replaced.add(oldForCamera)
+            if (oldForSource != null && oldForSource !== binding) replaced.add(oldForSource)
+
+            // Retire the exact old owner before publishing the new one. The relay detach
+            // is also identity-checked, protecting a replacement from delayed callbacks.
+            replaced.forEach { previous ->
+                videoEisPlusBindingsByCameraId.remove(
+                    videoEisPlusBindingKey(previous.sessionCameraId, previous.source),
+                    previous
+                )
+                videoEisPlusBindingsBySource.remove(previous.source, previous)
+                previous.relay.detachEisPlusPipelineForSource(previous.source, previous.pipeline)
+            }
+
+            videoEisPlusBindingsByCameraId[cameraKey] = binding
+            videoEisPlusBindingsBySource[binding.source] = binding
+            binding.relay.attachEisPlusPipelineForSource(binding.source, binding.pipeline)
+
+            if (replaced.any { activeVideoEisPlusPipeline === it.pipeline }) {
+                activeVideoEisPlusPipeline = binding.pipeline
+                activeVideoEisPlusSurface = binding.pipeline.surface
+                activeVideoEisPlusPhysicalCameraId = binding.physicalCameraId
+                activeVideoEisPlusSessionCameraId = binding.sessionCameraId
+                videoEisPlusOisDisabledForSession = false
+            }
+        }
+
+        replaced.forEach { previous ->
+            runCatching { previous.pipeline.stop() }.onFailure { error ->
+                EisPlusDiagnosticLog.event(
+                    "CAMERA2", "PIPELINE_REPLACEMENT_STOP_FAILED",
+                    "source=${previous.source} generation=${previous.generation} error=${error.message}",
+                    "WARN",
+                )
+            }
+        }
         EisPlusDiagnosticLog.event(
             "CAMERA2", "EIS_PLUS_SENSOR_BOUND",
             "source=${binding.source} sessionCamera=${binding.sessionCameraId} " +
-                "pipelineCamera=${binding.pipelineCameraId} physical=${binding.physicalCameraId}",
+                "pipelineCamera=${binding.pipelineCameraId} physical=${binding.physicalCameraId} " +
+                "generation=${binding.generation}",
         )
     }
 
@@ -7695,21 +7728,64 @@ class Camera2Engine(private val context: Context) {
         binding: VideoEisPlusBinding,
         relay: DualCameraRecordingRelay
     ) {
-        videoEisPlusBindingsByCameraId.remove(
-            videoEisPlusBindingKey(binding.sessionCameraId, binding.source),
-            binding
+        if (binding.relay !== relay) {
+            EisPlusDiagnosticLog.event(
+                "CAMERA2", "EIS_PLUS_STALE_CLEANUP_IGNORED",
+                "source=${binding.source} generation=${binding.generation} reason=relay_owner_mismatch",
+                "WARN",
+            )
+            return
+        }
+
+        var shouldStopPipeline = false
+        var removedSourceOwner = false
+        synchronized(videoEisPlusBindingLock) {
+            videoEisPlusBindingsByCameraId.remove(
+                videoEisPlusBindingKey(binding.sessionCameraId, binding.source),
+                binding
+            )
+            removedSourceOwner = videoEisPlusBindingsBySource.remove(binding.source, binding)
+            if (removedSourceOwner) {
+                binding.relay.detachEisPlusPipelineForSource(binding.source, binding.pipeline)
+            }
+
+            val stillRegistered =
+                videoEisPlusBindingsByCameraId.values.any { it.pipeline === binding.pipeline } ||
+                    videoEisPlusBindingsBySource.values.any { it.pipeline === binding.pipeline }
+            shouldStopPipeline = !stillRegistered
+
+            if (activeVideoEisPlusPipeline === binding.pipeline) {
+                val replacement = videoEisPlusBindingsBySource[binding.source]
+                    ?.takeIf { it.pipeline.isRunning }
+                if (replacement != null) {
+                    activeVideoEisPlusPipeline = replacement.pipeline
+                    activeVideoEisPlusSurface = replacement.pipeline.surface
+                    activeVideoEisPlusPhysicalCameraId = replacement.physicalCameraId
+                    activeVideoEisPlusSessionCameraId = replacement.sessionCameraId
+                } else {
+                    activeVideoEisPlusPipeline = null
+                    activeVideoEisPlusSurface = null
+                    activeVideoEisPlusPhysicalCameraId = null
+                    activeVideoEisPlusSessionCameraId = null
+                }
+            }
+        }
+
+        if (shouldStopPipeline) {
+            runCatching { binding.pipeline.stop() }.onFailure { error ->
+                EisPlusDiagnosticLog.event(
+                    "CAMERA2", "PIPELINE_CLEANUP_STOP_FAILED",
+                    "source=${binding.source} generation=${binding.generation} error=${error.message}",
+                    "WARN",
+                )
+            }
+        }
+        EisPlusDiagnosticLog.event(
+            "CAMERA2", "EIS_PLUS_BINDING_UNREGISTERED",
+            "source=${binding.source} generation=${binding.generation} removedSourceOwner=$removedSourceOwner " +
+                "stopped=$shouldStopPipeline",
+            if (removedSourceOwner) "INFO" else "WARN",
         )
-        val removedSourceOwner = videoEisPlusBindingsBySource.remove(binding.source, binding)
-        if (removedSourceOwner) {
-            relay.setEisPlusPipelineForSource(binding.source, null)
-        }
-        if (activeVideoEisPlusPipeline === binding.pipeline) {
-            activeVideoEisPlusPipeline = null
-            activeVideoEisPlusSurface = null
-            activeVideoEisPlusPhysicalCameraId = null
-            activeVideoEisPlusSessionCameraId = null
-        }
-        runCatching { binding.pipeline.stop() }
     }
 
     private fun submitVideoEisPlusCaptureResult(
@@ -7718,8 +7794,10 @@ class Camera2Engine(private val context: Context) {
         result: TotalCaptureResult
     ): VideoEisPlusBinding? {
         val cameraId = runCatching { session.device.id }.getOrNull() ?: return null
-        val bindings = videoEisPlusBindingsByCameraId.values
-            .filter { it.sessionCameraId == cameraId && it.pipeline.isRunning }
+        val bindings = synchronized(videoEisPlusBindingLock) {
+            videoEisPlusBindingsByCameraId.values
+                .filter { it.sessionCameraId == cameraId && it.pipeline.isRunning }
+        }
         if (bindings.isEmpty()) return null
 
         // One logical Camera2 result can carry metadata for both physical sensors.
@@ -7739,11 +7817,13 @@ class Camera2Engine(private val context: Context) {
     }
 
     private fun activateVideoEisPlusForSource(source: PreviewStreamSource, sessionCameraId: String?) {
-        val binding = videoEisPlusBindingsBySource[source]
-            ?.takeIf { sessionCameraId == null || it.sessionCameraId == sessionCameraId }
-            ?: sessionCameraId?.let { cameraId ->
-                videoEisPlusBindingsByCameraId[videoEisPlusBindingKey(cameraId, source)]
-            }
+        val binding = synchronized(videoEisPlusBindingLock) {
+            videoEisPlusBindingsBySource[source]
+                ?.takeIf { sessionCameraId == null || it.sessionCameraId == sessionCameraId }
+                ?: sessionCameraId?.let { cameraId ->
+                    videoEisPlusBindingsByCameraId[videoEisPlusBindingKey(cameraId, source)]
+                }
+        }
         if (binding != null && binding.pipeline.isRunning) {
             activeVideoEisPlusPipeline = binding.pipeline
             activeVideoEisPlusSurface = binding.pipeline.surface
@@ -7933,6 +8013,7 @@ class Camera2Engine(private val context: Context) {
             physicalCameraId = physicalCameraId,
             source = source,
             pipeline = candidate,
+            relay = relay,
             generation = generation
         ).also { registerVideoEisPlusBinding(it, relay) }
     }
@@ -7946,22 +8027,27 @@ class Camera2Engine(private val context: Context) {
             try { captureSession?.close() } catch (_: Throwable) {}
             captureSession = null
         }
-        activeVideoEisPlusPipeline = null
-        activeVideoEisPlusSurface = null
-        activeVideoEisPlusPhysicalCameraId = null
-        activeVideoEisPlusSessionCameraId = null
-        val pipelinesToStop = (videoEisPlusBindingsByCameraId.values.map { it.pipeline } +
-            listOfNotNull(pipeline)).distinct()
-        videoEisPlusBindingsByCameraId.clear()
-        videoEisPlusBindingsBySource.clear()
+        val pipelinesToStop = synchronized(videoEisPlusBindingLock) {
+            val registeredBindings = videoEisPlusBindingsByCameraId.values.toList().distinct()
+            registeredBindings.forEach { binding ->
+                binding.relay.detachEisPlusPipelineForSource(binding.source, binding.pipeline)
+            }
+            videoEisPlusBindingsByCameraId.clear()
+            videoEisPlusBindingsBySource.clear()
+            activeVideoEisPlusPipeline = null
+            activeVideoEisPlusSurface = null
+            activeVideoEisPlusPhysicalCameraId = null
+            activeVideoEisPlusSessionCameraId = null
+            videoEisPlusOisDisabledForSession = false
+            videoEisPlusCaptureGeneration += 1L
+            (registeredBindings.map { it.pipeline } + listOfNotNull(pipeline)).distinct()
+        }
         val previewRelay = previewVideoEisPlusRelay
         previewVideoEisPlusRelay = null
         try { previewRelay?.release() } catch (t: Throwable) {
             Log.w(TAG, "Failed to release preview-only EIS+ relay", t)
         }
         _isGpuRelayPreviewActive.value = false
-        videoEisPlusOisDisabledForSession = false
-        videoEisPlusCaptureGeneration += 1L
         pipelinesToStop.forEach { eisPipeline ->
             try { eisPipeline.stop() } catch (t: Throwable) {
                 EisPlusDiagnosticLog.event("CAMERA2", "PIPELINE_STOP_EXCEPTION", t.toString(), "ERROR")
@@ -8752,6 +8838,7 @@ class Camera2Engine(private val context: Context) {
                                 physicalCameraId = eisPlusPhysicalId,
                                 source = initialStreamSource,
                                 pipeline = eisPlusCandidate,
+                                relay = relay,
                                 generation = videoEisPlusCaptureGeneration
                             ),
                             relay

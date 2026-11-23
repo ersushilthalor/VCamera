@@ -211,7 +211,7 @@ class DualCameraRecordingRelay internal constructor(
     }
 
     /** Sensor-specific pipelines. Never share one lens' transform history with the other. */
-    private val eisPlusPipelinesBySource = ConcurrentHashMap<PreviewStreamSource, VideoEisPlusPipeline>()
+    private val eisPlusPipelinesBySource = EisPlusSourcePipelineRegistry<VideoEisPlusPipeline>()
     // Accessed only from the relay GL thread; prevents one warning per raw camera frame.
     private var loggedEisPlusSourceBypass: PreviewStreamSource? = null
 
@@ -486,7 +486,7 @@ class DualCameraRecordingRelay internal constructor(
             ?: throw IllegalStateException("Ultra-wide relay input surface is unavailable")
 
     init {
-        eisPlusPipeline?.let { eisPlusPipelinesBySource[initialSource] = it }
+        eisPlusPipeline?.let { eisPlusPipelinesBySource.attach(initialSource, it) }
         prepare()
     }
 
@@ -659,17 +659,51 @@ class DualCameraRecordingRelay internal constructor(
     }
 
     /** Attach/detach the EIS+ input for one camera without restarting encoder or GL relay. */
-    internal fun setEisPlusPipelineForSource(source: PreviewStreamSource, pipeline: VideoEisPlusPipeline?) {
-        if (pipeline != null && pipeline.isRunning) {
-            eisPlusPipelinesBySource[source] = pipeline
-            EisPlusDiagnosticLog.event("RELAY", "EIS_PLUS_PIPELINE_ATTACHED", "source=$source running=true pipeline=${pipeline.diagnosticSummary()}")
+    /** Attach a source pipeline without disturbing the other lens' input. */
+    internal fun attachEisPlusPipelineForSource(source: PreviewStreamSource, pipeline: VideoEisPlusPipeline) {
+        if (!pipeline.isRunning) {
+            EisPlusDiagnosticLog.event(
+                "RELAY", "EIS_PLUS_ATTACH_REJECTED",
+                "source=$source reason=pipeline_not_running pipeline=${pipeline.diagnosticSummary()}",
+                "WARN",
+            )
+            return
+        }
+        val previous = eisPlusPipelinesBySource.attach(source, pipeline)
+        if (previous != null && previous !== pipeline) {
+            EisPlusDiagnosticLog.event(
+                "RELAY", "EIS_PLUS_PIPELINE_REPLACED",
+                "source=$source previous=${previous.diagnosticSummary()} current=${pipeline.diagnosticSummary()}",
+            )
         } else {
-            val previous = eisPlusPipelinesBySource.remove(source)
-            EisPlusDiagnosticLog.event("RELAY", "EIS_PLUS_PIPELINE_DETACHED",
-                "source=$source previous=${previous?.diagnosticSummary() ?: "missing"} activeSource=$activeSource",
-                if (activeSource == source) "ERROR" else "INFO",
+            EisPlusDiagnosticLog.event(
+                "RELAY", "EIS_PLUS_PIPELINE_ATTACHED",
+                "source=$source running=true pipeline=${pipeline.diagnosticSummary()}",
             )
         }
+        notifyEisPlusFrameAvailable()
+    }
+
+    /** Detach only the exact pipeline that still owns this source. */
+    internal fun detachEisPlusPipelineForSource(
+        source: PreviewStreamSource,
+        expectedPipeline: VideoEisPlusPipeline
+    ) {
+        if (!eisPlusPipelinesBySource.detach(source, expectedPipeline)) {
+            val current = eisPlusPipelinesBySource[source]
+            EisPlusDiagnosticLog.event(
+                "RELAY", "EIS_PLUS_STALE_DETACH_IGNORED",
+                "source=$source expected=${expectedPipeline.diagnosticSummary()} " +
+                    "current=${current?.diagnosticSummary() ?: "missing"} activeSource=$activeSource",
+                "WARN",
+            )
+            return
+        }
+        EisPlusDiagnosticLog.event(
+            "RELAY", "EIS_PLUS_PIPELINE_DETACHED",
+            "source=$source previous=${expectedPipeline.diagnosticSummary()} activeSource=$activeSource",
+            if (activeSource == source) "WARN" else "INFO",
+        )
         notifyEisPlusFrameAvailable()
     }
 
