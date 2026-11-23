@@ -3651,11 +3651,21 @@ class Camera2Engine(private val context: Context) {
                     )
                 }
                 val recSurf = relay?.getRecorderSurfaceForLens(targetLens) ?: activeRecordingSurface
-                if (!_isRecordingVideo.value || previewSurf == null || recSurf == null || !recSurf.isValid) {
+                val requiresMgcVideo = currentMode == CameraMode.VIDEO && relay != null
+                val eisSurface = activeVideoEisPlusSurface?.takeIf {
+                    activeVideoEisPlusPipeline?.isRunning == true && it.isValid
+                }
+                if (!_isRecordingVideo.value || previewSurf == null ||
+                    (requiresMgcVideo && eisSurface == null) ||
+                    (!requiresMgcVideo && (recSurf == null || !recSurf.isValid))
+                ) {
+                    if (requiresMgcVideo) {
+                        _videoEisPlusStatus.value = "Lens switch blocked: target sensor has no active EIS+ YUV stream"
+                    }
                     completeLensSwitch(targetLens)
                     return@synchronized
                 }
-                activeRecordingSurface = recSurf
+                if (!requiresMgcVideo && recSurf != null) activeRecordingSurface = recSurf
 
                 try {
                     try {
@@ -3674,8 +3684,12 @@ class Camera2Engine(private val context: Context) {
                     activeSessionLens = targetLens
 
                     val recordBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                        addTarget(previewSurf)
-                        addTarget(recSurf)
+                        if (requiresMgcVideo) {
+                            addTarget(eisSurface!!)
+                        } else {
+                            addTarget(previewSurf)
+                            addTarget(recSurf!!)
+                        }
                         applyCommonSettings(this)
                         set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
                         val targetChars = getCharacteristics(targetLens.cameraId)
@@ -3692,9 +3706,12 @@ class Camera2Engine(private val context: Context) {
                     createRecordingCaptureSession(
                         camera = camera,
                         previewSurface = previewSurf,
-                        recorderSurface = recSurf,
+                        recorderSurface = if (requiresMgcVideo) null else recSurf,
                         is10Bit = is10BitMode,
                         physicalCameraId = targetPhysicalId,
+                        stabilizationSurface = if (requiresMgcVideo) eisSurface else null,
+                        stabilizationPhysicalCameraId = if (requiresMgcVideo) activeVideoEisPlusPhysicalCameraId else targetPhysicalId,
+                        previewViaRelay = requiresMgcVideo,
                         callback = object : CameraCaptureSession.StateCallback() {
                             override fun onConfigured(session: CameraCaptureSession) {
                                 if (configGen != sessionConfigGeneration.get() || cameraDevice != camera) {
