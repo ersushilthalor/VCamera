@@ -94,6 +94,17 @@ internal class VideoEisPlusPipeline(private val context: android.content.Context
     val supportsOpticalTelemetry get() = coordinator.supportsOpticalTelemetry
     val shouldDisableOisForMissingTelemetry get() = coordinator.shouldDisableOisForMissingTelemetry
     val isRunning get() = session?.isOperational == true
+
+    /** The MGC input/render pipeline stays active when false; only its mesh correction is bypassed. */
+    @Volatile
+    var isStabilizationEnabled: Boolean = true
+        private set
+
+    fun setStabilizationEnabled(enabled: Boolean) {
+        isStabilizationEnabled = enabled
+        diagnosticEvent("PIPELINE", "STABILIZATION_MODE_CHANGED", "enabled=$enabled")
+    }
+
     /** Number of timestamp-matched native results waiting for the relay consumer. */
     val pendingFrameCount: Int get() = session?.pendingResultCount() ?: 0
 
