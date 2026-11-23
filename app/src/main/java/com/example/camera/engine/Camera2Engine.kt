@@ -3714,7 +3714,7 @@ class Camera2Engine(private val context: Context) {
                         height = effectiveRes.height
                     )
 
-                    if (requiresMgcVideo) {
+                    if (requiresMgcVideo && !isSpecialVideoRecordingActive) {
                         val existingBinding = synchronized(videoEisPlusBindingLock) {
                             videoEisPlusBindingsByCameraId[
                                 videoEisPlusBindingKey(camera.id, targetSource)
@@ -4241,7 +4241,6 @@ class Camera2Engine(private val context: Context) {
                                 if (relay != null) {
                                     relay.updateCameraFacing(isTargetFront, targetSensorOrient)
                                     val targetSource = if (lens.lensType == LensType.ULTRAWIDE) PreviewStreamSource.ULTRAWIDE else PreviewStreamSource.MAIN
-                                    setActiveRecordingSource(targetSource, lens.cameraId)
                                     val requestedRes = activeRecordingStreamConfig?.videoResolution
                                         ?: (userSelectedVideoResolution ?: _selectedVideoResolution.value ?: CameraResolution(1920, 1080))
                                     val effectiveRes = resolveEffectiveVideoResolutionForLens(lens, requestedRes)
@@ -4250,7 +4249,7 @@ class Camera2Engine(private val context: Context) {
                                         width = effectiveRes.width,
                                         height = effectiveRes.height
                                     )
-                                    if (currentMode == CameraMode.VIDEO) {
+                                    if (currentMode == CameraMode.VIDEO && !isSpecialVideoRecordingActive) {
                                         val existing = synchronized(videoEisPlusBindingLock) {
                                             videoEisPlusBindingsByCameraId[
                                                 videoEisPlusBindingKey(camera.id, targetSource)
@@ -4269,8 +4268,8 @@ class Camera2Engine(private val context: Context) {
                                         if (targetVideoEisPlusBinding != null && existing == null) {
                                             registerVideoEisPlusBinding(targetVideoEisPlusBinding!!, relay)
                                         }
-                                        activateVideoEisPlusForSource(targetSource, camera.id)
                                     }
+                                    setActiveRecordingSource(targetSource, camera.id)
                                 }
                                 if (isSoftwareCinemaRecording) {
                                     cinemaSoftwareRecorder.updateCameraFacing(isTargetFront, targetSensorOrient)
