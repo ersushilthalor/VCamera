@@ -302,6 +302,7 @@ class DualCameraRecordingRelay internal constructor(
     // sensor resolutions never reallocates the active renderer on the recording GL thread.
     // Access is confined to the relay GL thread (render + GL cleanup).
     private val eisPlusRenderersBySource = ConcurrentHashMap<PreviewStreamSource, MgcEisYuvRenderer>()
+    @Volatile private var lastRenderedPreviewFrame: CachedEisPlusPreviewFrame? = null
     private var eisPlusRenderFailureCount = 0L
     // Coalesce camera-thread notifications so a slow GL thread receives one drain task,
     // rather than an unbounded runnable per stabilized frame.
@@ -331,6 +332,16 @@ class DualCameraRecordingRelay internal constructor(
      * Until that session replaces the old preview session, Camera2 still owns this Surface as
      * its producer and EGL must not try to connect to the same BufferQueue.
      */
+    /** Compatibility overload for the recording-session handoff path. */
+    fun attachPreviewTargetSurface(onAttached: (Boolean) -> Unit) {
+        val target = previewTargetSurface
+        if (target == null) {
+            onAttached(false)
+            return
+        }
+        attachPreviewTargetSurface(target, onAttached)
+    }
+
     fun attachPreviewTargetSurface(targetSurface: Surface, onAttached: (Boolean) -> Unit) {
         val handler = glHandler
         if (handler == null) {
