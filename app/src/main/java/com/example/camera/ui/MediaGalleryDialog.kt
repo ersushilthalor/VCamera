@@ -667,28 +667,30 @@ private fun MediaGalleryPhotoViewer(
                             )
                         }
                     }
-                    if (photo.ultraWideUri != null && photoLoadState.expandedBitmap != null) {
-                        Surface(
-                            modifier = Modifier.align(Alignment.TopEnd).padding(14.dp),
-                            color = Color(0xCC171B20),
-                            shape = RoundedCornerShape(18.dp)
+                }
+
+                if (photo.ultraWideUri != null && photoLoadState.expandedBitmap != null) {
+                    Surface(
+                        modifier = Modifier.align(Alignment.TopEnd).padding(14.dp),
+                        color = Color(0xCC171B20),
+                        shape = RoundedCornerShape(18.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.clickable { isExpanded = !isExpanded }.padding(horizontal = 14.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(
-                                modifier = Modifier.clickable { isExpanded = !isExpanded }.padding(horizontal = 14.dp, vertical = 9.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(Icons.Filled.ExpandMore, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
-                                Text(if (isExpanded) "Collapse" else "Expand", color = Color.White, fontWeight = FontWeight.SemiBold)
-                            }
+                            Icon(Icons.Filled.ExpandMore, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                            Text(if (isExpanded) "Collapse" else "Expand", color = Color.White, fontWeight = FontWeight.SemiBold)
                         }
                     }
-                    if (photo.ultraWideUri != null && photoLoadState.expandedBitmap == null && !photoLoadState.isLoading) {
-                        Text(
-                            "Wide-frame stitch unavailable",
-                            color = Color.White.copy(alpha = 0.72f),
-                            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp)
-                        )
-                    }
+                }
+
+                if (photo.ultraWideUri != null && photoLoadState.expandedBitmap == null && !photoLoadState.isLoading) {
+                    Text(
+                        "Wide-frame stitch unavailable",
+                        color = Color.White.copy(alpha = 0.72f),
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp)
+                    )
                 }
             }
 
