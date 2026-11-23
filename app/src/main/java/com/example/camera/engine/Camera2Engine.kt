@@ -3996,6 +3996,17 @@ class Camera2Engine(private val context: Context) {
                 cameraDevice = null
 
                 fun recoverToPreviousLensIfNeeded() {
+                    if (currentMode == CameraMode.VIDEO && dualCameraRecordingRelay != null) {
+                        val restoreLens = previousLens?.takeIf { it.cameraId != lens.cameraId }
+                        if (restoreLens != null) {
+                            _selectedLens.value = restoreLens
+                            activeSessionLens = restoreLens
+                        }
+                        _videoEisPlusStatus.value = "Lens switch failed; stopping video rather than showing raw preview"
+                        stopVideoRecording()
+                        completeLensSwitch(restoreLens ?: lens)
+                        return
+                    }
                     val fallbackLens = previousLens?.takeIf { it.cameraId != lens.cameraId }
                     if (fallbackLens != null && switchGen == lensSwitchGeneration.get()) {
                         Log.w(TAG, "[RECORDING_SWITCH] Recovering to previous lens ${fallbackLens.lensType} (${fallbackLens.cameraId})")
