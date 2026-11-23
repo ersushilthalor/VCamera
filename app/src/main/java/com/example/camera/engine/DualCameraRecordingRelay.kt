@@ -331,7 +331,6 @@ class DualCameraRecordingRelay internal constructor(
      * its producer and EGL must not try to connect to the same BufferQueue.
      */
     fun attachPreviewTargetSurface(targetSurface: Surface, onAttached: (Boolean) -> Unit) {
-        previewTargetSurface = targetSurface
         val handler = glHandler
         if (handler == null) {
             onAttached(false)
@@ -346,10 +345,10 @@ class DualCameraRecordingRelay internal constructor(
                 if (!isReleased.get() && display != null && display != EGL14.EGL_NO_DISPLAY &&
                     config != null && target != null && target.isValid
                 ) {
+                    // Keep the previous EGL window alive until the replacement is fully
+                    // created, current, and painted with the cached frame. If attaching the
+                    // new TextureView fails, the last stable preview remains on the old target.
                     val existing = eglPreviewSurface
-                    if (existing != null && existing != EGL14.EGL_NO_SURFACE) {
-                        EGL14.eglDestroySurface(display, existing)
-                    }
                     val created = EGL14.eglCreateWindowSurface(
                         display,
                         config,
@@ -398,13 +397,17 @@ class DualCameraRecordingRelay internal constructor(
                         EGL14.eglMakeCurrent(display, restoreSurface, restoreSurface, context)
                     if (previewCurrent && encoderRestored) {
                         eglPreviewSurface = created
+                        previewTargetSurface = targetSurface
+                        if (existing != null && existing != EGL14.EGL_NO_SURFACE && existing != created) {
+                            runCatching { EGL14.eglDestroySurface(display, existing) }
+                        }
                         attached = true
                         Log.i(TAG, "Attached and validated EGL preview surface after Camera2 handoff")
                     } else {
                         if (created != null && created != EGL14.EGL_NO_SURFACE) {
                             runCatching { EGL14.eglDestroySurface(display, created) }
                         }
-                        eglPreviewSurface = EGL14.EGL_NO_SURFACE
+                        eglPreviewSurface = existing ?: EGL14.EGL_NO_SURFACE
                         Log.w(
                             TAG,
                             "EGL preview attach/current failed after Camera2 handoff: " +
