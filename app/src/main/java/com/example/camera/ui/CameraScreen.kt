@@ -275,7 +275,8 @@ fun CameraScreen(
                 mediaPermissionLauncher.launch(mediaPermissions)
             },
             onDismiss = { viewModel.closeSpecialVideoGallery() },
-            onOpenSystemGallery = { viewModel.openSystemGallery(context) }
+            onOpenSystemGallery = { viewModel.openSystemGallery(context) },
+            onMediaChanged = { viewModel.refreshMediaGallery() }
         )
     }
 
