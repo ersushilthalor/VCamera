@@ -329,6 +329,8 @@ class Camera2Engine(private val context: Context) {
     @Volatile
     private var standbyPreviewEisPlusConfigured: Boolean = false
     @Volatile
+    private var lastLoggedStandbyEisPlusMissingCameraId: String? = null
+    @Volatile
     private var standbyRecordingSessionFailed: Boolean = false
     @Volatile
     private var logicalMultiCamRecordingFailed: Boolean = false
@@ -413,8 +415,33 @@ class Camera2Engine(private val context: Context) {
                 if (!isUltraWideStreaming.get()) {
                     isUltraWideStreaming.set(true)
                 }
-                if (_ultraWideStreamStatus.value != BackgroundCameraStatus.READY_QUIET) {
-                    _ultraWideStreamStatus.value = BackgroundCameraStatus.READY_QUIET
+                val standbyEisPlusRequired = currentMode == CameraMode.VIDEO &&
+                    !standbyConfiguredForRecording &&
+                    preferences.videoEisPlusEnabled &&
+                    previewVideoEisPlusRelay?.isRelayReady == true
+                val standbyEisPlusReady = !standbyEisPlusRequired ||
+                    (standbyBinding?.pipeline?.isRunning == true &&
+                        standbyBinding.source != _displayedPreviewSource.value)
+                if (standbyEisPlusReady) {
+                    lastLoggedStandbyEisPlusMissingCameraId = null
+                    if (_ultraWideStreamStatus.value != BackgroundCameraStatus.READY_QUIET) {
+                        _ultraWideStreamStatus.value = BackgroundCameraStatus.READY_QUIET
+                    }
+                } else {
+                    if (_ultraWideStreamStatus.value != BackgroundCameraStatus.PREPARING) {
+                        _ultraWideStreamStatus.value = BackgroundCameraStatus.PREPARING
+                    }
+                    val standbyCameraId = session.device.id
+                    if (lastLoggedStandbyEisPlusMissingCameraId != standbyCameraId) {
+                        lastLoggedStandbyEisPlusMissingCameraId = standbyCameraId
+                        EisPlusDiagnosticLog.event(
+                            "CAMERA2",
+                            "STANDBY_EIS_PLUS_NOT_READY",
+                            "camera=$standbyCameraId source=${standbyBinding?.source} " +
+                                "required=$standbyEisPlusRequired; standby lens is streaming without a confirmed EIS+ binding",
+                            "WARN"
+                        )
+                    }
                 }
             }
         }
