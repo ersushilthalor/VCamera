@@ -212,6 +212,10 @@ class DualCameraRecordingRelay internal constructor(
 
     /** Sensor-specific pipelines. Never share one lens' transform history with the other. */
     private val eisPlusPipelinesBySource = EisPlusSourcePipelineRegistry<VideoEisPlusPipeline>()
+    // An EIS+ relay is never allowed to fall back to the legacy raw-OES video renderer.
+    // The OES streams may still be drained for Camera2/standby synchronization, but all
+    // user-visible preview and primary encoder frames must come from the matched YUV/MGC path.
+    private val requiresEisPlusOutput: Boolean = eisPlusPipeline != null
     // Accessed only from the relay GL thread; prevents one warning per raw camera frame.
     private var loggedEisPlusSourceBypass: PreviewStreamSource? = null
 
@@ -1056,22 +1060,23 @@ class DualCameraRecordingRelay internal constructor(
 
         if (isPaused.get() || !isStreamingActive.get()) return
 
-        // Do not let raw OES overwrite a stabilized frame for this exact sensor.
-        // If the selected lens has no live matching pipeline, preserve the safe raw fallback.
-        val activeEisPlusRunning = eisPlusPipelinesBySource[activeSource]?.isRunning == true
-        if (activeEisPlusRunning) {
-            loggedEisPlusSourceBypass = null
+        // EIS+ relays are strict: a missing target-sensor MGC pipeline must never
+        // silently switch the visible preview or encoded output back to raw OES frames.
+        // Keep draining OES buffers for the Camera2 session/standby handoff, but do not render
+        // them through the legacy video shader.
+        if (requiresEisPlusOutput) {
+            val activeEisPlusRunning = eisPlusPipelinesBySource[activeSource]?.isRunning == true
+            if (!activeEisPlusRunning && loggedEisPlusSourceBypass != activeSource) {
+                loggedEisPlusSourceBypass = activeSource
+                EisPlusDiagnosticLog.event(
+                    "RELAY", "EIS_PLUS_ONLY_SOURCE_NOT_READY",
+                    "activeSource=$activeSource; raw OES preview/recording fallback is forbidden",
+                    "ERROR",
+                )
+            } else if (activeEisPlusRunning) {
+                loggedEisPlusSourceBypass = null
+            }
             return
-        }
-        if (eisPlusPipelinesBySource.values.any { it.isRunning } &&
-            loggedEisPlusSourceBypass != activeSource
-        ) {
-            loggedEisPlusSourceBypass = activeSource
-            EisPlusDiagnosticLog.event(
-                "RELAY", "EIS_PLUS_SOURCE_BYPASS",
-                "activeSource=$activeSource has no matching EIS+ pipeline; using raw active OES fallback",
-                "WARN",
-            )
         }
 
         val rawTimestampNs = st.timestamp.takeIf { it > 0L } ?: System.nanoTime()
@@ -1454,7 +1459,10 @@ class DualCameraRecordingRelay internal constructor(
                 val renderer = eisPlusRenderersBySource.getOrPut(source) {
                     MgcEisYuvRenderer("$TAG-$source")
                 }
-                val frame = renderer.render(pending)
+                val frame = renderer.render(
+                    pending,
+                    applyStabilization = pipeline.isStabilizationEnabled
+                )
                 if (frame == null) {
                     eisPlusRenderFailureCount += 1L
                     if (eisPlusRenderFailureCount <= 3L || eisPlusRenderFailureCount % 30L == 0L) {
