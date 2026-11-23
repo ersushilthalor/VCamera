@@ -179,9 +179,9 @@ class Camera2Engine(private val context: Context) {
         _sensorOrientation.value = sensorOrientation
         Log.i(
             TAG,
-            "[PREVIEW_ORIENTATION] lens=\u0024{lens.lensType} camera=\u0024{lens.cameraId} " +
-                "physical=\u0024{lens.physicalCameraId} facing=\u0024{if (isFrontFacing) "FRONT" else "BACK"} " +
-                "sensorOrientation=\u0024sensorOrientation"
+            "[PREVIEW_ORIENTATION] lens=" + lens.lensType + " camera=" + lens.cameraId +
+                " physical=" + lens.physicalCameraId + " facing=" + (if (isFrontFacing) "FRONT" else "BACK") +
+                " sensorOrientation=" + sensorOrientation
         )
     }
 
