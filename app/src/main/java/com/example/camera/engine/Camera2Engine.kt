@@ -1375,7 +1375,6 @@ class Camera2Engine(private val context: Context) {
                 allowEisPlus &&
                     !isRecordingActive &&
                     currentMode == CameraMode.VIDEO &&
-                    preferences.videoEisPlusEnabled &&
                     activeVideoEisPlusPipeline?.isRunning == true &&
                     !previewEisPlusUnavailableForSession
             }
@@ -1714,7 +1713,6 @@ class Camera2Engine(private val context: Context) {
                 val isVideo = (currentMode == CameraMode.VIDEO || currentMode == CameraMode.CINEMA || isRecordingNow)
                 val shouldHavePreviewEisPlus = !isRecordingNow &&
                     currentMode == CameraMode.VIDEO &&
-                    preferences.videoEisPlusEnabled &&
                     previewVideoEisPlusRelay != null &&
                     activeVideoEisPlusPipeline?.isRunning == true
                 val standbySource = if (standbyLens.lensType == LensType.ULTRAWIDE) {
@@ -2265,19 +2263,42 @@ class Camera2Engine(private val context: Context) {
     )
     val videoEisPlusStatus: StateFlow<String> = _videoEisPlusStatus.asStateFlow()
 
-    /** Changes EIS+ immediately in the idle Video preview; recording transitions rebuild their own session. */
+    /** Toggle only the MGC stabilization transform. The YUV/MGC/GPU path never changes. */
     fun setVideoEisPlusEnabled(enabled: Boolean) {
         preferences.videoEisPlusEnabled = enabled
         previewEisPlusUnavailableForSession = false
+
+        val pipelines = synchronized(videoEisPlusBindingLock) {
+            (
+                videoEisPlusBindingsByCameraId.values.map { it.pipeline } +
+                    videoEisPlusBindingsBySource.values.map { it.pipeline } +
+                    listOfNotNull(activeVideoEisPlusPipeline)
+                ).distinct()
+        }
+        pipelines.forEach { it.setStabilizationEnabled(enabled) }
+
+        if (currentMode != CameraMode.VIDEO) {
+            _videoEisPlusStatus.value = if (enabled) "EIS+ ready for Video mode" else "Stabilization OFF · EIS+ pipeline unchanged"
+            return
+        }
+        if (pipelines.any { it.isRunning }) {
+            val source = if (_isRecordingVideo.value) {
+                dualCameraRecordingRelay?.activeSource ?: PreviewStreamSource.MAIN
+            } else {
+                previewVideoEisPlusRelay?.activeSource ?: PreviewStreamSource.MAIN
+            }
+            updateVideoEisPlusSourceStatus(source, preview = !_isRecordingVideo.value)
+            return
+        }
         if (_isRecordingVideo.value || isStartingRecording.get() || isStoppingRecording.get()) {
-            _videoEisPlusStatus.value = if (enabled) "Will activate after recording" else "Disabled"
+            _videoEisPlusStatus.value = if (enabled) "Stabilization ON · EIS+ startup pending" else "Stabilization OFF · EIS+ startup pending"
             return
         }
         val task = Runnable {
             if (cameraDevice != null) {
                 createCameraCaptureSession()
             } else {
-                _videoEisPlusStatus.value = if (enabled) "Ready for live Video preview" else "Disabled"
+                _videoEisPlusStatus.value = if (enabled) "EIS+ required for Video preview" else "Stabilization OFF · EIS+ required"
             }
         }
         val handler = backgroundHandler ?: mainHandler
@@ -5029,8 +5050,7 @@ class Camera2Engine(private val context: Context) {
         previewTargetSurface: Surface,
         forceLogicalStream: Boolean
     ): DualCameraRecordingRelay? {
-        val shouldRun = preferences.videoEisPlusEnabled &&
-            currentMode == CameraMode.VIDEO &&
+        val shouldRun = currentMode == CameraMode.VIDEO &&
             !_isRecordingVideo.value &&
             !isStartingRecording.get() &&
             !isStoppingRecording.get() &&
@@ -5040,7 +5060,9 @@ class Camera2Engine(private val context: Context) {
             if (previewVideoEisPlusRelay != null) {
                 stopActiveVideoEisPlus(closeCameraSession = false)
             }
-            if (!preferences.videoEisPlusEnabled) _videoEisPlusStatus.value = "Disabled"
+            if (currentMode == CameraMode.VIDEO) {
+                _videoEisPlusStatus.value = "EIS+ pipeline unavailable; raw preview is blocked"
+            }
             return null
         }
 
@@ -5095,7 +5117,9 @@ class Camera2Engine(private val context: Context) {
         val resolvedTimingChars = timingChars ?: return null
         val resolvedYuvSize = yuvSize ?: return null
 
-        val pipeline = VideoEisPlusPipeline(context)
+        val pipeline = VideoEisPlusPipeline(context).apply {
+            setStabilizationEnabled(preferences.videoEisPlusEnabled)
+        }
         val isFront = lens?.facing == CameraCharacteristics.LENS_FACING_FRONT
         val sensorOrientation = lens?.let {
             getSensorOrientationForLens(it, if (isFront) 270 else 90)
@@ -5136,8 +5160,10 @@ class Camera2Engine(private val context: Context) {
             _videoEisPlusStatus.value = "Unavailable: HAL stabilization conflict"
             (backgroundHandler ?: mainHandler)?.post {
                 if (!_isRecordingVideo.value && previewVideoEisPlusRelay === relay) {
+                    // Never restore direct Camera2 preview: this app requires the MGC output path.
                     stopActiveVideoEisPlus(closeCameraSession = true)
-                    createCameraCaptureSession(forceLogicalStream = true)
+                    _isGpuRelayPreviewActive.value = false
+                    _videoEisPlusStatus.value = "EIS+ unavailable; direct preview fallback blocked"
                 }
             }
         }
@@ -5260,6 +5286,27 @@ class Camera2Engine(private val context: Context) {
             previewTargetSurface = directPreviewSurf,
             forceLogicalStream = forceLogicalStream
         )
+        if (currentMode == CameraMode.VIDEO &&
+            !_isRecordingVideo.value &&
+            !isStartingRecording.get() &&
+            !isStoppingRecording.get() &&
+            previewRelay == null
+        ) {
+            isConfiguringSession = false
+            _isCameraReady.value = false
+            _isGpuRelayPreviewActive.value = false
+            if (!_videoEisPlusStatus.value.contains("unavailable", ignoreCase = true)) {
+                _videoEisPlusStatus.value = "EIS+ pipeline unavailable; direct preview fallback blocked"
+            }
+            EisPlusDiagnosticLog.event(
+                "CAMERA2",
+                "VIDEO_PREVIEW_BLOCKED_NO_EIS_PLUS",
+                "No matching MGC YUV pipeline; refusing direct Camera2 preview",
+                "ERROR",
+            )
+            completeLensSwitch(activeLens)
+            return
+        }
         if (previewRelay != null) {
             // The EIS+ preview relay's current session has only the selected sensor's
             // physical output. Clear any stale "both lenses ready" state from an earlier
@@ -7958,10 +8005,7 @@ class Camera2Engine(private val context: Context) {
     }
 
     private fun updateVideoEisPlusSourceStatus(source: PreviewStreamSource, preview: Boolean) {
-        if (!preferences.videoEisPlusEnabled) {
-            _videoEisPlusStatus.value = "Disabled"
-            return
-        }
+        val stabilizationLabel = if (preferences.videoEisPlusEnabled) "Stabilization ON" else "Stabilization OFF"
         val unsupportedMode = currentMode != CameraMode.VIDEO ||
             isSpecialVideoRecordingActive ||
             isSoftwareCinemaRecording ||
@@ -7969,9 +8013,10 @@ class Camera2Engine(private val context: Context) {
         _videoEisPlusStatus.value = when {
             unsupportedMode -> "Unavailable: Photon EIS+ is limited to standard SDR Video"
             activeVideoEisPlusPipeline?.isRunning == true -> {
-                if (preview) "Active · Live preview · $source" else "Active · Recording · $source"
+                if (preview) "$stabilizationLabel · MGC live preview · $source"
+                else "$stabilizationLabel · MGC recording · $source"
             }
-            else -> "Unavailable: no sensor-matched EIS+ pipeline for $source; raw camera fallback"
+            else -> "Unavailable: no sensor-matched EIS+ pipeline for $source; raw fallback blocked"
         }
         EisPlusDiagnosticLog.event(
             "CAMERA2",
@@ -8017,7 +8062,6 @@ class Camera2Engine(private val context: Context) {
         val hasAnyPrimaryPipeline = activeVideoEisPlusPipeline?.isRunning == true ||
             videoEisPlusBindingsByCameraId.values.any { it.pipeline.isRunning }
         val skipReason = when {
-            !preferences.videoEisPlusEnabled -> "eis_plus_disabled_in_settings"
             currentMode != CameraMode.VIDEO -> "not_standard_video_mode:$currentMode"
             isSpecialVideoRecordingActive -> "special_video_recording_active"
             isSoftwareCinemaRecording -> "software_cinema_recording_active"
@@ -8060,7 +8104,9 @@ class Camera2Engine(private val context: Context) {
             )
             return null
         }
-        val candidate = VideoEisPlusPipeline(context)
+        val candidate = VideoEisPlusPipeline(context).apply {
+            setStabilizationEnabled(preferences.videoEisPlusEnabled)
+        }
         val supportFailure = candidate.supportFailureReason(characteristics, timingCharacteristics)
         if (supportFailure != null) {
             EisPlusDiagnosticLog.event(
