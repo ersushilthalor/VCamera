@@ -1323,10 +1323,12 @@ class Camera2Engine(private val context: Context) {
                     override fun onConfigureFailed(session: CameraCaptureSession) {
                         try { session.close() } catch (_: Throwable) {}
                         if (configToken != standbySessionGeneration.get()) {
+                            standbyEisPlusBinding?.let { unregisterVideoEisPlusBinding(it, recordingRelay) }
+                            standbyPreviewEisPlusConfigured = false
                             isPreparingUltraWideStandby.set(false)
                             return
                         }
-                        if (standbyEisPlusBinding != null && !retriedWithoutEisPlus) {
+                        if (standbyEisPlusBinding != null && !retriedWithoutEisPlus)
                             retriedWithoutEisPlus = true
                             Log.w(TAG, "[KEEP_ULTRAWIDE_READY] Standby session rejected secondary EIS+ output; retrying without it")
                             unregisterVideoEisPlusBinding(standbyEisPlusBinding, recordingRelay)
@@ -1549,10 +1551,14 @@ class Camera2Engine(private val context: Context) {
                 override fun onConfigureFailed(session: CameraCaptureSession) {
                     try { session.close() } catch (_: Throwable) {}
                     if (configToken != standbySessionGeneration.get()) {
+                        previewEisPlusBinding?.let { binding ->
+                            previewEisPlusRelay?.let { unregisterVideoEisPlusBinding(binding, it) }
+                        }
+                        standbyPreviewEisPlusConfigured = false
                         isPreparingUltraWideStandby.set(false)
                         return
                     }
-                    if (previewEisPlusBinding != null && !retriedWithoutPreviewEisPlus) {
+                    if (previewEisPlusBinding != null && !retriedWithoutPreviewEisPlus)
                         retriedWithoutPreviewEisPlus = true
                         Log.w(TAG, "[KEEP_ULTRAWIDE_READY] Standby preview session rejected EIS+ output; retrying without EIS+")
                         previewEisPlusRelay?.let { unregisterVideoEisPlusBinding(previewEisPlusBinding, it) }
