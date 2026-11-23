@@ -578,7 +578,9 @@ private fun MediaGalleryPhotoViewer(
         }
     }
 
-    val selectedBitmap = if (isExpanded) photoLoadState.expandedBitmap else photoLoadState.bitmap
+    val mainPhotoBitmap = photoLoadState.bitmap
+    val expandedPhotoBitmap = photoLoadState.expandedBitmap
+    val selectedBitmap = if (isExpanded) expandedPhotoBitmap else mainPhotoBitmap
     if (isEditing && selectedBitmap != null) {
         GalleryPhotoEditorScreen(
             source = selectedBitmap,
@@ -653,11 +655,11 @@ private fun MediaGalleryPhotoViewer(
                     photoLoadState.isLoading -> CircularProgressIndicator(color = Color.White)
                     photoLoadState.bitmap == null -> Text("Unable to load photo", color = Color.White.copy(alpha = 0.75f))
                     else -> Crossfade(
-                        targetState = isExpanded && photoLoadState.expandedBitmap != null,
+                        targetState = isExpanded && expandedPhotoBitmap != null,
                         animationSpec = tween(durationMillis = 480),
                         label = "special-photo-expand-transition"
                     ) { expanded ->
-                        val displayBitmap = if (expanded) photoLoadState.expandedBitmap else photoLoadState.bitmap
+                        val displayBitmap = if (expanded) expandedPhotoBitmap else mainPhotoBitmap
                         if (displayBitmap != null) {
                             Image(
                                 bitmap = displayBitmap.asImageBitmap(),
@@ -669,7 +671,7 @@ private fun MediaGalleryPhotoViewer(
                     }
                 }
 
-                if (photo.ultraWideUri != null && photoLoadState.expandedBitmap != null) {
+                if (photo.ultraWideUri != null && expandedPhotoBitmap != null) {
                     Surface(
                         modifier = Modifier.align(Alignment.TopEnd).padding(14.dp),
                         color = Color(0xCC171B20),
@@ -685,7 +687,7 @@ private fun MediaGalleryPhotoViewer(
                     }
                 }
 
-                if (photo.ultraWideUri != null && photoLoadState.expandedBitmap == null && !photoLoadState.isLoading) {
+                if (photo.ultraWideUri != null && expandedPhotoBitmap == null && !photoLoadState.isLoading) {
                     Text(
                         "Wide-frame stitch unavailable",
                         color = Color.White.copy(alpha = 0.72f),
@@ -702,7 +704,7 @@ private fun MediaGalleryPhotoViewer(
                 GalleryViewerAction(Modifier.weight(1f), Icons.Filled.Share, "Share") {
                     actionScope.launch {
                         runCatching {
-                            val expandedBitmap = photoLoadState.expandedBitmap
+                            val expandedBitmap = expandedPhotoBitmap
                             val shareUri = if (isExpanded && expandedBitmap != null) {
                                 withContext(Dispatchers.IO) {
                                     GalleryMediaActions.saveEditedPhoto(
@@ -744,7 +746,7 @@ private fun MediaGalleryPhotoViewer(
                                     actionScope.launch {
                                         val result = withContext(Dispatchers.IO) {
                                             runCatching {
-                                                val expandedBitmap = photoLoadState.expandedBitmap
+                                                val expandedBitmap = expandedPhotoBitmap
                                                     ?: throw IllegalStateException("Expanded image is not ready")
                                                 GalleryMediaActions.saveEditedPhoto(
                                                     context,
