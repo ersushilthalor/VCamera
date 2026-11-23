@@ -4177,6 +4177,12 @@ class Camera2Engine(private val context: Context) {
                                     activeRecordingSurface = recSurf
                                 }
                                 val isRecording = _isRecordingVideo.value
+                                if (isRecording && requiresMgcVideo && eisSurface == null) {
+                                    _videoEisPlusStatus.value = "Lens switch failed: target sensor has no EIS+ stream; recording stopped"
+                                    completeLensSwitch(lens)
+                                    stopVideoRecording()
+                                    return
+                                }
                                 if (isRecording && (requiresMgcVideo && eisSurface != null || !requiresMgcVideo && recSurf != null && recSurf.isValid)) {
                                     try {
                                         val configGen = sessionConfigGeneration.incrementAndGet()
@@ -4234,7 +4240,7 @@ class Camera2Engine(private val context: Context) {
                                                 }
                                             }
 
-                                            override fun onConfigureFailed(session: CameraCaptureSession) {
+                                                                            override fun onConfigureFailed(session: CameraCaptureSession) {
                                                 if (configGen != sessionConfigGeneration.get() || cameraDevice != camera) return
                                                 Log.e(TAG, "Failed to configure recording session after lens switch")
                                                 activeSessionPhysicalCameraId = null
@@ -4262,11 +4268,21 @@ class Camera2Engine(private val context: Context) {
                                     } catch (e: Exception) {
                                         Log.e(TAG, "Error re-attaching recorder surface after lens switch", e)
                                         activeSessionPhysicalCameraId = null
-                                        createCameraCaptureSession()
+                                        if (requiresMgcVideo) {
+                                            _videoEisPlusStatus.value = "Lens switch failed; raw preview fallback blocked"
+                                            stopVideoRecording()
+                                        } else {
+                                            createCameraCaptureSession()
+                                        }
                                         completeLensSwitch(lens)
                                     }
                                 } else {
-                                    createCameraCaptureSession()
+                                    if (requiresMgcVideo) {
+                                        _videoEisPlusStatus.value = "Lens switch has no EIS+ recording target; stopping video"
+                                        stopVideoRecording()
+                                    } else {
+                                        createCameraCaptureSession()
+                                    }
                                     completeLensSwitch(lens)
                                 }
                                 val elapsedMs = (System.nanoTime() - switchStartNs) / 1_000_000L
