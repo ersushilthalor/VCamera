@@ -245,7 +245,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 "physicalCamera=$physicalCameraId generation=$generation")
     }
 
-    private fun diagnosticEvent(
+    internal fun diagnosticEvent(
         component: String,
         name: String,
         details: String = "",
@@ -1314,7 +1314,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 lookaheadFrames = lookaheadFrames,
             )
             active = startSequence != null
-            diagnosticEvent(
+            coordinator.diagnosticEvent(
                 "SESSION", if (active) "CONSUMER_STARTED" else "CONSUMER_START_FAILED",
                 "id=$sessionId size=${frameWidth}x$frameHeight strength=$strength lookahead=$lookaheadFrames cursor=$startSequence",
                 if (active) "INFO" else "ERROR",
@@ -1365,7 +1365,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                 }
                 val image = coordinator.acquireImageForSession(sessionId, timestampNs)
                 if (image == null) {
-                    diagnosticEvent("SESSION", "IMAGE_FOR_RESULT_MISSING", "sequence=${next.sequence} timestampNs=$timestampNs", "WARN")
+                    coordinator.diagnosticEvent("SESSION", "IMAGE_FOR_RESULT_MISSING", "sequence=${next.sequence} timestampNs=$timestampNs", "WARN")
                     if (next.sequence <= 3L || next.sequence % 30L == 0L) {
                         Log.i(
                             TAG,
@@ -1399,7 +1399,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
                     )
                 }
                 if (next.sequence <= 3L || next.sequence % 30L == 0L || next.result is MgcEisNativeEngine.FrameResult.Dropped) {
-                    diagnosticEvent(
+                    coordinator.diagnosticEvent(
                         "SESSION", "FRAME_DEQUEUED",
                         "sequence=${next.sequence} tsNs=$timestampNs transformApplied=${outputFrame.transform != null} image=${image.width}x${image.height}",
                         if (outputFrame.transform != null) "INFO" else "WARN",
