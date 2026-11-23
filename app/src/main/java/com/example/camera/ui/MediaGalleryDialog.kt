@@ -699,13 +699,19 @@ private fun MediaGalleryPhotoViewer(
             ) {
                 GalleryViewerAction(Modifier.weight(1f), Icons.Filled.Share, "Share") {
                     actionScope.launch {
-                        val shareUri = if (isExpanded && photoLoadState.expandedBitmap != null) {
-                            withContext(Dispatchers.IO) {
-                                GalleryMediaActions.saveEditedPhoto(context, photoLoadState.expandedBitmap, "${photo.displayName.substringBeforeLast('.')}_EXPANDED.jpg")
-                            }
-                        } else photo.uri
                         runCatching {
-                            if (shareUri != null) GalleryMediaActions.shareMedia(context, shareUri, false, photo.displayName)
+                            val expandedBitmap = photoLoadState.expandedBitmap
+                            val shareUri = if (isExpanded && expandedBitmap != null) {
+                                withContext(Dispatchers.IO) {
+                                    GalleryMediaActions.saveEditedPhoto(
+                                        context,
+                                        expandedBitmap,
+                                        "${photo.displayName.substringBeforeLast('.')}_EXPANDED.jpg"
+                                    )
+                                }
+                            } else photo.uri
+                            if (shareUri == null) throw IllegalStateException("Could not prepare photo for sharing")
+                            GalleryMediaActions.shareMedia(context, shareUri, false, photo.displayName)
                         }.onFailure {
                             Toast.makeText(context, "Unable to share this photo", Toast.LENGTH_SHORT).show()
                         }
@@ -734,11 +740,23 @@ private fun MediaGalleryPhotoViewer(
                                 onClick = {
                                     addToExpanded = false
                                     actionScope.launch {
-                                        val saved = withContext(Dispatchers.IO) {
-                                            GalleryMediaActions.saveEditedPhoto(context, photoLoadState.expandedBitmap, "${photo.displayName.substringBeforeLast('.')}_EXPANDED.jpg")
+                                        val result = withContext(Dispatchers.IO) {
+                                            runCatching {
+                                                val expandedBitmap = photoLoadState.expandedBitmap
+                                                    ?: throw IllegalStateException("Expanded image is not ready")
+                                                GalleryMediaActions.saveEditedPhoto(
+                                                    context,
+                                                    expandedBitmap,
+                                                    "${photo.displayName.substringBeforeLast('.')}_EXPANDED.jpg"
+                                                )
+                                            }
                                         }
-                                        Toast.makeText(context, if (saved != null) "Expanded photo saved" else "Could not save expanded photo", Toast.LENGTH_SHORT).show()
-                                        onMediaChanged()
+                                        Toast.makeText(
+                                            context,
+                                            if (result.getOrNull() != null) "Expanded photo saved" else "Could not save expanded photo",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                        if (result.getOrNull() != null) onMediaChanged()
                                     }
                                 }
                             )
@@ -1474,13 +1492,8 @@ private fun MediaGalleryPlayer(
             GalleryViewerAction(Modifier.weight(1f), Icons.Filled.Share, "Share") {
                 switchScope.launch {
                     val sourceUri = if (isUltraWide) video.ultraWideUri ?: video.uri else video.uri
-                    val shareUri = withContext(Dispatchers.IO) {
-                        if (sourceUri.scheme == "file") {
-                            GalleryMediaActions.exportVideoCopy(context, sourceUri, video.displayName, "SHARE")
-                        } else sourceUri
-                    }
                     runCatching {
-                        if (shareUri != null) GalleryMediaActions.shareMedia(context, shareUri, true, video.displayName)
+                        GalleryMediaActions.shareMedia(context, sourceUri, true, video.displayName)
                     }.onFailure {
                         Toast.makeText(context, "Unable to share video", Toast.LENGTH_SHORT).show()
                     }
