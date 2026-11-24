@@ -51,6 +51,8 @@ fun QuickOptionsFloatingPanel(
     timerMode: TimerMode,
     gridType: GridType,
     isRawEnabled: Boolean,
+    photoMegapixelMode: PhotoMegapixelMode = PhotoMegapixelMode.M12,
+    selectedPhotoFilter: PhotoFilter = PhotoFilter.ORIGINAL,
     isPipelineActive: Boolean,
     isSpecialPhotoEnabled: Boolean = false,
     // Video properties
@@ -71,6 +73,8 @@ fun QuickOptionsFloatingPanel(
     onTimerClick: () -> Unit,
     onGridClick: () -> Unit,
     onToggleMegapixelMode: () -> Unit = {},
+    onPhotoFilterClick: () -> Unit = {},
+    onRefocusGalleryClick: () -> Unit = {},
     onRawClick: () -> Unit,
     onSpecialPhotoToggle: () -> Unit = {},
     onVideoSettingsClick: () -> Unit,
@@ -450,8 +454,30 @@ fun QuickOptionsFloatingPanel(
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.Center
+                                horizontalArrangement = Arrangement.SpaceBetween
                             ) {
+                                QuickOptionCircleButton(
+                                    icon = Icons.Outlined.HighQuality,
+                                    label = "Resolution",
+                                    statusText = photoMegapixelMode.label,
+                                    isActive = photoMegapixelMode == PhotoMegapixelMode.M50,
+                                    activeColor = accentColor,
+                                    onClick = onToggleMegapixelMode,
+                                    testTag = "panel_megapixel_button",
+                                    compact = false,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                QuickOptionCircleButton(
+                                    icon = Icons.Outlined.Palette,
+                                    label = "Filters",
+                                    statusText = selectedPhotoFilter.displayName,
+                                    isActive = selectedPhotoFilter != PhotoFilter.ORIGINAL,
+                                    activeColor = accentColor,
+                                    onClick = onPhotoFilterClick,
+                                    testTag = "panel_photo_filter_button",
+                                    compact = false,
+                                    modifier = Modifier.weight(1f)
+                                )
                                 QuickOptionCircleButton(
                                     icon = Icons.Outlined.CameraAlt,
                                     label = "Special Photo",
@@ -461,9 +487,21 @@ fun QuickOptionsFloatingPanel(
                                     onClick = onSpecialPhotoToggle,
                                     testTag = "panel_special_photo_button",
                                     compact = false,
-                                    modifier = Modifier.widthIn(min = 112.dp)
+                                    modifier = Modifier.weight(1f)
+                                )
+                                QuickOptionCircleButton(
+                                    icon = Icons.Filled.CenterFocusStrong,
+                                    label = "Refocus",
+                                    statusText = "Gallery",
+                                    isActive = false,
+                                    activeColor = accentColor,
+                                    onClick = onRefocusGalleryClick,
+                                    testTag = "panel_refocus_gallery_button",
+                                    compact = false,
+                                    modifier = Modifier.weight(1f)
                                 )
                             }
+
                         }
                     }
 

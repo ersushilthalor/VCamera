@@ -41,6 +41,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -233,6 +234,23 @@ fun CameraScreen(
     val mediaGalleryItems by viewModel.mediaGalleryItems.collectAsStateWithLifecycle()
     val isSpecialVideoGalleryOpen by viewModel.isSpecialVideoGalleryOpen.collectAsStateWithLifecycle()
     val isSpecialPhotoEnabled by viewModel.isSpecialPhotoEnabled.collectAsStateWithLifecycle()
+    val photoMegapixelMode by viewModel.photoMegapixelMode.collectAsStateWithLifecycle()
+    val selectedPhotoFilter by viewModel.selectedPhotoFilter.collectAsStateWithLifecycle()
+    val isPhotoFilterBarOpen by viewModel.isPhotoFilterBarOpen.collectAsStateWithLifecycle()
+    var isRefocusGalleryOpen by rememberSaveable { mutableStateOf(false) }
+    val isRefocusPhotoEnabled by viewModel.isRefocusPhotoEnabled.collectAsStateWithLifecycle()
+    val isUltraFastShutterEnabled by viewModel.isUltraFastShutterEnabled.collectAsStateWithLifecycle()
+    val ultraFastShutterFps by viewModel.ultraFastShutterFps.collectAsStateWithLifecycle()
+    val fastShutterFrameCount by viewModel.fastShutterFrameCount.collectAsStateWithLifecycle()
+    val isFastShutterHolding by viewModel.isFastShutterHolding.collectAsStateWithLifecycle()
+    val isCustomPipelineEnabled by viewModel.isCustomPipelineEnabled.collectAsStateWithLifecycle()
+    val activePipelinePreset by viewModel.activePipelinePreset.collectAsStateWithLifecycle()
+    val customPresets by viewModel.customPresets.collectAsStateWithLifecycle()
+    val isPipelinePresetFloatingWindowOpen by viewModel.isPipelinePresetFloatingWindowOpen.collectAsStateWithLifecycle()
+    val isPipelineSheetOpen by viewModel.isPipelineSheetOpen.collectAsStateWithLifecycle()
+    val isBeforeAfterOpen by viewModel.isBeforeAfterOpen.collectAsStateWithLifecycle()
+    val latestPipelineCapture by viewModel.latestPipelineCapture.collectAsStateWithLifecycle()
+    val isReprocessing by viewModel.isReprocessing.collectAsStateWithLifecycle()
     var isQuickOptionsOpen by rememberSaveable { mutableStateOf(false) }
 
 
@@ -243,6 +261,12 @@ fun CameraScreen(
     if (isQuickOptionsOpen) {
         BackHandler {
             isQuickOptionsOpen = false
+        }
+    }
+
+    if (isRefocusGalleryOpen) {
+        BackHandler {
+            isRefocusGalleryOpen = false
         }
     }
 
@@ -367,8 +391,8 @@ fun CameraScreen(
             isManualProOpen ||
             isVideoSettingsPanelOpen ||
             isVideoAdjustmentsOpen || isSettingsOpen || isGallerySelectionDialogOpen || isSpecialVideoGalleryOpen ||
-            isCustomUiStudioOpen ||
-            isQuickOptionsOpen
+            isCustomUiStudioOpen || isQuickOptionsOpen || isPhotoFilterBarOpen ||
+            isPipelinePresetFloatingWindowOpen || isPipelineSheetOpen || isBeforeAfterOpen || isRefocusGalleryOpen
 
     LaunchedEffect(isAnyWindowOpen) {
         com.example.camera.ui.components.BackdropBlurManager.isWindowActive = isAnyWindowOpen
@@ -433,6 +457,7 @@ fun CameraScreen(
                 mainPreviewBufferSize = mainPreviewBufferSize,
                 ultraWidePreviewBufferSize = ultraWidePreviewBufferSize,
                 sensorOrientation = sensorOrientation,
+                activePhotoFilter = selectedPhotoFilter,
                 activeLut = cinemaConfig.selectedLut,
                 isLutPreviewEnabled = cinemaConfig.isLutPreviewEnabled,
                 cinemaConfig = cinemaConfig,
@@ -591,7 +616,11 @@ fun CameraScreen(
             videoQuality = currentVideoQuality,
             videoResolution = selectedVideoResolution,
             videoFps = videoFps,
+            photoMegapixelMode = photoMegapixelMode,
             cinemaConfig = cinemaConfig,
+            onPipelineClick = { viewModel.togglePipelinePresetFloatingWindow() },
+            isPipelineActive = isCustomPipelineEnabled,
+            onToggleMegapixelMode = { viewModel.togglePhotoMegapixelMode() },
             onCinemaSettingsClick = { viewModel.toggleCinemaSettings() },
             onLogClick = { viewModel.toggleLogProfileWindow() },
             isLogWindowOpen = isLogProfileWindowOpen,
@@ -627,7 +656,8 @@ fun CameraScreen(
         )
 
         // Dismiss barrier behind floating windows to close them when tapping on the camera preview
-        val isAnyFloatingOverlayOpen = isQuickOptionsOpen ||
+        val isAnyFloatingOverlayOpen = isQuickOptionsOpen || isPhotoFilterBarOpen ||
+                isPipelinePresetFloatingWindowOpen ||
                 (isVideoSettingsPanelOpen && (cameraMode == CameraMode.VIDEO || cameraMode == CameraMode.CINEMA)) ||
                 (isLogProfileWindowOpen && cameraMode == CameraMode.CINEMA) ||
                 (isLutWindowOpen && cameraMode == CameraMode.CINEMA)
@@ -640,6 +670,8 @@ fun CameraScreen(
                         indication = null
                     ) {
                         isQuickOptionsOpen = false
+                        viewModel.setPhotoFilterBarOpen(false)
+                        viewModel.setPipelinePresetFloatingWindowOpen(false)
                         viewModel.setVideoSettingsPanelOpen(false)
                         viewModel.setLogProfileWindowOpen(false)
                         viewModel.setLutWindowOpen(false)
@@ -655,7 +687,9 @@ fun CameraScreen(
             timerMode = timerMode,
             gridType = gridType,
             isRawEnabled = isRawEnabled,
-            isPipelineActive = false,
+            photoMegapixelMode = photoMegapixelMode,
+            selectedPhotoFilter = selectedPhotoFilter,
+            isPipelineActive = isCustomPipelineEnabled,
             videoResolution = selectedVideoResolution,
             videoFps = videoFps,
             isAudioEnabled = isAudioEnabled,
@@ -671,6 +705,12 @@ fun CameraScreen(
             onFlashClick = { viewModel.cycleFlashMode() },
             onTimerClick = { viewModel.cycleTimerMode() },
             onGridClick = { viewModel.cycleGridType() },
+            onToggleMegapixelMode = { viewModel.togglePhotoMegapixelMode() },
+            onPhotoFilterClick = { viewModel.togglePhotoFilterBar() },
+            onRefocusGalleryClick = {
+                isQuickOptionsOpen = false
+                isRefocusGalleryOpen = true
+            },
             onRawClick = { viewModel.toggleRawCapture() },
             onSpecialPhotoToggle = { viewModel.setSpecialPhotoCaptureEnabled(!isSpecialPhotoEnabled) },
             onVideoSettingsClick = {
@@ -718,6 +758,23 @@ fun CameraScreen(
                 .padding(top = 56.dp)
         )
 
+
+        if (isRefocusGalleryOpen) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(50f)
+            ) {
+                RefocusGalleryScreen(
+                    onClose = { isRefocusGalleryOpen = false },
+                    onOpenDeviceGallery = {
+                        isRefocusGalleryOpen = false
+                        viewModel.openSystemGallery(context)
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
 
         // 2b. Floating Frosted Video Settings Panel (Resolution & Frame Rate)
         if (cameraMode == CameraMode.VIDEO || cameraMode == CameraMode.CINEMA) {
@@ -983,6 +1040,11 @@ fun CameraScreen(
             onPauseResumeRecordingClick = { viewModel.toggleVideoRecordingPause() },
             videoDurationSeconds = videoDurationSeconds,
             isCapturing = isCapturing,
+            isUltraFastShutterEnabled = isUltraFastShutterEnabled,
+            ultraFastFps = ultraFastShutterFps,
+            onFastShutterSingleTap = { viewModel.onFastShutterSingleTap() },
+            onFastShutterHoldStart = { viewModel.onFastShutterHoldStart() },
+            onFastShutterHoldEnd = { viewModel.onFastShutterHoldEnd() },
             isManualProOpen = isManualProOpen,
             lastCapturedMedia = lastCapturedMedia,
             activeTimerCountdown = activeTimerCountdown,
@@ -1043,6 +1105,55 @@ fun CameraScreen(
                 )
             }
         }
+
+        if (isPhotoFilterBarOpen && cameraMode == CameraMode.PHOTO) {
+            PhotoFilterSelectorBar(
+                selectedFilter = selectedPhotoFilter,
+                onFilterSelected = { viewModel.setPhotoFilter(it) },
+                onClose = { viewModel.setPhotoFilterBarOpen(false) },
+                modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 60.dp)
+            )
+        }
+
+        if (isPipelinePresetFloatingWindowOpen) {
+            PipelinePresetFloatingWindow(
+                activePreset = activePipelinePreset,
+                allPresets = com.example.camera.pipeline.model.PipelinePreset.BUILT_IN_PRESETS + customPresets,
+                isPipelineEnabled = isCustomPipelineEnabled,
+                onToggleEnabled = { viewModel.toggleCustomPipelineEnabled(it) },
+                onPresetSelected = { viewModel.selectPipelinePreset(it) },
+                onEditClick = {
+                    viewModel.setPipelinePresetFloatingWindowOpen(false)
+                    viewModel.setPipelineSheetOpen(true)
+                },
+                onBeforeAfterClick = {
+                    viewModel.setPipelinePresetFloatingWindowOpen(false)
+                    viewModel.setBeforeAfterOpen(true)
+                },
+                onDismiss = { viewModel.setPipelinePresetFloatingWindowOpen(false) },
+                modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 62.dp)
+            )
+        }
+
+        if (isPipelineSheetOpen) {
+            com.example.camera.pipeline.ui.CustomPipelineBottomSheet(
+                viewModel = viewModel,
+                onDismissRequest = { viewModel.setPipelineSheetOpen(false) }
+            )
+        }
+
+        if (isBeforeAfterOpen) {
+            com.example.camera.pipeline.ui.PipelineBeforeAfterDialog(
+                viewModel = viewModel,
+                onDismissRequest = { viewModel.setBeforeAfterOpen(false) }
+            )
+        }
+
+        com.example.camera.ui.components.FastShutterLiveCounter(
+            visible = cameraMode == CameraMode.PHOTO && isFastShutterHolding,
+            frameCount = fastShutterFrameCount,
+            modifier = Modifier.align(Alignment.Center)
+        )
 
         // 7. Preferred Gallery App Selection Dialog
         com.example.camera.gallery.GallerySelectionDialog(

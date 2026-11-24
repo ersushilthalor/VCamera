@@ -2447,17 +2447,77 @@ class Camera2Engine(private val context: Context) {
     val cinemaCapabilities: StateFlow<CinemaHardwareCapabilities> = _cinemaCapabilities.asStateFlow()
     val nativeNaturalParams: StateFlow<NativeNaturalToneParams> = cinemaEngine.nativeNaturalEngine.currentParams
 
-    val isRefocusPhotoEnabled: Boolean = false
+    // Oppo computational-photo engines run alongside, not in place of, VCamera's video/EIS+ path.
+    val gyroStabilizationEngine by lazy { GyroStabilizationEngine(context) }
+    val photoHdrEngine by lazy { com.example.camera.engine.hdr.PhotoHdrEngine(context) }
+    val refocusEngine by lazy { com.example.camera.engine.RefocusEngine(context) }
+    val customImagePipelineEngine by lazy { com.example.camera.pipeline.engine.CustomImagePipelineEngine(context) }
+    val ultraFastShutterEngine by lazy {
+        com.example.camera.ultrafast.engine.UltraFastShutterEngine(
+            context,
+            com.example.camera.ultrafast.data.UltraFastBurstRepository(context)
+        )
+    }
+    val fastShutterFrameCount: StateFlow<Int> get() = ultraFastShutterEngine.liveFrameCount
+    val isFastShutterHolding: StateFlow<Boolean> get() = ultraFastShutterEngine.isHolding
+    private val isHoldingContinuousCapture = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    var photoMegapixelMode: PhotoMegapixelMode = preferences.photoMegapixelMode
+        set(value) {
+            val changed = field != value
+            field = value
+            preferences.photoMegapixelMode = value
+            if (changed && currentMode == CameraMode.PHOTO) {
+                val activeLens = _selectedLens.value
+                val cameraId = activeLens?.physicalCameraId ?: activeLens?.cameraId
+                if (cameraId != null && cameraDevice != null && !isConfiguringSession) {
+                    setupImageReaders(cameraId)
+                    createCameraCaptureSession()
+                }
+            }
+        }
+    var selectedPhotoFilter: PhotoFilter = preferences.selectedPhotoFilter
+        set(value) {
+            field = value
+            preferences.selectedPhotoFilter = value
+        }
+    var isRefocusPhotoEnabled: Boolean = preferences.isRefocusPhotoEnabled
     val refocusFrameCount: Int = 3
-    val isUltraFastShutterEnabled: Boolean = false
-    val ultraFastShutterFps: Int = 15
-    val fastShutterFrameCount: StateFlow<Int> = MutableStateFlow(0).asStateFlow()
-    val isFastShutterHolding: StateFlow<Boolean> = MutableStateFlow(false).asStateFlow()
-    fun updateFastShutterState(enabled: Boolean, fps: Int) {}
+    @Volatile var isUltraFastShutterEnabled: Boolean = preferences.isUltraFastShutterEnabled
+        private set
+    @Volatile var ultraFastShutterFps: Int = preferences.ultraFastShutterFps
+        private set
+
+    fun updateFastShutterState(enabled: Boolean, fps: Int) {
+        val wasEnabled = isUltraFastShutterEnabled
+        isUltraFastShutterEnabled = enabled
+        ultraFastShutterFps = fps.coerceIn(5, 20)
+        preferences.isUltraFastShutterEnabled = enabled
+        preferences.ultraFastShutterFps = ultraFastShutterFps
+        if (wasEnabled == enabled && ultraFastShutterFps == fps.coerceIn(5, 20)) return
+
+        if (!enabled) {
+            stopUltraFastContinuousCapture()
+            runCatching { imageReaderYuv?.close() }
+            imageReaderYuv = null
+            runCatching { ultraFastShutterEngine.reset() }
+            if (cameraDevice != null && captureSession != null && !isConfiguringSession) {
+                createCameraCaptureSession()
+            }
+        } else if (currentMode == CameraMode.PHOTO) {
+            val activeLens = _selectedLens.value
+            val cameraId = activeLens?.physicalCameraId ?: activeLens?.cameraId ?: return
+            if (cameraDevice != null && !isConfiguringSession) {
+                setupImageReaders(cameraId)
+                createCameraCaptureSession()
+            }
+        }
+    }
 
 
     init {
         initOrientationListener()
+        runCatching { gyroStabilizationEngine.start() }
         val savedCinema = preferences.getCinemaConfig()
         cinemaEngine.updateConfig(savedCinema)
         _cinemaConfig.value = savedCinema
@@ -5005,7 +5065,7 @@ class Camera2Engine(private val context: Context) {
             null
         }
 
-        val is50MMode = false
+        val is50MMode = currentMode == CameraMode.PHOTO && photoMegapixelMode == PhotoMegapixelMode.M50
         if (is50MMode && chars != null) {
             val maxNativeResolution = getMaxResolutionNative(chars, ImageFormat.JPEG)
             if (maxNativeResolution != null) {
@@ -5167,6 +5227,36 @@ class Camera2Engine(private val context: Context) {
             imageReaderYuv?.close()
         } catch (ignored: Throwable) {}
         imageReaderYuv = null
+
+        // Separate high-resolution photo burst stream; never replace the video/EIS+ encoder pipeline.
+        if (currentMode == CameraMode.PHOTO && isUltraFastShutterEnabled) {
+            try {
+                val burstSize = getOptimalBurstYuvSize(activeLens, cameraId, targetSize)
+                imageReaderYuv = ImageReader.newInstance(
+                    burstSize.width,
+                    burstSize.height,
+                    ImageFormat.YUV_420_888,
+                    4
+                )
+                ultraFastShutterEngine.configureFramePool(burstSize.width, burstSize.height)
+                imageReaderYuv?.setOnImageAvailableListener({ reader ->
+                    if (ultraFastShutterEngine.isBurstActive()) {
+                        ultraFastShutterEngine.onSensorImageAvailable(
+                            reader = reader,
+                            sensorOrientation = getCaptureJpegOrientation(),
+                            isFrontFacing = _selectedLens.value?.facing == CameraCharacteristics.LENS_FACING_FRONT,
+                            saveMirrored = saveSelfieAsPreviewed
+                        )
+                    } else {
+                        runCatching { reader.acquireLatestImage()?.close() }
+                    }
+                }, ultraFastShutterEngine.getCaptureHandler() ?: backgroundHandler)
+            } catch (t: Throwable) {
+                Log.e(TAG, "[FAST_SHUTTER] Failed to prepare photo burst YUV stream", t)
+                runCatching { imageReaderYuv?.close() }
+                imageReaderYuv = null
+            }
+        }
 
         if (caps.supportsRaw && isRawCaptureEnabled && caps.supportedRawResolutions.isNotEmpty()) {
             val rawRes = caps.supportedRawResolutions.first()
@@ -5789,16 +5879,24 @@ class Camera2Engine(private val context: Context) {
                 imageReaderJpeg?.surface?.let {
                     val jpegConfig = android.hardware.camera2.params.OutputConfiguration(it)
                     jpegConfig.setPhysicalCameraId(activeLens.physicalCameraId)
-                    if (false) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                         try {
-                            val chars = getCharacteristics(activeLens.physicalCameraId) ?: getCharacteristics(activeLens.cameraId)
-                            val maxResMap = chars?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)
+                            val chars = getCharacteristics(activeLens.physicalCameraId)
+                                ?: getCharacteristics(activeLens.cameraId)
+                            val maxResMap = chars?.get(
+                                CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION
+                            )
                             val ultraSizes = maxResMap?.getOutputSizes(ImageFormat.JPEG)
-                            val isUltra = ultraSizes?.any { sz -> sz.width == imageReaderJpeg?.width && sz.height == imageReaderJpeg?.height } == true
+                            val isUltra = ultraSizes?.any { size ->
+                                size.width == imageReaderJpeg?.width && size.height == imageReaderJpeg?.height
+                            } == true
                             if (isUltra) {
                                 jpegConfig.addSensorPixelModeUsed(CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
+                                Log.i(TAG, "[SESSION_50M] Physical JPEG output configured for MAXIMUM_RESOLUTION")
                             }
-                        } catch (ignored: Throwable) {}
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "Could not enable maximum-resolution mode on physical JPEG output", t)
+                        }
                     }
                     outputConfigs.add(jpegConfig)
                 }
@@ -5928,18 +6026,23 @@ class Camera2Engine(private val context: Context) {
 
                 imageReaderJpeg?.surface?.let { surf ->
                     val jpegConfig = android.hardware.camera2.params.OutputConfiguration(surf)
-                    if (false) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                         try {
-                            val chars = activeLens?.let { getCharacteristics(it.cameraId) } ?: getCharacteristics(camera.id)
-                            val maxResMap = chars?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)
+                            val chars = activeLens?.let { getCharacteristics(it.cameraId) }
+                                ?: getCharacteristics(camera.id)
+                            val maxResMap = chars?.get(
+                                CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION
+                            )
                             val ultraSizes = maxResMap?.getOutputSizes(ImageFormat.JPEG)
-                            val isUltra = ultraSizes?.any { sz -> sz.width == imageReaderJpeg?.width && sz.height == imageReaderJpeg?.height } == true
+                            val isUltra = ultraSizes?.any { size ->
+                                size.width == imageReaderJpeg?.width && size.height == imageReaderJpeg?.height
+                            } == true
                             if (isUltra) {
                                 jpegConfig.addSensorPixelModeUsed(CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
-                                Log.i(TAG, "[SESSION_50M] Configured SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION on OutputConfiguration")
+                                Log.i(TAG, "[SESSION_50M] JPEG output configured for MAXIMUM_RESOLUTION")
                             }
                         } catch (t: Throwable) {
-                            Log.w(TAG, "Could not set sensor pixel mode on OutputConfiguration", t)
+                            Log.w(TAG, "Could not enable maximum-resolution mode on JPEG output", t)
                         }
                     }
                     outputConfigs.add(jpegConfig)
@@ -7438,17 +7541,542 @@ class Camera2Engine(private val context: Context) {
         fps: Int = 15,
         onComplete: (Uri?) -> Unit
     ) {
-        onComplete(null)
+        val activeCamera = cameraDevice ?: run { onComplete(null); return }
+        val session = captureSession ?: run { onComplete(null); return }
+        val reader = imageReaderYuv ?: run {
+            Log.w(TAG, "[FAST_SHUTTER] YUV reader unavailable; falling back to standard photo")
+            takePhotoStandard(onComplete)
+            return
+        }
+        if (!isHoldingContinuousCapture.compareAndSet(false, true)) return
+
+        val burstId = java.util.UUID.randomUUID().toString()
+        val captureFps = fps.coerceIn(5, 20)
+        _isCapturing.value = true
+        val front = _selectedLens.value?.facing == CameraCharacteristics.LENS_FACING_FRONT
+        reader.setOnImageAvailableListener({ imageReader ->
+            if (ultraFastShutterEngine.isBurstActive()) {
+                ultraFastShutterEngine.onSensorImageAvailable(
+                    reader = imageReader,
+                    sensorOrientation = getCaptureJpegOrientation(),
+                    isFrontFacing = front,
+                    saveMirrored = saveSelfieAsPreviewed
+                )
+            } else {
+                runCatching { imageReader.acquireLatestImage()?.close() }
+            }
+        }, ultraFastShutterEngine.getCaptureHandler() ?: backgroundHandler)
+
+        val builder = previewRequestBuilder
+        if (builder != null) {
+            try {
+                builder.addTarget(reader.surface)
+                session.setRepeatingRequest(builder.build(), captureCallback, backgroundHandler)
+                CameraPerformanceMonitor.setActiveOutputs(listOf("PREVIEW", "YUV_BURST_ACTIVE"))
+            } catch (t: Throwable) {
+                Log.e(TAG, "[FAST_SHUTTER] Could not attach YUV to repeating request", t)
+            }
+        }
+
+        ultraFastShutterEngine.startContinuousBurst(
+            burstId = burstId,
+            fps = captureFps,
+            onComplete = { coverUri ->
+                isHoldingContinuousCapture.set(false)
+                _isCapturing.value = false
+                updateStorageStats()
+                if (coverUri != null) {
+                    _lastCapturedMedia.value = CapturedMedia(
+                        uri = coverUri,
+                        isVideo = false,
+                        timestamp = System.currentTimeMillis(),
+                        displayName = "BURST_" + burstId.take(8) + "_0001.jpg"
+                    )
+                }
+                onComplete(coverUri)
+            }
+        )
     }
 
-    fun stopUltraFastContinuousCapture() {}
+    fun stopUltraFastContinuousCapture() {
+        if (!isHoldingContinuousCapture.getAndSet(false)) return
+        val reader = imageReaderYuv
+        val session = captureSession
+        val builder = previewRequestBuilder
+        if (builder != null && reader != null && session != null) {
+            try {
+                builder.removeTarget(reader.surface)
+                session.setRepeatingRequest(builder.build(), captureCallback, backgroundHandler)
+                val outputs = mutableListOf("PREVIEW")
+                if (imageReaderJpeg != null) outputs.add("JPEG")
+                if (imageReaderYuv != null) outputs.add("YUV_ARMED")
+                if (imageReaderRaw != null) outputs.add("RAW")
+                CameraPerformanceMonitor.setActiveOutputs(outputs)
+            } catch (t: Throwable) {
+                Log.w(TAG, "[FAST_SHUTTER] Failed to detach YUV from repeating request", t)
+            }
+        }
+        ultraFastShutterEngine.stopContinuousBurst()
+    }
 
     /**
      * Take still photo (JPEG + optional RAW). In 50M mode, triggers single-frame computational 50MP capture.
      */
     private val photoCaptureInProgress = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    private fun takePhotoHdrBurst(
+        plan: com.example.camera.engine.hdr.HdrCapturePlan,
+        onComplete: (Uri?) -> Unit
+    ) {
+        val camera = cameraDevice
+        val session = captureSession
+        val jpegReader = imageReaderJpeg
+        val handler = backgroundHandler
+        if (camera == null || session == null || jpegReader == null || handler == null ||
+            !_isCameraReady.value || !jpegReader.surface.isValid ||
+            !photoCaptureInProgress.compareAndSet(false, true)
+        ) {
+            onComplete(null)
+            return
+        }
+
+        _isCapturing.value = true
+        val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+        val processing = java.util.concurrent.atomic.AtomicBoolean(false)
+        val receivedCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val frames = java.util.Collections.synchronizedList(
+            mutableListOf<com.example.camera.engine.hdr.HdrInputFrame>()
+        )
+        val resultByTimestamp = java.util.concurrent.ConcurrentHashMap<Long, TotalCaptureResult>()
+        val resultByIndex = java.util.concurrent.ConcurrentHashMap<Int, TotalCaptureResult>()
+        val expectedCount = plan.specs.size.coerceAtLeast(1)
+        val rawReader = imageReaderRaw?.takeIf { isRawCaptureEnabled && _capabilities.value.supportsRaw }
+
+        fun finish(uri: Uri?) {
+            if (!finished.compareAndSet(false, true)) return
+            runCatching { jpegReader.setOnImageAvailableListener(null, null) }
+            photoCaptureInProgress.set(false)
+            _isCapturing.value = false
+            updateStorageStats()
+            engineScope.launch(Dispatchers.Main) { onComplete(uri) }
+        }
+
+        fun processCapturedFrames(force: Boolean = false) {
+            if (!force && frames.size < expectedCount) return
+            if (!processing.compareAndSet(false, true)) return
+            val captured = synchronized(frames) { frames.toList() }
+            if (captured.isEmpty()) {
+                finish(null)
+                return
+            }
+            val reference = captured.firstOrNull {
+                it.role == com.example.camera.engine.hdr.FrameRole.REFERENCE_BASE
+            } ?: captured.first()
+            engineScope.launch(Dispatchers.Default) {
+                val savedUri = try {
+                    val merged = photoHdrEngine.processHdrCapture(
+                        frames = captured,
+                        plan = plan,
+                        jpegQuality = preferences.jpegQuality
+                    )
+                    saveJpegBytesToMediaStore(merged)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "[PHOTO_HDR] Fusion failed; saving the reference exposure", t)
+                    runCatching { saveJpegBytesToMediaStore(reference.jpegBytes) }.getOrNull()
+                }
+                finish(savedUri)
+            }
+        }
+
+        jpegReader.setOnImageAvailableListener({ reader ->
+            val image = try { reader.acquireNextImage() } catch (t: Throwable) {
+                Log.e(TAG, "[PHOTO_HDR] Failed to acquire bracket frame", t)
+                null
+            } ?: return@setOnImageAvailableListener
+            val bytes = try {
+                val buffer = image.planes.firstOrNull()?.buffer
+                    ?: throw IllegalStateException("HDR frame has no JPEG plane")
+                ByteArray(buffer.remaining()).also { buffer.get(it) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "[PHOTO_HDR] Failed to copy JPEG bytes", t)
+                image.close()
+                return@setOnImageAvailableListener
+            }
+            val timestamp = image.timestamp
+            image.close()
+
+            val index = receivedCount.getAndIncrement().coerceAtMost(expectedCount - 1)
+            val spec = plan.specs.getOrNull(index) ?: plan.specs.first()
+            val result = resultByTimestamp[timestamp] ?: resultByIndex[index] ?: lastCaptureResult
+            frames.add(
+                com.example.camera.engine.hdr.HdrInputFrame(
+                    jpegBytes = bytes,
+                    role = spec.role,
+                    evOffset = spec.evOffset,
+                    exposureTimeNs = result?.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+                        ?: plan.estimatedExpTimeNs,
+                    iso = result?.get(CaptureResult.SENSOR_SENSITIVITY) ?: plan.estimatedIso,
+                    timestampNs = timestamp,
+                    gyroYawSpeed = gyroStabilizationEngine.latestYawSpeed,
+                    gyroPitchSpeed = gyroStabilizationEngine.latestPitchSpeed,
+                    gyroRollSpeed = gyroStabilizationEngine.latestRollSpeed,
+                    actualAeCompensation = result?.get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION)
+                        ?: spec.aeCompIndex
+                )
+            )
+            processCapturedFrames()
+        }, handler)
+
+        rawReader?.setOnImageAvailableListener({ reader ->
+            val raw = runCatching { reader.acquireLatestImage() }.getOrNull()
+                ?: return@setOnImageAvailableListener
+            engineScope.launch(Dispatchers.IO) {
+                try {
+                    val lens = _selectedLens.value
+                    val chars = lens?.let { getCharacteristics(it.cameraId) }
+                    if (chars != null) saveRawToMediaStore(raw, chars)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "[PHOTO_HDR] Optional RAW save failed", t)
+                } finally {
+                    raw.close()
+                }
+            }
+        }, handler)
+
+        try {
+            val requests = plan.specs.mapIndexed { index, spec ->
+                camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                    addTarget(jpegReader.surface)
+                    if (rawReader != null && spec.isReference) addTarget(rawReader.surface)
+                    applyCommonSettings(this, isStillCapture = true)
+                    set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
+                    set(CaptureRequest.JPEG_ORIENTATION, getCaptureJpegOrientation())
+                    set(CaptureRequest.JPEG_QUALITY, preferences.jpegQuality.coerceIn(90, 100).toByte())
+                    if (spec.aeCompIndex != 0) {
+                        set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, spec.aeCompIndex)
+                    }
+                    set(CaptureRequest.CONTROL_AWB_LOCK, true)
+                    setTag(index)
+                }.build()
+            }
+            session.captureBurst(requests, object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    result: TotalCaptureResult
+                ) {
+                    result.get(CaptureResult.SENSOR_TIMESTAMP)?.let { resultByTimestamp[it] = result }
+                    (request.tag as? Int)?.let { resultByIndex[it] = result }
+                    lastCaptureResult = result
+                }
+
+                override fun onCaptureFailed(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    failure: CaptureFailure
+                ) {
+                    Log.w(TAG, "[PHOTO_HDR] Bracket frame failed: " + failure.reason)
+                    if (frames.isNotEmpty()) processCapturedFrames(force = true)
+                    else finish(null)
+                }
+
+                override fun onCaptureSequenceAborted(session: CameraCaptureSession, sequenceId: Int) {
+                    processCapturedFrames(force = true)
+                }
+            }, handler)
+
+            handler.postDelayed({
+                if (!finished.get() && !processing.get()) {
+                    Log.w(TAG, "[PHOTO_HDR] Watchdog fired; frames received=" + frames.size + "/" + expectedCount)
+                    processCapturedFrames(force = true)
+                }
+            }, 2600L)
+        } catch (t: Throwable) {
+            Log.e(TAG, "[PHOTO_HDR] Unable to submit capture bracket", t)
+            runCatching { jpegReader.setOnImageAvailableListener(null, null) }
+            photoCaptureInProgress.set(false)
+            _isCapturing.value = false
+            takePhotoStandard(onComplete)
+        }
+    }
+
+    fun takePhoto50M(onComplete: (Uri?) -> Unit) {
+        val camera = cameraDevice
+        val session = captureSession
+        val readerJpeg = imageReaderJpeg
+        val handler = backgroundHandler
+        if (camera == null || session == null || readerJpeg == null || handler == null ||
+            !_isCameraReady.value || !readerJpeg.surface.isValid ||
+            !photoCaptureInProgress.compareAndSet(false, true)
+        ) {
+            onComplete(null)
+            return
+        }
+
+        _isCapturing.value = true
+        val completed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val frameProcessed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val activeLens = _selectedLens.value
+
+        fun finish50M(uri: Uri?) {
+            if (!completed.compareAndSet(false, true)) return
+            runCatching { readerJpeg.setOnImageAvailableListener(null, null) }
+            photoCaptureInProgress.set(false)
+            _isCapturing.value = false
+            updateStorageStats()
+            engineScope.launch(Dispatchers.Main) { onComplete(uri) }
+        }
+
+        try {
+            val rawReader = imageReaderRaw?.takeIf { isRawCaptureEnabled && _capabilities.value.supportsRaw }
+            val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                addTarget(readerJpeg.surface)
+                rawReader?.surface?.let { addTarget(it) }
+                applyCommonSettings(this, isStillCapture = true)
+                set(CaptureRequest.JPEG_ORIENTATION, getCaptureJpegOrientation())
+                set(CaptureRequest.JPEG_QUALITY, 100.toByte())
+                set(CaptureRequest.CONTROL_ENABLE_ZSL, false)
+                set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
+                set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY)
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val chars = activeLens?.let { getCharacteristics(it.cameraId) } ?: getCharacteristics(camera.id)
+                    val capabilities = chars?.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+                    val maximumSizes = chars?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)
+                        ?.getOutputSizes(ImageFormat.JPEG).orEmpty()
+                    val matchingMaximumStream = maximumSizes.any { it.width == readerJpeg.width && it.height == readerJpeg.height }
+                    if (capabilities.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR) ||
+                        matchingMaximumStream
+                    ) {
+                        set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
+                    }
+                }
+            }
+
+            readerJpeg.setOnImageAvailableListener({ reader ->
+                val image = runCatching { reader.acquireLatestImage() }.getOrNull()
+                    ?: return@setOnImageAvailableListener
+                if (!frameProcessed.compareAndSet(false, true)) {
+                    image.close()
+                    return@setOnImageAvailableListener
+                }
+                val bytes = try {
+                    val buffer = image.planes.firstOrNull()?.buffer
+                        ?: throw IllegalStateException("Empty native high-resolution JPEG")
+                    ByteArray(buffer.remaining()).also { buffer.get(it) }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "[50M_NATIVE] Failed to read JPEG bytes", t)
+                    image.close()
+                    finish50M(null)
+                    return@setOnImageAvailableListener
+                }
+                val width = image.width
+                val height = image.height
+                image.close()
+                Log.i(TAG, "[50M_NATIVE] Captured native sensor frame " + width + "x" + height)
+                engineScope.launch(Dispatchers.IO) {
+                    val uri = runCatching {
+                        saveJpegBytesToMediaStore(bytes, filePrefix = "50M_NATIVE")
+                    }.onFailure { Log.e(TAG, "[50M_NATIVE] Save failed", it) }.getOrNull()
+                    if (uri != null) {
+                        _lastCapturedMedia.value = CapturedMedia(
+                            uri = uri,
+                            isVideo = false,
+                            timestamp = System.currentTimeMillis(),
+                            displayName = "50M_NATIVE.jpg"
+                        )
+                    }
+                    finish50M(uri)
+                }
+            }, handler)
+
+            rawReader?.setOnImageAvailableListener({ reader ->
+                val raw = runCatching { reader.acquireLatestImage() }.getOrNull()
+                    ?: return@setOnImageAvailableListener
+                engineScope.launch(Dispatchers.IO) {
+                    try {
+                        val lens = _selectedLens.value
+                        val chars = lens?.let { getCharacteristics(it.cameraId) }
+                        if (chars != null) saveRawToMediaStore(raw, chars)
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "[50M_NATIVE] Optional RAW save failed", t)
+                    } finally {
+                        raw.close()
+                    }
+                }
+            }, handler)
+
+            session.capture(builder.build(), object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    result: TotalCaptureResult
+                ) {
+                    lastCaptureResult = result
+                }
+
+                override fun onCaptureFailed(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    failure: CaptureFailure
+                ) {
+                    Log.e(TAG, "[50M_NATIVE] Capture failed: " + failure.reason)
+                    finish50M(null)
+                }
+
+                override fun onCaptureSequenceAborted(session: CameraCaptureSession, sequenceId: Int) {
+                    finish50M(null)
+                }
+            }, handler)
+        } catch (t: Throwable) {
+            Log.e(TAG, "[50M_NATIVE] Unable to start native high-resolution capture", t)
+            finish50M(null)
+        }
+    }
+
+    private fun takePhotoRefocus(onComplete: (Uri?) -> Unit) {
+        val camera = cameraDevice
+        val session = captureSession
+        val readerJpeg = imageReaderJpeg
+        if (camera == null || session == null || readerJpeg == null ||
+            !readerJpeg.surface.isValid || !photoCaptureInProgress.compareAndSet(false, true)
+        ) {
+            takePhotoStandard(onComplete)
+            return
+        }
+
+        val lens = _selectedLens.value
+        val chars = lens?.let { getCharacteristics(it.cameraId) }
+        val minimumDiopters = chars?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
+            ?.takeIf { it > 0.05f } ?: 5f
+        val lastFocus = lastCaptureResult?.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: minimumDiopters * 0.35f
+        val focusPlanes = FloatArray(3) { index ->
+            (minimumDiopters * (1f - index / 2f)).coerceIn(0f, minimumDiopters)
+        }
+        val bestIndex = focusPlanes.indices.minByOrNull { kotlin.math.abs(focusPlanes[it] - lastFocus) } ?: 1
+        val timestamp = System.currentTimeMillis()
+        val tempFiles = List(3) { index -> File(context.cacheDir, "refocus_" + timestamp + "_" + index + ".jpg") }
+        val frameCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val finalized = java.util.concurrent.atomic.AtomicBoolean(false)
+        val captureOrientation = getCaptureJpegOrientation()
+        val front = lens?.facing == CameraCharacteristics.LENS_FACING_FRONT
+        _isCapturing.value = true
+
+        fun finalizeRefocus() {
+            if (!finalized.compareAndSet(false, true)) return
+            runCatching { readerJpeg.setOnImageAvailableListener(null, null) }
+            engineScope.launch(Dispatchers.IO) {
+                var savedUri: Uri? = null
+                var callbackSent = false
+                try {
+                    val selected = tempFiles.getOrNull(bestIndex)?.takeIf { it.exists() && it.length() > 0 }
+                        ?: tempFiles.firstOrNull { it.exists() && it.length() > 0 }
+                    if (selected != null) savedUri = saveJpegBytesToMediaStore(selected.readBytes())
+
+                    photoCaptureInProgress.set(false)
+                    _isCapturing.value = false
+                    updateStorageStats()
+                    withContext(Dispatchers.Main) { onComplete(savedUri) }
+                    callbackSent = true
+
+                    if (savedUri != null) {
+                        runCatching {
+                            refocusEngine.processAndPersistPlanes(
+                                photoUri = savedUri!!,
+                                tempPlaneFiles = tempFiles,
+                                planeDiopters = focusPlanes.toList(),
+                                captureOrientation = captureOrientation,
+                                isFrontFacing = front,
+                                saveMirrored = saveSelfieAsPreviewed
+                            )
+                        }.onFailure { Log.w(TAG, "[REFOCUS] Depth bundle processing failed", it) }
+                    }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "[REFOCUS] Unable to save focus stack", t)
+                } finally {
+                    tempFiles.forEach { runCatching { it.delete() } }
+                    if (!callbackSent) {
+                        photoCaptureInProgress.set(false)
+                        _isCapturing.value = false
+                        updateStorageStats()
+                        withContext(Dispatchers.Main) { onComplete(savedUri) }
+                    }
+                }
+            }
+        }
+
+        readerJpeg.setOnImageAvailableListener({ reader ->
+            val image = runCatching { reader.acquireNextImage() }.getOrNull()
+                ?: return@setOnImageAvailableListener
+            val bytes = try {
+                val buffer = image.planes.firstOrNull()?.buffer
+                    ?: throw IllegalStateException("Missing focus-plane JPEG")
+                ByteArray(buffer.remaining()).also { buffer.get(it) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "[REFOCUS] Failed to read focus plane", t)
+                image.close()
+                return@setOnImageAvailableListener
+            }
+            image.close()
+            val index = frameCount.getAndIncrement()
+            if (index < tempFiles.size) {
+                runCatching { tempFiles[index].writeBytes(bytes) }
+                    .onFailure { Log.w(TAG, "[REFOCUS] Failed to cache focus frame", it) }
+            }
+            if (index >= tempFiles.lastIndex) finalizeRefocus()
+        }, backgroundHandler)
+
+        try {
+            val requests = focusPlanes.map { focusDistance ->
+                camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                    addTarget(readerJpeg.surface)
+                    applyCommonSettings(this, isStillCapture = true)
+                    set(CaptureRequest.JPEG_ORIENTATION, captureOrientation)
+                    set(CaptureRequest.JPEG_QUALITY, 98.toByte())
+                    set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                    set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDistance)
+                }.build()
+            }
+            session.captureBurst(requests, object : CameraCaptureSession.CaptureCallback() {}, backgroundHandler)
+            backgroundHandler?.postDelayed({ finalizeRefocus() }, 6500L)
+        } catch (t: Throwable) {
+            Log.e(TAG, "[REFOCUS] Burst failed; falling back to standard capture", t)
+            tempFiles.forEach { runCatching { it.delete() } }
+            photoCaptureInProgress.set(false)
+            _isCapturing.value = false
+            takePhotoStandard(onComplete)
+        }
+    }
+
     fun takePhoto(onComplete: (Uri?) -> Unit) {
+        if (currentMode == CameraMode.PHOTO) {
+            if (photoMegapixelMode == PhotoMegapixelMode.M50) {
+                takePhoto50M(onComplete)
+                return
+            }
+            if (isRefocusPhotoEnabled) {
+                takePhotoRefocus(onComplete)
+                return
+            }
+            if (preferences.autoHdrEnabled) {
+                val lens = _selectedLens.value
+                val plan = photoHdrEngine.planCapture(
+                    chars = lens?.let { getCharacteristics(it.cameraId) },
+                    lastResult = lastCaptureResult,
+                    flashMode = flashMode,
+                    stats = latestLuminanceStats,
+                    gyroEngine = gyroStabilizationEngine
+                )
+                if (plan.bracketType != com.example.camera.engine.hdr.HdrBracketType.SINGLE_FRAME) {
+                    takePhotoHdrBurst(plan, onComplete)
+                    return
+                }
+            }
+        }
+        takePhotoStandard(onComplete)
+    }
+
+    private fun takePhotoStandard(onComplete: (Uri?) -> Unit) {
         val camera = cameraDevice
         val session = captureSession
         val jpegReader = imageReaderJpeg
@@ -7823,10 +8451,6 @@ class Camera2Engine(private val context: Context) {
             Log.e(TAG, "Unable to start Special Photo capture", t)
             finishCapture(null)
         }
-    }
-
-    fun takePhoto50M(onComplete: (Uri?) -> Unit) {
-        onComplete(null)
     }
 
     fun captureStillBitmap(onBitmapCaptured: (Bitmap?) -> Unit) {
@@ -10779,10 +11403,85 @@ class Camera2Engine(private val context: Context) {
         }
     }
 
-    private fun processPhotoWithCustomPipeline(jpegBytes: ByteArray): Pair<ByteArray, Boolean> {
-        return Pair(jpegBytes, false)
+    suspend fun reprocessLatestPipelineCapture(
+        params: com.example.camera.pipeline.model.CustomPipelineParams,
+        preset: com.example.camera.pipeline.model.PipelinePreset
+    ): Uri? = withContext(Dispatchers.IO) {
+        val capture = com.example.camera.pipeline.engine.PipelineCaptureCache.getCapture() ?: return@withContext null
+        if (capture.fullResBitmap.isRecycled) return@withContext null
+        try {
+            val bytes = customImagePipelineEngine.processAndEncodeToJpegBytes(
+                source = capture.fullResBitmap,
+                params = params,
+                jpegQuality = preferences.jpegQuality
+            )
+            val finalBytes = copyExifFromOriginal(
+                srcBytes = ByteArray(0),
+                dstBytes = bytes,
+                forceOrientationNormal = true
+            )
+            val uri = saveJpegBytesToMediaStore(finalBytes, skipPipeline = true, filePrefix = "VCAM_REPROCESS")
+            if (uri != null) {
+                capture.savedUri = uri
+                com.example.camera.pipeline.engine.PipelineCaptureCache.updateSavedUri(uri)
+            }
+            uri
+        } catch (t: Throwable) {
+            Log.e(TAG, "Unable to reprocess cached photo", t)
+            null
+        }
     }
 
+    private fun processPhotoWithCustomPipeline(jpegBytes: ByteArray): Pair<ByteArray, Boolean> {
+        try {
+            val preset = preferences.getActivePipelinePreset()
+            val params = preferences.getPipelineParams(preset.id)
+            val lens = _selectedLens.value
+            val front = lens?.facing == CameraCharacteristics.LENS_FACING_FRONT
+            val source = decodeUprightBitmapFromJpeg(
+                jpegBytes = jpegBytes,
+                captureOrientation = getCaptureJpegOrientation(),
+                isFrontFacing = front,
+                mirrorHorizontally = front && saveSelfieAsPreviewed,
+                mutable = true
+            ) ?: return Pair(jpegBytes, false)
+
+            val processed = runBlocking(Dispatchers.Default) {
+                customImagePipelineEngine.processAndEncodeToJpegBytes(
+                    source = source,
+                    params = params,
+                    jpegQuality = preferences.jpegQuality
+                )
+            }
+            val maxDimension = max(source.width, source.height)
+            val scale = (1080f / maxDimension).coerceAtMost(1f)
+            val preview = if (scale < 0.95f) {
+                Bitmap.createScaledBitmap(
+                    source,
+                    (source.width * scale).roundToInt().coerceAtLeast(1),
+                    (source.height * scale).roundToInt().coerceAtLeast(1),
+                    true
+                )
+            } else {
+                source.copy(Bitmap.Config.ARGB_8888, true)
+            }
+            com.example.camera.pipeline.engine.PipelineCaptureCache.setCapture(
+                com.example.camera.pipeline.engine.PipelineCaptureSource(
+                    fullResBitmap = source,
+                    previewBitmap = preview,
+                    orientationDegrees = 0,
+                    isFrontFacing = front,
+                    lensInfo = lens,
+                    appliedPreset = preset,
+                    appliedParams = params
+                )
+            )
+            return Pair(copyExifFromOriginal(jpegBytes, processed, forceOrientationNormal = true), true)
+        } catch (t: Throwable) {
+            Log.e(TAG, "Custom photo pipeline failed; preserving the original JPEG", t)
+            return Pair(jpegBytes, false)
+        }
+    }
     private fun copyExifFromOriginal(
         srcBytes: ByteArray,
         dstBytes: ByteArray,
@@ -10816,14 +11515,18 @@ class Camera2Engine(private val context: Context) {
         var effectiveBytes = bytes
         var wasProcessingApplied = false
 
-        // Video-only camera: still pipeline bypassed
+        if (!skipPipeline && currentMode == CameraMode.PHOTO && preferences.isCustomPipelineEnabled) {
+            val (pipelineBytes, applied) = processPhotoWithCustomPipeline(effectiveBytes)
+            effectiveBytes = pipelineBytes
+            if (applied) wasProcessingApplied = true
+        }
 
         val activeLens = _selectedLens.value
         val isFrontFacing = activeLens?.facing == CameraCharacteristics.LENS_FACING_FRONT
         val captureOrientation = getCaptureJpegOrientation()
 
         val isProAdjusted = (proSaturation.value != 0f || proContrast.value != 1.0f || proHighlights.value != 0f || proShadows.value != 0f)
-        val needsColorProcessing = !skipPipeline && isProAdjusted
+        val needsColorProcessing = !skipPipeline && (isProAdjusted || (currentMode == CameraMode.PHOTO && selectedPhotoFilter != PhotoFilter.ORIGINAL))
 
         // Check whether effectiveBytes still needs physical rotation or front-camera mirroring
         val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -10874,9 +11577,15 @@ class Camera2Engine(private val context: Context) {
                         rawBitmap
                     }
 
-                    // Apply filter and Pro image adjustments if active
+                    // Apply the selected Oppo photo look and VCamera Pro controls to the final still.
                     val colorMatrix = android.graphics.ColorMatrix()
                     var hasColorTransform = false
+                    if (!skipPipeline && currentMode == CameraMode.PHOTO) {
+                        selectedPhotoFilter.toAndroidColorMatrix()?.let { filterMatrix ->
+                            colorMatrix.postConcat(filterMatrix)
+                            hasColorTransform = true
+                        }
+                    }
                     if (needsColorProcessing) {
                         if (proSaturation.value != 0f) {
                             val satMat = android.graphics.ColorMatrix().apply {
@@ -11357,6 +12066,11 @@ class Camera2Engine(private val context: Context) {
     }
 
     fun release() {
+        runCatching { stopUltraFastContinuousCapture() }
+        runCatching { gyroStabilizationEngine.stop() }
+        // Stop the burst worker pool and its Camera2 ImageReader callback thread, not just reset its counters.
+        runCatching { ultraFastShutterEngine.release() }
+        runCatching { com.example.camera.pipeline.engine.PipelineCaptureCache.clear() }
         try {
             physicalOrientationEventListener?.disable()
             physicalOrientationEventListener = null

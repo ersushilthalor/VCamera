@@ -60,6 +60,7 @@ import android.graphics.Bitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.camera.model.CameraMode
+import com.example.camera.model.PhotoFilter
 import com.example.camera.model.CinemaColorProfile
 import com.example.camera.model.CinemaConfig
 import com.example.camera.model.CinematicLut
@@ -88,6 +89,7 @@ fun Viewfinder(
     /** Buffer geometry for the separately streaming ultra-wide preview layer. */
     ultraWidePreviewBufferSize: CameraSize? = null,
     sensorOrientation: Int = 90,
+    activePhotoFilter: PhotoFilter? = null,
     activeLut: CinematicLut? = null,
     isLutPreviewEnabled: Boolean = false,
     cinemaConfig: CinemaConfig? = null,
@@ -488,6 +490,7 @@ fun Viewfinder(
                             textureView = textureView,
                             viewfinderCornerRadiusDp = viewfinderCornerRadiusDp,
                             cameraMode = cameraMode,
+                            activePhotoFilter = activePhotoFilter,
                             activeLut = activeLut,
                             cinemaConfig = cinemaConfig,
                             videoAdjustments = videoAdjustments,
@@ -643,6 +646,7 @@ fun Viewfinder(
                                 textureView = textureView,
                                 viewfinderCornerRadiusDp = viewfinderCornerRadiusDp,
                                 cameraMode = cameraMode,
+                                activePhotoFilter = activePhotoFilter,
                                 activeLut = activeLut,
                                 cinemaConfig = cinemaConfig,
                                 videoAdjustments = videoAdjustments,
@@ -1066,6 +1070,7 @@ internal fun updateTextureViewTransform(
 
 private data class TextureViewEffectCacheKey(
     val cameraMode: CameraMode,
+    val activePhotoFilter: PhotoFilter?,
     val activeLut: CinematicLut?,
     val cinemaConfig: CinemaConfig?,
     val videoAdjustments: com.example.camera.model.VideoAdjustments?,
@@ -1083,6 +1088,7 @@ private fun applyTextureViewOutlineAndEffects(
     textureView: TextureView,
     viewfinderCornerRadiusDp: Int,
     cameraMode: CameraMode,
+    activePhotoFilter: PhotoFilter?,
     activeLut: CinematicLut?,
     cinemaConfig: CinemaConfig?,
     videoAdjustments: com.example.camera.model.VideoAdjustments?,
@@ -1115,6 +1121,7 @@ private fun applyTextureViewOutlineAndEffects(
 
     val currentKey = TextureViewEffectCacheKey(
         cameraMode = cameraMode,
+        activePhotoFilter = activePhotoFilter,
         activeLut = activeLut,
         cinemaConfig = cinemaConfig,
         videoAdjustments = videoAdjustments,
@@ -1159,9 +1166,11 @@ private fun applyTextureViewOutlineAndEffects(
         }
     } else {
         val hasProAdj = (proSaturation != 0f || proContrast != 1.0f || proHighlights != 0f || proShadows != 0f)
-
-        if (hasProAdj) {
+        val photoFilterMatrix = if (cameraMode == CameraMode.PHOTO) activePhotoFilter?.toAndroidColorMatrix() else null
+        val hasPhotoFilter = photoFilterMatrix != null
+        if (hasProAdj || hasPhotoFilter) {
             val combinedMatrix = android.graphics.ColorMatrix()
+            if (hasPhotoFilter) combinedMatrix.postConcat(photoFilterMatrix!!)
             if (hasProAdj) {
                 val sat = (1.0f + proSaturation).coerceIn(0f, 2.5f)
                 if (sat != 1.0f) {

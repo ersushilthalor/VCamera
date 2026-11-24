@@ -149,6 +149,7 @@ fun TopControlBar(
     videoQuality: VideoQualityOption = VideoQualityOption.UHD_4K_30,
     videoResolution: CameraResolution? = null,
     videoFps: Int = 30,
+    photoMegapixelMode: PhotoMegapixelMode = PhotoMegapixelMode.M12,
     cinemaConfig: CinemaConfig = CinemaConfig(),
     isAudioEnabled: Boolean = true,
     onAudioToggle: () -> Unit = {},
@@ -288,7 +289,30 @@ fun TopControlBar(
 
         val primaryBadge = @Composable {
             when (cameraMode) {
-                CameraMode.PHOTO -> {}
+                CameraMode.PHOTO -> {
+                    if (photoMegapixelMode == PhotoMegapixelMode.M50) {
+                        Box(
+                            modifier = Modifier
+                                .height(34.dp)
+                                .clip(RoundedCornerShape(17.dp))
+                                .background(accentColor.copy(alpha = 0.2f))
+                                .border(1.dp, accentColor, RoundedCornerShape(17.dp))
+                                .clickable { onToggleMegapixelMode() }
+                                .padding(horizontal = 12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = photoMegapixelMode.label,
+                                color = accentColor,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.5.sp,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+                }
                 CameraMode.VIDEO -> {
                     val resLabel = when {
                         videoResolution?.width == 3840 || videoResolution?.height == 3840 -> "4K"
@@ -327,7 +351,28 @@ fun TopControlBar(
 
         val secondaryBadge = @Composable {
             when (cameraMode) {
-                CameraMode.PHOTO -> {}
+                CameraMode.PHOTO -> {
+                    Box(
+                        modifier = Modifier
+                            .height(34.dp)
+                            .clip(RoundedCornerShape(17.dp))
+                            .background(if (isRawEnabled) accentColor.copy(alpha = 0.2f) else Color(0xB21A1A1E))
+                            .border(1.dp, if (isRawEnabled) accentColor else Color.White.copy(alpha = 0.22f), RoundedCornerShape(17.dp))
+                            .clickable { onRawClick() }
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "RAW",
+                            color = if (isRawEnabled) accentColor else Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.5.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
                 CameraMode.VIDEO -> {
                     Box(
                         modifier = Modifier
@@ -594,7 +639,7 @@ fun TopControlBar(
                     TopControlItem.TIMER -> timerAudioButton()
                     TopControlItem.GRID -> gridAssistButton()
                     TopControlItem.RESOLUTION -> {
-                        if (true) {
+                        if (cameraMode != CameraMode.PHOTO || photoMegapixelMode == PhotoMegapixelMode.M50) {
                             primaryBadge()
                         }
                     }

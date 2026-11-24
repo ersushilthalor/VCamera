@@ -48,6 +48,7 @@ import kotlin.math.roundToInt
  * Dedicated Settings Pages.
  */
 enum class SettingsPage(val title: String, val subtitle: String, val icon: ImageVector) {
+    PHOTO("Photo Settings", "Resolution, HDR, RAW, burst, filters & refocus", Icons.Outlined.CameraAlt),
     VIDEO("Video Settings", "Resolution, Frame Rate, Codec & Bitrate", Icons.Outlined.Videocam),
     CINEMA("Pro Video Settings", "Resolution, FPS, Bitrate, Codec, Noise Reduction, Sharpness, Log & LUTs", Icons.Outlined.Movie),
     PRO_MANUAL("Pro / Manual Settings", "ISO, Shutter, Focus, WB & Video Pipeline", Icons.Outlined.Tune),
@@ -119,6 +120,16 @@ fun SettingsDrawer(
     viewfinderFps: Int = 60,
     thermalProtection: Boolean = true,
     isAutoHdrEnabled: Boolean = true,
+    photoMegapixelMode: PhotoMegapixelMode = PhotoMegapixelMode.M12,
+    onPhotoMegapixelModeSelected: (PhotoMegapixelMode) -> Unit = {},
+    isRefocusPhotoEnabled: Boolean = false,
+    onRefocusPhotoToggle: (Boolean) -> Unit = {},
+    isUltraFastShutterEnabled: Boolean = false,
+    onUltraFastShutterToggle: (Boolean) -> Unit = {},
+    ultraFastShutterFps: Int = 15,
+    onUltraFastShutterFpsChange: (Int) -> Unit = {},
+    selectedPhotoFilter: PhotoFilter = PhotoFilter.ORIGINAL,
+    onPhotoFilterSelected: (PhotoFilter) -> Unit = {},
     isAiAutoFramingEnabled: Boolean = false,
     currentZoom: Float = 1.0f,
     exposureCompensation: Int = 0,
@@ -296,7 +307,27 @@ fun SettingsDrawer(
                 } else {
                     // 2. Dedicated Sub-Pages
                     when (targetPage) {
-                                                SettingsPage.VIDEO -> VideoSettingsPage(
+                        SettingsPage.PHOTO -> PhotoSettingsPage(
+                            isAutoHdrEnabled = isAutoHdrEnabled,
+                            onAutoHdrToggle = onAutoHdrToggle,
+                            photoMegapixelMode = photoMegapixelMode,
+                            onPhotoMegapixelModeSelected = onPhotoMegapixelModeSelected,
+                            isRawEnabled = isRawEnabled,
+                            onRawToggle = { onRawToggle() },
+                            saveSelfieAsPreviewed = saveSelfieAsPreviewed,
+                            onSaveSelfieAsPreviewedToggle = onSaveSelfieAsPreviewedToggle,
+                            isRefocusPhotoEnabled = isRefocusPhotoEnabled,
+                            onRefocusPhotoToggle = onRefocusPhotoToggle,
+                            isUltraFastShutterEnabled = isUltraFastShutterEnabled,
+                            onUltraFastShutterToggle = onUltraFastShutterToggle,
+                            ultraFastShutterFps = ultraFastShutterFps,
+                            onUltraFastShutterFpsChange = onUltraFastShutterFpsChange,
+                            jpegQuality = jpegQuality,
+                            onJpegQualitySelected = onJpegQualitySelected,
+                            selectedPhotoFilter = selectedPhotoFilter,
+                            onPhotoFilterSelected = onPhotoFilterSelected
+                        )
+                        SettingsPage.VIDEO -> VideoSettingsPage(
                             selectedVideoResolution = selectedVideoResolution,
                             onVideoResolutionSelected = onVideoResolutionSelected,
                             capabilities = capabilities,
@@ -459,6 +490,17 @@ private fun SettingsOverviewPage(
         verticalArrangement = Arrangement.spacedBy(0.dp),
         contentPadding = PaddingValues(bottom = 24.dp)
     ) {
+        item {
+            ReferenceSettingsGroup("Photo") {
+                ReferenceNavigationRow(
+                    title = "Photo settings",
+                    value = "HDR, 12/50 MP, RAW, filters, burst",
+                    onClick = { onSelectPage(SettingsPage.PHOTO) },
+                    showDivider = false
+                )
+            }
+        }
+
         item {
             ReferenceSettingsGroup("General") {
                 ReferenceChoiceRow(
@@ -843,6 +885,122 @@ private fun <T> ReferenceChoiceRow(
     }
 }
 
+
+
+@Composable
+private fun PhotoSettingsPage(
+    isAutoHdrEnabled: Boolean,
+    onAutoHdrToggle: (Boolean) -> Unit,
+    photoMegapixelMode: PhotoMegapixelMode,
+    onPhotoMegapixelModeSelected: (PhotoMegapixelMode) -> Unit,
+    isRawEnabled: Boolean,
+    onRawToggle: () -> Unit,
+    saveSelfieAsPreviewed: Boolean,
+    onSaveSelfieAsPreviewedToggle: (Boolean) -> Unit,
+    isRefocusPhotoEnabled: Boolean,
+    onRefocusPhotoToggle: (Boolean) -> Unit,
+    isUltraFastShutterEnabled: Boolean,
+    onUltraFastShutterToggle: (Boolean) -> Unit,
+    ultraFastShutterFps: Int,
+    onUltraFastShutterFpsChange: (Int) -> Unit,
+    jpegQuality: Int,
+    onJpegQualitySelected: (Int) -> Unit,
+    selectedPhotoFilter: PhotoFilter,
+    onPhotoFilterSelected: (PhotoFilter) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            SettingsSwitchCard(
+                title = "Auto HDR",
+                description = "Bracket exposures and recover highlight and shadow detail for high-contrast scenes.",
+                isChecked = isAutoHdrEnabled,
+                onCheckedChange = onAutoHdrToggle,
+                tag = "toggle_auto_hdr"
+            )
+        }
+        item {
+            SettingsSegmentedCard(
+                title = "Photo resolution mode",
+                description = "12 MP standard output or the camera sensor's native maximum-resolution stream.",
+                options = listOf(
+                    PhotoMegapixelMode.M12 to "12 MP",
+                    PhotoMegapixelMode.M50 to "50 MP"
+                ),
+                selectedOption = photoMegapixelMode,
+                onOptionSelected = onPhotoMegapixelModeSelected
+            )
+        }
+        item {
+            SettingsSwitchCard(
+                title = "RAW + JPEG",
+                description = "Save DNG sensor data alongside the processed JPEG when supported by the active lens.",
+                isChecked = isRawEnabled,
+                onCheckedChange = { onRawToggle() },
+                tag = "toggle_raw_capture"
+            )
+        }
+        item {
+            SettingsSwitchCard(
+                title = "Refocus multi-frame photo",
+                description = "Capture a three-plane focus stack and keep the refocus data with the photo.",
+                isChecked = isRefocusPhotoEnabled,
+                onCheckedChange = onRefocusPhotoToggle,
+                tag = "toggle_refocus_photo"
+            )
+        }
+        item {
+            SettingsSwitchCard(
+                title = "Ultra-fast shutter burst",
+                description = "Hold the photo shutter to collect a continuous high-speed burst.",
+                isChecked = isUltraFastShutterEnabled,
+                onCheckedChange = onUltraFastShutterToggle,
+                tag = "toggle_fast_shutter"
+            )
+        }
+        if (isUltraFastShutterEnabled) {
+            item {
+                SettingsSegmentedCard(
+                    title = "Burst frame rate",
+                    description = "Target rate for the continuous YUV capture stream.",
+                    options = listOf(10 to "10 FPS", 15 to "15 FPS", 20 to "20 FPS"),
+                    selectedOption = ultraFastShutterFps,
+                    onOptionSelected = onUltraFastShutterFpsChange
+                )
+            }
+        }
+        item {
+            SettingsSegmentedCard(
+                title = "JPEG quality",
+                description = "Compression quality for processed photo output.",
+                options = listOf(90 to "90%", 95 to "95%", 98 to "98%", 100 to "100%"),
+                selectedOption = jpegQuality,
+                onOptionSelected = onJpegQualitySelected
+            )
+        }
+        item {
+            SettingsSegmentedCard(
+                title = "Photo look",
+                description = "Select the default filter applied to the live preview and saved JPEG.",
+                options = PhotoFilter.values().map { it to it.displayName },
+                selectedOption = selectedPhotoFilter,
+                onOptionSelected = onPhotoFilterSelected
+            )
+        }
+        item {
+            SettingsSwitchCard(
+                title = "Save selfie as previewed",
+                description = "Keep the saved front-camera photo mirrored like the preview.",
+                isChecked = saveSelfieAsPreviewed,
+                onCheckedChange = onSaveSelfieAsPreviewedToggle,
+                tag = "toggle_save_selfie"
+            )
+        }
+    }
+}
 
 @Composable
 private fun VideoSettingsPage(
@@ -2975,6 +3133,11 @@ fun CameraSettingsScreen(
     val viewfinderFps by viewModel.viewfinderFps.collectAsStateWithLifecycle()
     val thermalProtection by viewModel.thermalProtection.collectAsStateWithLifecycle()
     val isAutoHdrEnabled by viewModel.isAutoHdrEnabled.collectAsStateWithLifecycle()
+    val photoMegapixelMode by viewModel.photoMegapixelMode.collectAsStateWithLifecycle()
+    val isRefocusPhotoEnabled by viewModel.isRefocusPhotoEnabled.collectAsStateWithLifecycle()
+    val isUltraFastShutterEnabled by viewModel.isUltraFastShutterEnabled.collectAsStateWithLifecycle()
+    val ultraFastShutterFps by viewModel.ultraFastShutterFps.collectAsStateWithLifecycle()
+    val selectedPhotoFilter by viewModel.selectedPhotoFilter.collectAsStateWithLifecycle()
     val isAiAutoFramingEnabled by viewModel.isAiAutoFramingEnabled.collectAsStateWithLifecycle()
     val currentZoom by viewModel.currentZoom.collectAsStateWithLifecycle()
     val exposureCompensation by viewModel.exposureCompensation.collectAsStateWithLifecycle()
@@ -3039,6 +3202,16 @@ fun CameraSettingsScreen(
         viewfinderFps = viewfinderFps,
         thermalProtection = thermalProtection,
         isAutoHdrEnabled = isAutoHdrEnabled,
+        photoMegapixelMode = photoMegapixelMode,
+        onPhotoMegapixelModeSelected = { viewModel.setPhotoMegapixelMode(it) },
+        isRefocusPhotoEnabled = isRefocusPhotoEnabled,
+        onRefocusPhotoToggle = { viewModel.setRefocusPhotoEnabled(it) },
+        isUltraFastShutterEnabled = isUltraFastShutterEnabled,
+        onUltraFastShutterToggle = { viewModel.setUltraFastShutterEnabled(it) },
+        ultraFastShutterFps = ultraFastShutterFps,
+        onUltraFastShutterFpsChange = { viewModel.setUltraFastShutterFps(it) },
+        selectedPhotoFilter = selectedPhotoFilter,
+        onPhotoFilterSelected = { viewModel.setPhotoFilter(it) },
         isAiAutoFramingEnabled = isAiAutoFramingEnabled,
         currentZoom = currentZoom,
         exposureCompensation = exposureCompensation,
