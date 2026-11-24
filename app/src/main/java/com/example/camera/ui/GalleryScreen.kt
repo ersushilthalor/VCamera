@@ -46,7 +46,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -109,7 +108,7 @@ internal fun calculateGalleryLensSwitchZoomScale(
     return if (transitionFromUltraWide) 1f + normalizedProgress else 2f - normalizedProgress
 }
 
-private val galleryBackground = Color(0xFF0D1413)
+private val galleryBackground = Color(0xFF151515)
 private val galleryAccent = Color(0xFF71F0E5)
 
 private data class GalleryMediaSection(
@@ -173,12 +172,11 @@ private fun applyGalleryVideoZoom(view: TextureView, state: GalleryPlayerState, 
 }
 
 @Composable
-fun MediaGalleryDialog(
+fun GalleryScreen(
     videos: List<MediaGalleryItem>,
     hasMediaPermission: Boolean,
     onRequestMediaPermission: () -> Unit,
-    onDismiss: () -> Unit,
-    onOpenSystemGallery: () -> Unit
+    onDismiss: () -> Unit
 ) {
     var selectedMedia by remember { mutableStateOf<MediaGalleryItem?>(null) }
 
@@ -202,8 +200,7 @@ fun MediaGalleryDialog(
                     hasMediaPermission = hasMediaPermission,
                     onRequestMediaPermission = onRequestMediaPermission,
                     onMediaSelected = { selectedMedia = it },
-                    onDismiss = onDismiss,
-                    onOpenSystemGallery = onOpenSystemGallery
+                    onDismiss = onDismiss
                 )
             } else {
                 MediaGalleryItemViewer(
@@ -222,8 +219,7 @@ private fun MediaGridScreen(
     hasMediaPermission: Boolean,
     onRequestMediaPermission: () -> Unit,
     onMediaSelected: (MediaGalleryItem) -> Unit,
-    onDismiss: () -> Unit,
-    onOpenSystemGallery: () -> Unit
+    onDismiss: () -> Unit
 ) {
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
@@ -233,8 +229,7 @@ private fun MediaGridScreen(
     val filteredVideos = videos
         .filter {
             searchQuery.isBlank() ||
-                it.displayName.contains(searchQuery, ignoreCase = true) ||
-                (it.isVCameraRecording && "VCamera".contains(searchQuery, ignoreCase = true))
+                it.displayName.contains(searchQuery, ignoreCase = true)
         }
         .let { list -> if (oldestFirst) list.sortedBy { it.timestamp } else list.sortedByDescending { it.timestamp } }
 
@@ -269,22 +264,19 @@ private fun MediaGridScreen(
                 .padding(start = 18.dp, end = 8.dp, top = 20.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "Media",
-                color = Color.White,
-                fontSize = 34.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.weight(1f)
-            )
+            IconButton(onClick = onDismiss) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+            }
+            Spacer(modifier = Modifier.weight(1f))
             IconButton(onClick = {
                 searchOpen = !searchOpen
                 if (!searchOpen) searchQuery = ""
             }) {
-                Icon(Icons.Filled.Search, contentDescription = "Search videos", tint = Color.White)
+                Icon(Icons.Filled.Search, contentDescription = "Search photos and videos", tint = Color.White)
             }
             Box {
                 IconButton(onClick = { settingsExpanded = true }) {
-                    Icon(Icons.Filled.Settings, contentDescription = "Gallery settings", tint = Color.White)
+                    Icon(Icons.Filled.FilterList, contentDescription = "Sort media", tint = Color.White)
                 }
                 DropdownMenu(
                     expanded = settingsExpanded,
@@ -295,20 +287,6 @@ private fun MediaGridScreen(
                         onClick = {
                             oldestFirst = !oldestFirst
                             settingsExpanded = false
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Open system gallery") },
-                        onClick = {
-                            settingsExpanded = false
-                            onOpenSystemGallery()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Close media") },
-                        onClick = {
-                            settingsExpanded = false
-                            onDismiss()
                         }
                     )
                 }
@@ -323,7 +301,7 @@ private fun MediaGridScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 4.dp),
                 singleLine = true,
-                placeholder = { Text("Search VCamera media") },
+                placeholder = { Text("Search photos and videos") },
                 colors = TextFieldDefaults.colors(
                     focusedContainerColor = Color(0xFF1B2624),
                     unfocusedContainerColor = Color(0xFF1B2624),
@@ -356,7 +334,7 @@ private fun MediaGridScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    "VCamera uses media access to show photos and videos saved by this app.",
+                    "Allow access to show photos and videos stored on your device.",
                     color = Color.White.copy(alpha = 0.72f),
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(top = 10.dp, bottom = 18.dp)
@@ -371,7 +349,7 @@ private fun MediaGridScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    if (videos.isEmpty()) "No VCamera photos or videos found yet." else "No VCamera media matches this search.",
+                    if (videos.isEmpty()) "No photos or videos found yet." else "No media matches this search.",
                     color = Color.White.copy(alpha = 0.75f)
                 )
             }
@@ -450,22 +428,6 @@ private fun GalleryMediaTile(
         } else {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(if (video.isVideo) "VIDEO" else "PHOTO", color = Color.White.copy(alpha = 0.7f), fontWeight = FontWeight.Bold)
-            }
-        }
-
-        if (video.isVCameraRecording) {
-            Surface(
-                modifier = Modifier.align(Alignment.TopStart).padding(5.dp),
-                color = Color(0xD9008F88),
-                shape = RoundedCornerShape(6.dp)
-            ) {
-                Text(
-                    "VCAM",
-                    color = Color.White,
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 3.dp)
-                )
             }
         }
 
@@ -1026,8 +988,8 @@ private fun MediaGalleryPlayer(
                 val subtitle = when {
                     hasLensPair && isUltraWide -> "Ultra-wide camera"
                     hasLensPair -> "Main camera"
-                    !video.isVideo -> "VCamera photo"
-                    else -> "VCamera recording"
+                    !video.isVideo -> "Photo"
+                    else -> "Recording"
                 }
                 Text(
                     subtitle,

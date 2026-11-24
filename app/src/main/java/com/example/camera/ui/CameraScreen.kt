@@ -225,13 +225,10 @@ fun CameraScreen(
     val isManualProOpen by viewModel.isManualProOpen.collectAsStateWithLifecycle()
     val activeProTab by viewModel.activeProTab.collectAsStateWithLifecycle()
     val isSettingsOpen by viewModel.isSettingsOpen.collectAsStateWithLifecycle()
-    val isGallerySelectionDialogOpen by viewModel.isGallerySelectionDialogOpen.collectAsStateWithLifecycle()
-    val preferredGalleryPackage by viewModel.preferredGalleryPackage.collectAsStateWithLifecycle()
     val focusRingPoint by viewModel.focusRingPoint.collectAsStateWithLifecycle()
     val toastMessage by viewModel.toastMessage.collectAsStateWithLifecycle()
-    val specialVideoClips by viewModel.specialVideoClips.collectAsStateWithLifecycle()
     val mediaGalleryItems by viewModel.mediaGalleryItems.collectAsStateWithLifecycle()
-    val isSpecialVideoGalleryOpen by viewModel.isSpecialVideoGalleryOpen.collectAsStateWithLifecycle()
+    val isGalleryOpen by viewModel.isGalleryOpen.collectAsStateWithLifecycle()
     val isSpecialPhotoEnabled by viewModel.isSpecialPhotoEnabled.collectAsStateWithLifecycle()
     var isQuickOptionsOpen by rememberSaveable { mutableStateOf(false) }
 
@@ -264,18 +261,17 @@ fun CameraScreen(
         }
     }
 
-    if (isSpecialVideoGalleryOpen) {
+    if (isGalleryOpen) {
         BackHandler {
-            viewModel.closeSpecialVideoGallery()
+            viewModel.closeGallery()
         }
-        MediaGalleryDialog(
+        GalleryScreen(
             videos = mediaGalleryItems,
             hasMediaPermission = hasMediaPermission,
             onRequestMediaPermission = {
                 mediaPermissionLauncher.launch(mediaPermissions)
             },
-            onDismiss = { viewModel.closeSpecialVideoGallery() },
-            onOpenSystemGallery = { viewModel.openSystemGallery(context) }
+            onDismiss = { viewModel.closeGallery() }
         )
     }
 
@@ -366,7 +362,7 @@ fun CameraScreen(
     val isAnyWindowOpen = isCinemaSettingsOpen || isLogProfileWindowOpen || isLutWindowOpen ||
             isManualProOpen ||
             isVideoSettingsPanelOpen ||
-            isVideoAdjustmentsOpen || isSettingsOpen || isGallerySelectionDialogOpen || isSpecialVideoGalleryOpen ||
+            isVideoAdjustmentsOpen || isSettingsOpen || isGalleryOpen ||
             isCustomUiStudioOpen ||
             isQuickOptionsOpen
 
@@ -999,7 +995,7 @@ fun CameraScreen(
             },
             onFlipCameraClick = { viewModel.toggleCameraFacing() },
             onGalleryClick = {
-                viewModel.openGallery(context)
+                viewModel.openGallery()
             },
             onCinemaModeClick = { viewModel.toggleCinemaSettings() },
             onSettingsClick = { viewModel.setSettingsOpen(true) },
@@ -1034,33 +1030,12 @@ fun CameraScreen(
                         viewModel.setSettingsOpen(false)
                         isCustomUiStudioOpen = true
                     },
-                    onOpenGalleryChooser = {
-                        viewModel.setGallerySelectionDialogOpen(true)
-                    },
                     onDismiss = {
                         viewModel.setSettingsOpen(false)
                     }
                 )
             }
         }
-
-        // 7. Preferred Gallery App Selection Dialog
-        com.example.camera.gallery.GallerySelectionDialog(
-            isOpen = isGallerySelectionDialogOpen,
-            currentPreferredPackage = preferredGalleryPackage,
-            onAppSelected = { pkg ->
-                viewModel.setPreferredGalleryPackage(pkg)
-                if (lastCapturedMedia != null) {
-                    com.example.camera.gallery.GalleryLauncher.openMedia(
-                        context = context,
-                        uri = lastCapturedMedia!!.uri,
-                        isVideo = lastCapturedMedia!!.isVideo,
-                        preferredPackage = pkg
-                    )
-                }
-            },
-            onDismiss = { viewModel.setGallerySelectionDialogOpen(false) }
-        )
 
         // 8. Dedicated Custom UI Studio & Simulator Page
         if (isCustomUiStudioOpen) {
